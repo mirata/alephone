@@ -118,6 +118,9 @@ find_line_crossed leaving polygon could be sped up considerable by reversing the
 #include "Console.h"
 #include "InfoTree.h"
 #include "flood_map.h"
+#if defined(__ANDROID__)
+#include "vr_openxr.h"
+#endif
 
 #include <string.h>
 #include <stdlib.h>
@@ -2641,7 +2644,13 @@ void _sound_add_ambient_sources_proc(
 		short index;
 		
 		// add ambient sound image
-		if (media && listener->point.z<media->height)
+#if defined(__ANDROID__)
+		// In VR the player can physically crouch below a liquid surface; add the head Z offset.
+		world_distance listener_z = listener->point.z + (VR_IsActive() ? (world_distance)VR_GetEyeZOffset() : 0);
+#else
+		world_distance listener_z = listener->point.z;
+#endif
+		if (media && listener_z < media->height)
 		{
 			// if we’re under media don’t play the ambient sound image
 			add_one_ambient_sound_source((struct ambient_sound_data *)data, (world_location3d *) NULL, listener,

@@ -166,6 +166,9 @@ May 22, 2003 (Woody Zenfell):
 #include "ChaseCam.h"
 #include "Packing.h"
 #include "network.h"
+#if defined(__ANDROID__)
+#include "vr_openxr.h"
+#endif
 
 // ZZZ additions:
 #include "ActionQueues.h"
@@ -1531,6 +1534,19 @@ static void update_player_media(
 				world_distance media_height= (media_index==NONE || !media) ? INT16_MIN : media->height;
 				under_media = (cam_pos.z < media_height);
 			}
+#if defined(__ANDROID__)
+			// In VR the player can physically crouch to dip their head below a liquid surface.
+			// Re-check using the VR head Z (body camera_location.z + physical crouch offset).
+			if (VR_IsActive())
+			{
+				media_data *media_vr = (media_index != NONE) ? get_media_data(media_index) : nullptr;
+				if (media_vr)
+				{
+					world_distance eye_z = player->camera_location.z + (world_distance)VR_GetEyeZOffset();
+					under_media = (eye_z < media_vr->height);
+				}
+			}
+#endif
 			set_fade_effect(under_media ? get_media_submerged_fade_effect(media_index) : NONE);
 		}
 	
@@ -1556,6 +1572,31 @@ static void update_player_media(
 			// head leaving media sound
 			if (!(player->variables.flags&_HEAD_BELOW_MEDIA_BIT) && (player->variables.old_flags&_HEAD_BELOW_MEDIA_BIT)) sound_type= _media_snd_head_leaving;
 			}
+#if defined(__ANDROID__)
+			// VR physical crouch: detect head crossing the media boundary independently of physics,
+			// since physics never sees the player physically duck. Only fire when physics isn't
+			// already handling the head transition (to avoid double-playing the sound).
+			if (VR_IsActive() && player_index == current_player_index)
+			{
+				bool phys_head_under     = (player->variables.flags    & _HEAD_BELOW_MEDIA_BIT) != 0;
+				bool phys_head_was_under = (player->variables.old_flags & _HEAD_BELOW_MEDIA_BIT) != 0;
+				if (!phys_head_under && !phys_head_was_under)
+				{
+					media_data *media_vr = get_media_data(polygon->media_index);
+					if (media_vr)
+					{
+						static bool s_vr_head_was_under = false;
+						world_distance eye_z = player->camera_location.z + (world_distance)VR_GetEyeZOffset();
+						bool vr_head_under = (eye_z < media_vr->height);
+						if (vr_head_under && !s_vr_head_was_under)
+							sound_type = _media_snd_head_entering;
+						else if (!vr_head_under && s_vr_head_was_under)
+							sound_type = _media_snd_head_leaving;
+						s_vr_head_was_under = vr_head_under;
+					}
+				}
+			}
+#endif
 		}
 		else
 		{
