@@ -253,15 +253,30 @@ void FontSpecifier::OGL_Reset(bool IsStarting)
 		}
 	}
  	
- 	// Non-MacOS-specific: allocate the texture buffer
+ 	// Copy the SDL surface into the OpenGL texture
+	uint8 *PixBase = (uint8 *)FontSurface->pixels;
+	int Stride = FontSurface->pitch;
+
+#ifdef __ANDROID__
+	// GLES3 dropped GL_LUMINANCE_ALPHA; use GL_RGBA8 (R=G=B=white, A=glyph coverage).
+	OGL_Texture = new uint8[4*GetTxtrSize()];
+	for (int k=0; k<TxtrHeight; k++)
+	{
+		uint8 *SrcPxl = PixBase + k*Stride + 1;
+		uint8 *DstPxl = OGL_Texture + 4*k*TxtrWidth;
+		for (int m=0; m<TxtrWidth; m++)
+		{
+			*(DstPxl++) = 0xff;
+			*(DstPxl++) = 0xff;
+			*(DstPxl++) = 0xff;
+			*(DstPxl++) = *SrcPxl;
+			SrcPxl += 4;
+		}
+	}
+#else
  	// Its format is LA 88, where L is the luminosity and A is the alpha channel
  	// The font value will go into A.
  	OGL_Texture = new uint8[2*GetTxtrSize()];
-	
-	// Copy the SDL surface into the OpenGL texture
-	uint8 *PixBase = (uint8 *)FontSurface->pixels;
-	int Stride = FontSurface->pitch;
- 	
  	for (int k=0; k<TxtrHeight; k++)
  	{
  		uint8 *SrcPxl = PixBase + k*Stride + 1;	// Use one of the middle channels (red or green or blue)
@@ -273,31 +288,63 @@ void FontSpecifier::OGL_Reset(bool IsStarting)
  			SrcPxl += 4;
   		}
  	}
-	
+#endif
+
 	// Clean up
 	SDL_FreeSurface(FontSurface);
-	
-	// OpenGL stuff starts here 	
+
+	// OpenGL stuff starts here
  	// Load texture
  	glGenTextures(1,&TxtrID);
  	glBindTexture(GL_TEXTURE_2D,TxtrID);
 	OGL_Register(this);
- 	
+
  	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, NearFilter);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+#ifdef __ANDROID__
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, TxtrWidth, TxtrHeight,
+		0, GL_RGBA, GL_UNSIGNED_BYTE, OGL_Texture);
+#else
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE_ALPHA, TxtrWidth, TxtrHeight,
 		0, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, OGL_Texture);
- 	
+#endif
+
 	glEnableClientState(GL_VERTEX_ARRAY);
 	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-	
- 	// Allocate and create display lists of rendering commands
- 	DispList = glGenLists(256);
+
  	GLfloat TWidNorm = GLfloat(1)/TxtrWidth;
  	GLfloat THtNorm = GLfloat(1)/TxtrHeight;
+
+#ifdef __ANDROID__
+	// GLES3 has no display lists; store per-glyph UV+geometry for direct drawing in OGL_Render.
+	memset(OGL_GlyphRects, 0, sizeof(OGL_GlyphRects));
+	for (int k=0; k<=LastLine; k++)
+	{
+		unsigned char Which = CharStarts[k];
+		GLfloat Top    = k * (THtNorm * GlyphHeight);
+		GLfloat Bottom = (k+1) * (THtNorm * GlyphHeight);
+		int Pos = 0;
+		for (int m=0; m<CharCounts[k]; m++)
+		{
+			short Width = widths_p[Which];
+			int NewPos = Pos + Width;
+			OGL_GlyphRects[Which].u0    = TWidNorm * Pos;
+			OGL_GlyphRects[Which].v0    = Top;
+			OGL_GlyphRects[Which].u1    = TWidNorm * NewPos;
+			OGL_GlyphRects[Which].v1    = Bottom;
+			OGL_GlyphRects[Which].drawW = Width;
+			OGL_GlyphRects[Which].drawY = -(float)ascent_p;
+			OGL_GlyphRects[Which].drawH = (float)GlyphHeight;
+			Pos = NewPos;
+			Which++;
+		}
+	}
+#else
+ 	// Allocate and create display lists of rendering commands
+ 	DispList = glGenLists(256);
  	for (int k=0; k<=LastLine; k++)
  	{
  		unsigned char Which = CharStarts[k];
@@ -310,26 +357,27 @@ void FontSpecifier::OGL_Reset(bool IsStarting)
  			int NewPos = Pos + Width;
  			GLfloat Left = TWidNorm*Pos;
  			GLfloat Right = TWidNorm*NewPos;
- 			
+
  			glNewList(DispList + Which, GL_COMPILE);
- 			
+
  			// Move to the current glyph's (padded) position
  			glTranslatef(-Pad,0,0);
- 			
+
  			// Draw the glyph rectangle
 			OGL_RenderTexturedRect(0, -ascent_p, Width, descent_p + ascent_p,
 								   Left, Top, Right, Bottom);
-			
+
 			// Move to the next glyph's position
 			glTranslated(Width-Pad,0,0);
-			
+
  			glEndList();
- 			
+
  			// For next one
  			Pos = NewPos;
  			Which++;
  		}
  	}
+#endif
 }
 
 
@@ -356,11 +404,28 @@ void FontSpecifier::OGL_Render(const char *Text)
 	glBindTexture(GL_TEXTURE_2D,TxtrID);
 	
 	size_t Len = MIN(strlen(Text),255);
+#ifdef __ANDROID__
+	// GLES3 has no display lists; draw each glyph directly using stored UV rects.
+	const int Pad = 1;
+	for (size_t k=0; k<Len; k++)
+	{
+		unsigned char c = Text[k];
+		const OGL_GlyphRect& g = OGL_GlyphRects[c];
+		if (g.drawW > 0)
+		{
+			glTranslatef(-Pad, 0, 0);
+			OGL_RenderTexturedRect(0, g.drawY, g.drawW, g.drawH,
+			                       g.u0, g.v0, g.u1, g.v1);
+			glTranslatef(g.drawW - Pad, 0, 0);
+		}
+	}
+#else
 	for (size_t k=0; k<Len; k++)
 	{
 		unsigned char c = Text[k];
 		glCallList(DispList+c);
 	}
+#endif
 	
 	glPopAttrib();
 }

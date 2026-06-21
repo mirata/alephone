@@ -133,6 +133,11 @@ public:
 	GLuint NearFilter = GL_LINEAR;
 	uint32 DispList;
 	static std::set<FontSpecifier*> *m_font_registry;
+#ifdef __ANDROID__
+	// GLES3 has no display lists; store per-glyph UV+geometry for direct drawing.
+	struct OGL_GlyphRect { float u0, v0, u1, v1, drawW, drawY, drawH; };
+	OGL_GlyphRect OGL_GlyphRects[256];
+#endif
 #endif
 };
 
