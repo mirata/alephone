@@ -1440,8 +1440,15 @@ void render_screen(short ticks_elapsed)
 	// Suppress the overhead map if desired
 	if (PLAYER_HAS_MAP_OPEN(current_player) && View_MapActive()) {
 		if (!world_view->overhead_map_active) {
-			set_overhead_map_status(true);
-			SwitchedModes = true;
+#if defined(__ANDROID__)
+			// In VR the map is a floating overlay -- the world keeps rendering underneath.
+			// Never set overhead_map_active; instead the VR block below renders into a map FBO.
+			if (!VR_IsActive())
+#endif
+			{
+				set_overhead_map_status(true);
+				SwitchedModes = true;
+			}
 		}
 	} else {
 		if (world_view->overhead_map_active) {
@@ -1596,24 +1603,64 @@ void render_screen(short ticks_elapsed)
 		software_render_dest = bitmap_definition_of_sdl_surface(world_pixels);
 	
 #if defined(__ANDROID__)
-	// VR: draw the 2D HUD (Lua plugin HUD or the classic OGL HUD) into the transparent head-locked HUD
-	// layer FBO BEFORE render_view (render_view runs the per-eye loop + frame submit, and composites
-	// this layer into each eye via VR_PresentHudEye). Must happen here while the engine's 2D GL state
-	// is set up the same way the on-screen HUD expects.
-	if (VR_IsActive() && !world_view->overhead_map_active && !world_view->terminal_mode_active)
+	// VR: draw the 2D HUD and (optionally) the overhead map into their respective head-locked FBOs
+	// BEFORE render_view. render_view runs the per-eye loop + frame submit, and composites these
+	// layers via VR_PresentHudEye / VR_PresentMapEye. The world always renders underneath both.
+	if (VR_IsActive() && !world_view->terminal_mode_active)
 	{
-		glBindFramebuffer(GL_FRAMEBUFFER, VR_HudLayerFramebuffer());
-		glViewport(0, 0, VR_HudLayerWidth(), VR_HudLayerHeight());
-		glDisable(GL_SCISSOR_TEST);
-		glClearColor(0.f, 0.f, 0.f, 0.f);
-		glClear(GL_COLOR_BUFFER_BIT);
-		if (LuaHUDRunning())
-			Lua_DrawHUD(ticks_elapsed);
-		else
+		// HUD layer -- always refresh every frame (world is always visible in VR).
 		{
-			Rect dr = MakeRect(HUD_DestRect);
-			OGL_DrawHUD(dr, ticks_elapsed);
+			glBindFramebuffer(GL_FRAMEBUFFER, VR_HudLayerFramebuffer());
+			glViewport(0, 0, VR_HudLayerWidth(), VR_HudLayerHeight());
+			glDisable(GL_SCISSOR_TEST);
+			glClearColor(0.f, 0.f, 0.f, 0.f);
+			glClear(GL_COLOR_BUFFER_BIT);
+			if (LuaHUDRunning())
+				Lua_DrawHUD(ticks_elapsed);
+			else
+			{
+				Rect dr = MakeRect(HUD_DestRect);
+				OGL_DrawHUD(dr, ticks_elapsed);
+			}
 		}
+
+		// Map overlay: when the player has the map open, render it into the map FBO.
+		// VR_PresentMapEye composites it head-locked over the world per eye.
+		const bool vrMapOpen = PLAYER_HAS_MAP_OPEN(current_player) && View_MapActive();
+		VR_SetMapActive(vrMapOpen, map_is_translucent());
+		if (vrMapOpen)
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, VR_MapLayerFramebuffer());
+			glViewport(0, 0, VR_MapLayerWidth(), VR_MapLayerHeight());
+			glDisable(GL_SCISSOR_TEST);
+			glClearColor(0.f, 0.f, 0.f, 1.f);
+			glClear(GL_COLOR_BUFFER_BIT);
+
+			struct overhead_map_data map_data;
+			map_data.half_width      = VR_MapLayerWidth() >> 1;
+			map_data.half_height     = VR_MapLayerHeight() >> 1;
+			map_data.width           = VR_MapLayerWidth();
+			map_data.height          = VR_MapLayerHeight();
+			map_data.top             = 0;
+			map_data.left            = 0;
+			map_data.scale           = world_view->overhead_map_scale;
+			map_data.mode            = _rendering_game_map;
+			map_data.origin.x        = world_view->origin.x;
+			map_data.origin.y        = world_view->origin.y;
+			map_data.draw_everything = false;
+			// Always render into the FBO with non-translucent mode (full-brightness RGB on black).
+			// VR_PresentMapEye handles the blend difference: screen-blend for translucent mode vs
+			// opaque for solid mode. This avoids dim/alpha lines in the FBO that screen-blend can't
+			// recover from.
+			bool prevMapActive = OGL_MapActive;
+			short prevTranslucent = screen_mode.translucent_map;
+			OGL_MapActive = true;
+			screen_mode.translucent_map = 0;
+			_render_overhead_map(&map_data);
+			screen_mode.translucent_map = prevTranslucent;
+			OGL_MapActive = prevMapActive;
+		}
+
 		// Restore the screen-layer FBO as the default 2D target for anything that follows.
 		glBindFramebuffer(GL_FRAMEBUFFER, VR_ScreenLayerFramebuffer());
 	}

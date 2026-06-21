@@ -90,18 +90,15 @@ void Rasterizer_Shader_Class::SetView(view_data& view) {
 
 	glMatrixMode(GL_MODELVIEW);
 
-	// Build the classic view matrix (kViewBaseMatrix * Ry(pitch) * Rz(-yaw) * T(-origin)).
-	// Used for both the non-VR modelview AND as the landscape UV matrix, which the landscape
-	// shaders use (via landscapeInverseMatrix uniform) to compute relDir in a yaw-aligned
-	// classic eye space so landscape textures stay anchored to world directions.
+	// Build the classic view matrix and capture it as the landscape UV matrix for all variants.
+	// The vertex shaders use landscapeInverseMatrix (not gl_ModelViewMatrix) for relDir so that
+	// in VR we can supply a head-tracking-free version below without affecting gl_Position.
 	glLoadMatrixd(kViewBaseMatrix);
 	if (!view.mimic_sw_perspective)
 		glRotated(pitch, 0.0, 1.0, 0.0);
 	glRotated(-yaw, 0.0, 0.0, 1.0);
 	glTranslated(-view.origin.x, -view.origin.y, -view.origin.z);
 
-	// Capture and set as the landscape UV matrix for all 6 landscape shader variants.
-	// In VR this is overridden below with the eye-height-adjusted version.
 	{
 		GLfloat landscapeMatrix[16];
 		glGetFloatv(GL_MODELVIEW_MATRIX, landscapeMatrix);
@@ -120,29 +117,58 @@ void Rasterizer_Shader_Class::SetView(view_data& view) {
 #if defined(__ANDROID__)
 	if (VR_IsActive())
 	{
-		// Override the engine camera with the OpenXR per-eye projection + head-pose view. The view
-		// is eyeFromStage (metres, Y-up) composed with the Marathon world transform (Z-up, world
-		// units): modelview = eyeFromStage * S(1/WUperMetre) * (Z-up->Y-up) * Rz(-bodyYaw) * T(-origin).
-		// bodyYaw = the engine's locomotion yaw; head yaw/pitch/roll ride in via eyeFromStage.
 		const int eye = VR_CurrentEye();
-		const float WUperMetre = VR_Settings()->worldScaleWUM;  // ~1 WORLD_ONE per 2 m; tune for comfort
-		const float eyeHeightM = VR_Settings()->eyeHeightM;     // align the standing HMD eye with the Marathon eye
+		const float WUperMetre = VR_Settings()->worldScaleWUM;
+		const float eyeHeightM = VR_Settings()->eyeHeightM;
 
 		float vrProj[16];
 		VR_GetEyeProjection(eye, vrProj, 0.05f, (128.0f * 1024.0f) / WUperMetre);
 		glMatrixMode(GL_PROJECTION);
 		glLoadMatrixf(vrProj);
 
-		// Override landscape UV matrix with VR eye-height-adjusted classic view.
-		// No head pitch: head orientation rides in vrView for world geometry, not landscape UVs.
+		// Get VR eye matrix now; we need it for the landscape UV eye position.
+		float vrView[16];   // eyeFromStage, metres
+		VR_GetEyeViewMetres(eye, vrView);
+
+		// Override landscape UV matrix: body-yaw rotation only, translate from the actual VR eye
+		// position (not body centre). For close walls, the IPD/head-translation offset relative to
+		// the body is significant — using body origin causes incorrect angular UV near walls.
+		// vrView = [R|t] column-major (eye-from-stage, metres).
+		// Eye pos in stage space = -R^T * t; convert to Marathon WU via inv(zUpToYUp) * WUperMetre:
+		//   world.x = -stage.x * WUM, world.y = -stage.z * WUM, world.z = stage.y * WUM
 		{
-			const float eyeZAdj = VR_GetEyeZOffset() + eyeHeightM * WUperMetre;
+			float esx = -(vrView[0]*vrView[12] + vrView[4]*vrView[13] + vrView[8]*vrView[14]);
+			float esy = -(vrView[1]*vrView[12] + vrView[5]*vrView[13] + vrView[9]*vrView[14]);
+			float esz = -(vrView[2]*vrView[12] + vrView[6]*vrView[13] + vrView[10]*vrView[14]);
+			float eyeX = -esx * WUperMetre;
+			float eyeY = -esz * WUperMetre;
+			float eyeZ =  esy * WUperMetre;
 			glMatrixMode(GL_MODELVIEW);
 			glLoadMatrixd(kViewBaseMatrix);
 			glRotated(-yaw, 0.0, 0.0, 1.0);
-			glTranslated(-view.origin.x, -view.origin.y, -(view.origin.z - eyeZAdj));
+
+			glTranslated(-eyeX, -eyeY, -eyeZ);
 			GLfloat vrLandscapeMatrix[16];
 			glGetFloatv(GL_MODELVIEW_MATRIX, vrLandscapeMatrix);
+
+			// bodyYawFromEye = kViewBase * zUpToYUp^T * mat3(vrView)^T  (no body yaw).
+			// Yaw is in the rendering matrix so eyeDir already encodes snap-turn; adding yaw
+			// here would double-count it. Analytical: col j = (-vrView[8+j], vrView[4+j], vrView[j]).
+			float bodyYawFromEye[9] = {
+				-vrView[8],  vrView[4],  vrView[0],
+				-vrView[9],  vrView[5],  vrView[1],
+				-vrView[10], vrView[6],  vrView[2]
+			};
+
+			// Inverse-projection: eye.x = ndc.x/vrProj[0] + vrProj[8]/vrProj[0]
+			float projXScale = 1.0f / vrProj[0];
+			float projYScale = 1.0f / vrProj[5];
+			float projXOff   = vrProj[8]  / vrProj[0];
+			float projYOff   = vrProj[9]  / vrProj[5];
+
+			GLint vp[4];
+			glGetIntegerv(GL_VIEWPORT, vp);
+
 			Shader *ls[] = {
 				Shader::get(Shader::S_Landscape),
 				Shader::get(Shader::S_LandscapeBloom),
@@ -151,12 +177,22 @@ void Rasterizer_Shader_Class::SetView(view_data& view) {
 				Shader::get(Shader::S_LandscapeSphereBloom),
 				Shader::get(Shader::S_LandscapeSphereInfravision),
 			};
-			for (auto s : ls) { s->enable(); s->setMatrix4(Shader::U_LandscapeInverseMatrix, vrLandscapeMatrix); }
+			for (auto s : ls) {
+				s->enable();
+				s->setMatrix4(Shader::U_LandscapeInverseMatrix, vrLandscapeMatrix);
+				s->setFloat(Shader::U_VrMode, 1.0f);
+				s->setMatrix3(Shader::U_BodyYawFromEye, bodyYawFromEye);
+				s->setFloat(Shader::U_ProjXScale, projXScale);
+				s->setFloat(Shader::U_ProjYScale, projYScale);
+				s->setFloat(Shader::U_ProjXOff,   projXOff);
+				s->setFloat(Shader::U_ProjYOff,   projYOff);
+				s->setFloat(Shader::U_VpX, (float)vp[0]);
+				s->setFloat(Shader::U_VpY, (float)vp[1]);
+				s->setFloat(Shader::U_VpW, (float)vp[2]);
+				s->setFloat(Shader::U_VpH, (float)vp[3]);
+			}
 			Shader::disable();
 		}
-
-		float vrView[16];   // eyeFromStage, metres
-		VR_GetEyeViewMetres(eye, vrView);
 		// world(Marathon, Z-up, left-handed yaw) -> stage(Y-up): (x,y,z) -> (-x, z, -y). The negated
 		// X makes this det=-1 to match the engine's kViewBaseMatrix handedness (else the world is
 		// mirrored). With det=-1 the engine's glFrontFace(GL_CW) culling is correct (no shim flip).

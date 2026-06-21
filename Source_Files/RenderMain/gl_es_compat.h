@@ -51,6 +51,7 @@ typedef char   GLcharARB;
 #define glUniform2fARB            glUniform2f
 #define glUniform3fARB            glUniform3f
 #define glUniform4fARB            glUniform4f
+#define glUniformMatrix3fvARB     glUniformMatrix3fv
 #define glUniformMatrix4fvARB     glUniformMatrix4fv
 #define GL_VERTEX_SHADER_ARB      GL_VERTEX_SHADER
 #define GL_FRAGMENT_SHADER_ARB    GL_FRAGMENT_SHADER

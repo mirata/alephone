@@ -181,7 +181,19 @@ struct Model3D
 	
 	// Add-on transforms for the positions and the normals
 	Model3D_Transform TransformPos, TransformNorm;
-	
+
+	// MD3 morph-frame storage (populated by LoadModel_MD3; empty for other formats).
+	// Layout: frame-major — frame0 verts, frame1 verts, ...
+	// Size: MD3NumFrames * (Positions.size()/3) * 3 floats each.
+	int MD3NumFrames;
+	vector<GLfloat> MD3Positions;
+	vector<GLfloat> MD3Normals;
+
+	// Bake frame frameIdx (with optional linear blend toward nextFrameIdx)
+	// into Positions/Normals so ModelRenderer can draw it.
+	// Returns false if the indices are out of range.
+	bool FindPositions_MD3Frame(int frameIdx, float mix = 0.f, int nextFrameIdx = -1);
+
 	// Bounding box (first index: 0 = min, 1 = max)
 	GLfloat BoundingBox[2][3];
 	
@@ -250,7 +262,7 @@ struct Model3D
 		GLshort FrameIndex, GLfloat MixFrac = 0, GLshort AddlFrameIndex = 0);
 	
 	// Constructor
-	Model3D() {FindBoundingBox(); TransformPos.Identity(); TransformNorm.Identity();}
+	Model3D() : MD3NumFrames(0) {FindBoundingBox(); TransformPos.Identity(); TransformNorm.Identity();}
 };
 
 #endif

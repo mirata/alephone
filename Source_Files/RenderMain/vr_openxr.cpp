@@ -1051,6 +1051,14 @@ extern "C" bool VR_GetMoveStickClick(void)
 	const int moveIdx = s_settings.switchSticks ? offIdx : domIdx;
 	return s_stickClick[moveIdx];
 }
+// Press of the thumbstick you TURN with (the opposite hand from the move stick).
+extern "C" bool VR_GetTurnStickClick(void)
+{
+	const int domIdx = s_settings.dominantHand ? 0 : 1;
+	const int offIdx = 1 - domIdx;
+	const int turnIdx = s_settings.switchSticks ? domIdx : offIdx;   // opposite of moveIdx
+	return s_stickClick[turnIdx];
+}
 
 namespace {
 	bool s_worldFramePresented = false;
@@ -1238,6 +1246,118 @@ extern "C" void VR_PresentHudEye(int eye)
 	glDrawArrays(GL_TRIANGLES, 0, 6);
 	glBindVertexArray(0);
 	glDisable(GL_BLEND);
+}
+
+// ------------------------------------------------------------ Map layer ----
+// When the player opens the overhead map in VR, it is rendered into this RGBA FBO; VR_PresentMapEye
+// then composites it as a head-locked floating panel over the world each eye.  Unlike the desktop
+// path (map replaces the world), in VR the world keeps rendering underneath the map overlay.
+namespace {
+	constexpr int kMapW = 1280, kMapH = 1024;
+	GLuint s_mapFBO = 0, s_mapTex = 0;
+	bool   s_vrMapActive      = false;
+	bool   s_vrMapTranslucent = false;   // true=screen blend (black→transparent); false=solid panel
+
+	void ensureMapLayer() {
+		if (s_mapFBO) return;
+		ensureScreenLayer();   // shares s_quadProg / s_quadVAO / s_quadMVPLoc / s_quadTexLoc
+		glGenTextures(1, &s_mapTex);
+		glBindTexture(GL_TEXTURE_2D, s_mapTex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kMapW, kMapH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glGenFramebuffers(1, &s_mapFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, s_mapFBO);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_mapTex, 0);
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+			A1VR_LOG("Map layer FBO incomplete");
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	}
+}
+
+extern "C" void     VR_SetMapActive(bool active, bool translucent) { s_vrMapActive = active; s_vrMapTranslucent = translucent; }
+extern "C" unsigned VR_MapLayerFramebuffer(void) { ensureMapLayer(); return s_mapFBO; }
+extern "C" int      VR_MapLayerWidth(void)  { return kMapW; }
+extern "C" int      VR_MapLayerHeight(void) { return kMapH; }
+
+// Composite the head-locked map panel into the currently-bound eye buffer.  Called inside the
+// per-eye loop (render.cpp) after VR_PresentHudEye.  Only draws when the map is open.
+extern "C" void VR_PresentMapEye(int eye)
+{
+	if (!s_active || !s_headPoseValid || !s_vrMapActive || !s_mapFBO) return;
+
+	glViewport(0, 0, s_eyeW, s_eyeH);
+	glDisable(GL_SCISSOR_TEST);
+	glDisable(GL_CULL_FACE);
+
+	if (!s_vrMapTranslucent)
+	{
+		// Solid mode: wipe the eye entirely to black so the world is invisible, then draw the
+		// map panel opaquely over it (matches the desktop experience of the map replacing the world).
+		glDisable(GL_DEPTH_TEST);
+		glClearColor(0.f, 0.f, 0.f, 1.f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	}
+
+	// Head basis in stage space.
+	float hm[16]; mat_from_pose(hm, s_stageFromHead);
+	const float hp[3] = { s_stageFromHead.position.x, s_stageFromHead.position.y, s_stageFromHead.position.z };
+	const float R[3] = {  hm[0],  hm[1],  hm[2] };
+	const float U[3] = {  hm[4],  hm[5],  hm[6] };
+	const float F[3] = { -hm[8], -hm[9], -hm[10] };
+
+	// Centre the panel 5° below the horizon at 2.5 m -- comfortable reading distance.
+	const float D = 2.5f;
+	const float tilt = 5.0f * (3.14159265358979f / 180.0f);
+	const float ct = std::cos(tilt), st = std::sin(tilt);
+	const float Fd[3] = { F[0]*ct - U[0]*st, F[1]*ct - U[1]*st, F[2]*ct - U[2]*st };
+	const float C[3]  = { hp[0]+Fd[0]*D, hp[1]+Fd[1]*D, hp[2]+Fd[2]*D };
+
+	// Panel half-extents: 0.8 m half-height, aspect-correct width from kMapW/kMapH.
+	const float hh = 0.8f;
+	const float hw = hh * (float)kMapW / (float)kMapH;
+
+	float model[16] = {
+		R[0]*hw, R[1]*hw, R[2]*hw, 0,
+		U[0]*hh, U[1]*hh, U[2]*hh, 0,
+		-F[0],   -F[1],   -F[2],   0,
+		C[0],    C[1],    C[2],    1 };
+
+	float proj[16];
+	VR_GetEyeProjection(eye, proj, 0.05f, 50.0f);
+	float stageFromEye[16]; mat_from_pose(stageFromEye, s_stageFromEye[eye]);
+	float eyeFromStage[16]; mat_rigid_inverse(eyeFromStage, stageFromEye);
+	float vp[16];  mat_mul(vp, proj, eyeFromStage);
+	float mvp[16]; mat_mul(mvp, vp, model);
+
+	glDisable(GL_DEPTH_TEST);
+	glUseProgram(s_quadProg);
+	glUniformMatrix4fv(s_quadMVPLoc, 1, GL_FALSE, mvp);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, s_mapTex);
+	glUniform1i(s_quadTexLoc, 0);
+	glBindVertexArray(s_quadVAO);
+
+	if (s_vrMapTranslucent)
+	{
+		// Screen blend: GL_ONE + GL_ONE_MINUS_SRC_COLOR = Photoshop Screen.
+		// Black map pixels (0,0,0) leave the world untouched; coloured map lines brighten the world.
+		// This means only the coloured lines/icons float visibly over the scene.
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR);
+		glDrawArrays(GL_TRIANGLES, 0, 6);
+		glDisable(GL_BLEND);
+	}
+	else
+	{
+		// Solid mode: plain opaque draw (world was already wiped above).
+		glDisable(GL_BLEND);
+		glDrawArrays(GL_TRIANGLES, 0, 6);
+	}
+
+	glBindVertexArray(0);
 }
 
 // ----------------------------------------------------------- dim pass ----
@@ -1586,6 +1706,12 @@ extern "C" bool VR_GetBack(void)               { return false; }
 extern "C" bool VR_GetButtonX(void)            { return false; }
 extern "C" bool VR_GetButtonY(void)            { return false; }
 extern "C" bool VR_GetMoveStickClick(void)     { return false; }
+extern "C" bool VR_GetTurnStickClick(void)       { return false; }
+extern "C" void VR_SetMapActive(bool, bool)      {}
+extern "C" unsigned VR_MapLayerFramebuffer(void) { return 0; }
+extern "C" int  VR_MapLayerWidth(void)         { return 0; }
+extern "C" int  VR_MapLayerHeight(void)        { return 0; }
+extern "C" void VR_PresentMapEye(int)          {}
 extern "C" bool VR_BeginFrame(void)     { return false; }
 extern "C" void VR_BeginEye(int)        {}
 extern "C" void VR_FinishEye(int)       {}

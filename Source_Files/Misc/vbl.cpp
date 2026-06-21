@@ -1283,6 +1283,13 @@ uint32 parse_keymap(void)
 			// run/walk-toggle post-processing below, so it honors the _inputmod_run_key_toggle pref
 			// (toggle vs hold) exactly like the keyboard run key.
 			if (VR_GetMoveStickClick()) flags |= _run_dont_walk;
+			// Turn-thumbstick click -> toggle overhead map (edge-triggered).
+			{
+				static bool mapPrev = false;
+				const bool mapBtn = VR_GetTurnStickClick();
+				if (mapBtn && !mapPrev) flags |= _toggle_map;
+				mapPrev = mapBtn;
+			}
 			// X / Y -> previous / next weapon (in-game only; build_terminal_action_flags overwrites
 			// `flags` when in a terminal). Edge-triggered so a press = one switch.
 			{

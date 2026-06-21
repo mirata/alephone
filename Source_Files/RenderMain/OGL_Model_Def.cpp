@@ -33,6 +33,7 @@
 #include <cmath>
 
 #include "Dim3_Loader.h"
+#include "MD3_Loader.h"
 #include "StudioLoader.h"
 #include "WavefrontLoader.h"
 #include "InfoTree.h"
@@ -404,6 +405,10 @@ void OGL_ModelData::Load()
 	{
 		// 3D Studio Max, but with coordinate system conversion.
 		Success = LoadModel_Studio_RightHand(ModelFile, Model);
+	}
+	else if (StringsEqual(Type,"md3",3))
+	{
+		Success = LoadModel_MD3(ModelFile, Model);
 	}
 	else if (StringsEqual(Type,"dim3",4))
 	{

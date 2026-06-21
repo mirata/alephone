@@ -1234,11 +1234,16 @@ void TextureManager::PlaceTexture(const ImageDescriptor *Image, bool normal_map)
 	// some optimizations here:
 	if (TextureType == 1) // landscape
 	{
+#ifndef __ANDROID__
+		// GLES 3 requires GL_RGB8/GL_RGB5 to be paired with GL_RGB external format,
+		// but PlaceTexture always uploads GL_RGBA/GL_UNSIGNED_BYTE — invalid combination.
+		// Keep RGBA variants on Android so glTexImage2D succeeds.
 		if (internalFormat == GL_RGBA8)
 			internalFormat = GL_RGB8;
 		else if (internalFormat == GL_RGBA4)
 			internalFormat = GL_RGB5;
-	} 
+#endif
+	}
 	else if (!IsBlended() && internalFormat == GL_RGBA4)
 	{
 		internalFormat = GL_RGB5_A1;

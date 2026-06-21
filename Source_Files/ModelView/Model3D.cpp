@@ -95,6 +95,9 @@ void Model3D::Clear()
 	Frames.clear();
 	SeqFrames.clear();
 	SeqFrmPointers.clear();
+	MD3NumFrames = 0;
+	MD3Positions.clear();
+	MD3Normals.clear();
 	FindBoundingBox();
 }
 
@@ -1138,5 +1141,51 @@ static void TMatMultiply(Model3D_Transform& Res, Model3D_Transform& A, Model3D_T
 	}
 }
 
+
+bool Model3D::FindPositions_MD3Frame(int frameIdx, float mix, int nextFrameIdx)
+{
+	if (MD3Positions.empty() || MD3NumFrames <= 0) return false;
+
+	const int numVerts = (int)(Positions.size() / 3);
+	if (numVerts == 0) return false;
+
+	if (frameIdx < 0 || frameIdx >= MD3NumFrames) return false;
+
+	const GLfloat* src = MD3Positions.data() + frameIdx * numVerts * 3;
+	GLfloat* dst = Positions.data();
+
+	const bool doBlend = (mix != 0.f && nextFrameIdx >= 0
+	                      && nextFrameIdx < MD3NumFrames
+	                      && nextFrameIdx != frameIdx);
+
+	if (doBlend)
+	{
+		const GLfloat* src2 = MD3Positions.data() + nextFrameIdx * numVerts * 3;
+		for (int i = 0; i < numVerts * 3; ++i)
+			dst[i] = src[i] + mix * (src2[i] - src[i]);
+	}
+	else
+	{
+		memcpy(dst, src, numVerts * 3 * sizeof(GLfloat));
+	}
+
+	if (!MD3Normals.empty() && (int)Normals.size() == numVerts * 3)
+	{
+		const GLfloat* nsrc = MD3Normals.data() + frameIdx * numVerts * 3;
+		GLfloat* ndst = Normals.data();
+		if (doBlend)
+		{
+			const GLfloat* nsrc2 = MD3Normals.data() + nextFrameIdx * numVerts * 3;
+			for (int i = 0; i < numVerts * 3; ++i)
+				ndst[i] = nsrc[i] + mix * (nsrc2[i] - nsrc[i]);
+		}
+		else
+		{
+			memcpy(ndst, nsrc, numVerts * 3 * sizeof(GLfloat));
+		}
+	}
+
+	return true;
+}
 
 #endif // def HAVE_OPENGL

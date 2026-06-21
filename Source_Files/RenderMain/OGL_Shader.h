@@ -67,6 +67,16 @@ public:
 		U_PixelWidth,
 		U_PixelHeight,
 		U_FogMode,
+		U_VrMode,
+		U_BodyYawFromEye,
+		U_ProjXScale,
+		U_ProjYScale,
+		U_ProjXOff,
+		U_ProjYOff,
+		U_VpX,
+		U_VpY,
+		U_VpW,
+		U_VpH,
 		NUMBER_OF_UNIFORM_LOCATIONS
 	};
 
@@ -134,6 +144,7 @@ public:
 	void unload();
 	void setFloat(UniformName name, float); // shader must be enabled
 	void setMatrix4(UniformName name, float *f);
+	void setMatrix3(UniformName name, float *f);
 
 	int16 passes();
 

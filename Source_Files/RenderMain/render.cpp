@@ -956,7 +956,8 @@ void render_view(
 						render_vr_aim_debug(view);   // controller aim marker/ray/dot (world matrices still active)
 						render_vr_weapon_sprites_3d(view);   // 3D weapon quads at controller positions
 						RasPtr->End();
-						VR_PresentHudEye(eye);   // head-locked 2D HUD plane, in front of the world
+						VR_PresentHudEye(eye);   // head-locked 2D HUD plane
+						VR_PresentMapEye(eye);   // head-locked map overlay when map is open
 						VR_FinishEye(eye);
 					}
 				}

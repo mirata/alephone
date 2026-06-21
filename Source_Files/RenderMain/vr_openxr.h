@@ -116,6 +116,7 @@ bool VR_GetBack(void);                 // Y or B: terminal page back
 bool VR_GetButtonX(void);              // X button alone (in-game: previous weapon)
 bool VR_GetButtonY(void);              // Y button alone (in-game: next weapon)
 bool VR_GetMoveStickClick(void);       // press of the move thumbstick (in-game: run, honors toggle pref)
+bool VR_GetTurnStickClick(void);       // press of the turn thumbstick -- the OPPOSITE hand from move (in-game: toggle overhead map)
 
 // Increment 1: render one head-tracked stereo test frame (a colored room) to the headset and
 // submit it. Drives the OpenXR session lifecycle internally. Returns true if a VR frame was
@@ -214,6 +215,18 @@ unsigned VR_HudLayerFramebuffer(void);
 int      VR_HudLayerWidth(void);
 int      VR_HudLayerHeight(void);
 void     VR_PresentHudEye(int eye);
+
+// Map overlay layer: when the player opens the overhead map in VR it is rendered into this offscreen
+// FBO; VR_PresentMapEye then composites it head-locked over the world (the world keeps rendering
+// underneath -- unlike desktop where the map replaces the world view).
+// screen.cpp calls VR_SetMapActive each frame so the compositor knows whether to draw the overlay.
+// `translucent` mirrors map_is_translucent(): false = solid panel (world hidden, opaque black fill);
+// true = screen-blend map (black becomes transparent, colored lines float over the world).
+void     VR_SetMapActive(bool active, bool translucent);
+unsigned VR_MapLayerFramebuffer(void);
+int      VR_MapLayerWidth(void);
+int      VR_MapLayerHeight(void);
+void     VR_PresentMapEye(int eye);
 
 // Left-controller menu (hamburger) button press, consumed once -> the main loop opens the in-game
 // quit-with-confirmation dialog.

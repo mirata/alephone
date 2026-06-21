@@ -84,7 +84,17 @@ const char* Shader::_uniform_names[NUMBER_OF_UNIFORM_LOCATIONS] =
 	"logicalHeight",
 	"pixelWidth",
 	"pixelHeight",
-	"fogMode"
+	"fogMode",
+	"vrMode",
+	"bodyYawFromEye",
+	"projXScale",
+	"projYScale",
+	"projXOff",
+	"projYOff",
+	"vpX",
+	"vpY",
+	"vpW",
+	"vpH"
 };
 
 const char* Shader::_shader_names[NUMBER_OF_SHADER_TYPES] = 
@@ -433,6 +443,11 @@ void Shader::setFloat(UniformName name, float f) {
 void Shader::setMatrix4(UniformName name, float *f) {
 
 	glUniformMatrix4fvARB(getUniformLocation(name), 1, false, f);
+}
+
+void Shader::setMatrix3(UniformName name, float *f) {
+
+	glUniformMatrix3fvARB(getUniformLocation(name), 1, false, f);
 }
 
 Shader::~Shader() {
