@@ -242,6 +242,15 @@ bool LoadModel_MD3(FileSpecifier& Spec, Model3D& Model)
 		return false;
 	}
 
+	// Aleph One uses CW front faces; MD3 uses CCW. Reverse winding to match,
+	// same as LoadModel_Wavefront_RightHand does for OBJ.
+	for (uint32 i = 0; i < Model.VertIndices.size(); i += 3)
+	{
+		GLushort tmp = Model.VertIndices[i];
+		Model.VertIndices[i]   = Model.VertIndices[i+1];
+		Model.VertIndices[i+1] = tmp;
+	}
+
 	// Seed Positions / Normals from frame 0 so the bounding box and
 	// normal processing in OGL_ModelData::Load() have data to work with.
 	const uint32 nv0 = totalVerts;

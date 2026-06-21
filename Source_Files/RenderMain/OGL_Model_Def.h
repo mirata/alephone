@@ -118,14 +118,18 @@ public:
 	// The model itself (static, single-skin [only one skin at a time])
 	Model3D Model;
 	bool ModelPresent() {return !Model.VertIndices.empty();}
-	
+
 	// For convenience
 	void Load();
 	void Unload();
-	
+
 	OGL_ModelData():
 		Scale(1), XRot(0), YRot(0), ZRot(0), XShift(0), YShift(0), ZShift(0), Sidedness(1),
-			NormalType(1), NormalSplit(0.5), LightType(0), DepthType(0), ForceSpriteDepth(false) {}
+			NormalType(1), NormalSplit(0.5), LightType(0), DepthType(0), ForceSpriteDepth(false),
+			mLoadAttempted(false) {}
+
+private:
+	bool mLoadAttempted;
 };
 
 

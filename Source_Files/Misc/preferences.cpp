@@ -1703,6 +1703,15 @@ static void vr_dialog(void *arg)
 
 	table->add_row(new w_spacer(), true);
 
+	// Map
+	table->dual_add_row(new w_static_text("Map"), d);
+
+	w_toggle *map_player_up_w = new w_toggle(vr->mapPlayerUp != 0);
+	table->dual_add(map_player_up_w->label("Player-Up Rotation"), d);
+	table->dual_add(map_player_up_w, d);
+
+	table->add_row(new w_spacer(), true);
+
 	// World / view
 	table->dual_add_row(new w_static_text("World"), d);
 
@@ -1740,6 +1749,7 @@ static void vr_dialog(void *arg)
 		vr->hudDistanceM    = vr_hud_distance_values[hud_dist_w->get_selection()];
 		vr->hudSizeM        = vr_hud_size_values[hud_size_w->get_selection()];
 		vr->hudTiltDeg      = vr_hud_tilt_values[hud_tilt_w->get_selection()];
+		vr->mapPlayerUp     = map_player_up_w->get_selection() ? 1 : 0;
 		vr->eyeHeightM      = vr_eye_height_values[eye_height_w->get_selection()];
 		vr->brightness      = vr_brightness_values[brightness_w->get_selection()];
 
@@ -4310,6 +4320,7 @@ InfoTree vr_preferences_tree()
 	root.put_attr("hud_distance_m", vr->hudDistanceM);
 	root.put_attr("hud_size_m", vr->hudSizeM);
 	root.put_attr("hud_tilt_deg", vr->hudTiltDeg);
+	root.put_attr("map_player_up", vr->mapPlayerUp);
 	return root;
 }
 #endif
@@ -5383,6 +5394,7 @@ void parse_vr_preferences(InfoTree root, std::string version)
 	root.read_attr("hud_distance_m", vr->hudDistanceM);
 	root.read_attr("hud_size_m", vr->hudSizeM);
 	root.read_attr("hud_tilt_deg", vr->hudTiltDeg);
+	root.read_attr("map_player_up", vr->mapPlayerUp);
 }
 #endif
 

@@ -484,6 +484,7 @@ namespace {
 		/* hudDistanceM    */ 0.8f,   // head-locked HUD plane distance
 		/* hudSizeM        */ 0.55f,  // head-locked HUD plane height (width follows natural aspect)
 		/* hudTiltDeg      */ 30.0f,  // degrees the HUD bottom-anchor is pitched down from horizontal
+		/* mapPlayerUp     */ 0,      // overhead map rotation: 0=north-up, 1=player-facing-up
 	};
 
 	// Locomotion yaw offset (snap/smooth turn), in Marathon angle units (512 = full circle).
@@ -1677,7 +1678,7 @@ extern "C" bool VR_RenderTestFrame(void)
 extern "C" bool VR_InitOpenXR(void)     { return false; }
 extern "C" bool VR_IsActive(void)       { return false; }
 extern "C" vr_settings_t* VR_Settings(void) {
-	static vr_settings_t s = { 1, 2.5f, 2.0f, 512.0f, 1.6f, 1, 30.0f, 1.0f, 0, 0, 0, -20.0f, 0.8f, 0.55f, 30.0f };
+	static vr_settings_t s = { 1, 2.5f, 2.0f, 512.0f, 1.6f, 1, 30.0f, 1.0f, 0, 0, 0, -20.0f, 0.8f, 0.55f, 30.0f, 0 };
 	return &s;
 }
 extern "C" float VR_GetYawOffset(void)   { return 0.0f; }

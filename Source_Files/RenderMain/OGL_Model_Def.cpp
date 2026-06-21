@@ -28,6 +28,7 @@
 #include "OGL_Model_Def.h"
 #include "OGL_Setup.h"
 
+
 #ifdef HAVE_OPENGL
 
 #include <cmath>
@@ -122,7 +123,7 @@ OGL_ModelData *OGL_GetModelData(short Collection, short Sequence, short& ModelSe
 {
 	// Model is neutral unless specified otherwise
 	ModelSequence = NONE;
-	
+
 	// Initialize the hash table if necessary
 	if (MdlHash[Collection].empty())
 	{
@@ -147,13 +148,15 @@ OGL_ModelData *OGL_GetModelData(short Collection, short Sequence, short& ModelSe
 			if (SMIter->Sequence == Sequence)
 			{
 				ModelSequence = SMIter->ModelSequence;
+				if (!MdlIter->ModelData.ModelPresent()) MdlIter->ModelData.Load();
 				return MdlIter->ModelData.ModelPresent() ? &MdlIter->ModelData : NULL;
 			}
 		}
-		
+
 		// Now check the neutral sequence
 		if (MdlIter->Sequence == Sequence)
 		{
+			if (!MdlIter->ModelData.ModelPresent()) MdlIter->ModelData.Load();
 			return MdlIter->ModelData.ModelPresent() ? &MdlIter->ModelData : NULL;
 		}
 	}
@@ -174,19 +177,21 @@ OGL_ModelData *OGL_GetModelData(short Collection, short Sequence, short& ModelSe
 				HashVal.ModelIndex = Indx;
 				HashVal.ModelSeqTabIndex = SMIndx;
 				ModelSequence = SMIter->ModelSequence;
+				if (!MdlIter->ModelData.ModelPresent()) MdlIter->ModelData.Load();
 				return MdlIter->ModelData.ModelPresent() ? &MdlIter->ModelData : NULL;
 			}
 		}
-		
+
 		// Now check the neutral sequence
 		if (MdlIter->Sequence == Sequence)
 		{
 			HashVal.ModelIndex = Indx;
 			HashVal.ModelSeqTabIndex = NONE;
+			if (!MdlIter->ModelData.ModelPresent()) MdlIter->ModelData.Load();
 			return MdlIter->ModelData.ModelPresent() ? &MdlIter->ModelData : NULL;
 		}
 	}
-	
+
 	// None found!
 	return NULL;
 }
@@ -374,8 +379,9 @@ static bool StringsEqual(const char *String1, const char *String2, int MaxStrLen
 
 void OGL_ModelData::Load()
 {
-	// Already loaded?
-	if (ModelPresent()) return;
+	// Already loaded or already tried (and failed)?
+	if (ModelPresent() || mLoadAttempted) return;
+	mLoadAttempted = true;
 	
 	// Load the model
 	Model.Clear();
@@ -580,7 +586,7 @@ void OGL_ModelData::Load()
 	
 	Model.AdjustNormals(NormalType,NormalSplit);
 	Model.CalculateTangents();
-	
+
 	// Don't forget the skins
 	OGL_SkinManager::Load();
 }
@@ -589,6 +595,7 @@ void OGL_ModelData::Load()
 void OGL_ModelData::Unload()
 {
 	Model.Clear();
+	mLoadAttempted = false;
 	OGL_ResetForceSpriteDepth();
 	
 	// Don't forget the skins

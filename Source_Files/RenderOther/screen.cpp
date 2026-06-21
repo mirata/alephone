@@ -1,4 +1,4 @@
-/*
+﻿/*
 
 	Copyright (C) 1991-2001 and beyond by Bungie Studios, Inc.
 	and the "Aleph One" developers.
@@ -1656,7 +1656,29 @@ void render_screen(short ticks_elapsed)
 			short prevTranslucent = screen_mode.translucent_map;
 			OGL_MapActive = true;
 			screen_mode.translucent_map = 0;
+
+			// Player-up map: rotate the whole map so the player's forward direction points up.
+			// The map title text is immune because draw_text() calls glLoadIdentity() before drawing.
+			// outer_deg = 90 - facing_deg, then player's own inner rotation adds facing_deg -> net 90,
+			// which makes the player arrow (local +x) point to +y = screen up.
+			const bool vrMapPlayerUp = VR_Settings()->mapPlayerUp != 0;
+			if (vrMapPlayerUp)
+			{
+				const float cx = VR_MapLayerWidth()  * 0.5f;
+				const float cy = VR_MapLayerHeight() * 0.5f;
+				const float facing_deg = current_player->facing * (360.0f / FULL_CIRCLE);
+				glMatrixMode(GL_MODELVIEW);
+				glPushMatrix();
+				glTranslatef(cx, cy, 0.0f);
+				glRotatef(270.0f - facing_deg, 0.0f, 0.0f, 1.0f);
+				glTranslatef(-cx, -cy, 0.0f);
+			}
+
 			_render_overhead_map(&map_data);
+
+			if (vrMapPlayerUp)
+				glPopMatrix();
+
 			screen_mode.translucent_map = prevTranslucent;
 			OGL_MapActive = prevMapActive;
 		}

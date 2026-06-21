@@ -1433,7 +1433,7 @@ void load_collections(
 						alert_out_of_memory();
 					}
 				}
-//				OGL_LoadModelsImages(collection_index);
+				OGL_LoadModelsImages(collection_index);
 			}
 		}
 		
