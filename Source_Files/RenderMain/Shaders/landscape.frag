@@ -45,7 +45,10 @@ void main(void) {
 	float y = -atan(relv.y, max(horizDist, 0.0001)) / zoom - (facev.z * pitch_adjust);
 	float v = offsety - y * scaley;
 	if (v < 0.0 || v > 1.0) {
-		gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+		// Sample the sky edge at the player's current forward azimuth (offsetx).
+		// Gives a solid fill that matches the actual sky colour at that elevation.
+		vec4 color = texture2D(texture0, vec2(offsetx, clamp(v, 0.0, 1.0)));
+		gl_FragColor = vec4(mix(color.rgb, gl_Fog.color.rgb, fogMix), 1.0);
 		return;
 	}
 	vec4 color = texture2D(texture0, vec2(offsetx - x * scalex, v));
