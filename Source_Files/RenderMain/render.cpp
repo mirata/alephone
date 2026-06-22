@@ -741,6 +741,10 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 		float stage_right[3], stage_up[3];
 		if (!VR_GetAimOrientStage(hand, stage_right, stage_up)) { vrWeaponIdx++; continue; }
 
+		// Track effective stage-space forward for 3D model rendering:
+		// defaults to pitch-adjusted aim forward, overridden by two-handed direction below.
+		float stage_fwd_eff[3] = { fs[0], fs[1], fs[2] };
+
 		// Two-handed steadying: replace orientation with inter-hand vector + dominant roll.
 		// Only for single-hand weapons (dual-wield keeps independent per-hand orientation).
 		if (!weapon_is_dual && VR_IsTwoHandedActive()) {
@@ -764,6 +768,7 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 					};
 					stage_right[0] = new_right[0]; stage_right[1] = new_right[1]; stage_right[2] = new_right[2];
 					stage_up[0]    = new_up[0];    stage_up[1]    = new_up[1];    stage_up[2]    = new_up[2];
+					stage_fwd_eff[0] = th_fwd[0];  stage_fwd_eff[1] = th_fwd[1];  stage_fwd_eff[2] = th_fwd[2];
 				}
 			}
 		}
@@ -786,10 +791,17 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 			w[1] = (float)(zx * sy + zy * cy);
 			w[2] = zz;
 		};
-		float wrx[3], wup[3], wfwd[3];
+		float wrx[3], wup[3];
 		stageToWorldDir(stage_right, wrx);
 		stageToWorldDir(stage_up,    wup);
-		stageToWorldDir(fs,          wfwd);
+
+		// 3D model basis: forward from stage_fwd_eff (pitch-adjusted aim, or th_fwd for
+		// two-handed). Recompute up from cross(wfwd, wrx) to guarantee orthonormality.
+		float wfwd_mdl[3], wup_mdl[3];
+		stageToWorldDir(stage_fwd_eff, wfwd_mdl);
+		wup_mdl[0] = wfwd_mdl[1]*wrx[2] - wfwd_mdl[2]*wrx[1];
+		wup_mdl[1] = wfwd_mdl[2]*wrx[0] - wfwd_mdl[0]*wrx[2];
+		wup_mdl[2] = wfwd_mdl[0]*wrx[1] - wfwd_mdl[1]*wrx[0];
 
 		// Sprite half-sizes in Marathon world units.
 		const float spriteScaleM = 0.5f;
@@ -840,7 +852,7 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 			display_data.collection, display_data.shape_index, modelSeq);
 		bool renderedAs3D = weaponMdl &&
 			OGL_RenderVRWeaponModel(rect, display_data.collection, 0 /*CLUT*/,
-				weaponMdl, cwx, cwy, cwz, wrx, wup, wfwd);
+				weaponMdl, cwx, cwy, cwz, wrx, wup_mdl, wfwd_mdl);
 		if (!renderedAs3D)
 			OGL_RenderVRWeaponQuad(rect, verts);
 		if (weapon_is_dual && hand == offHand) offHandRendered = true;

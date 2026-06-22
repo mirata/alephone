@@ -600,10 +600,14 @@ namespace {
 	XrAction    s_actionAction = XR_NULL_HANDLE;
 	XrAction    s_bAction = XR_NULL_HANDLE, s_xAction = XR_NULL_HANDLE, s_yAction = XR_NULL_HANDLE;
 	XrAction    s_menuAction = XR_NULL_HANDLE;   // left controller hamburger/menu button -> in-game quit
-	XrAction    s_aimAction[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };  // 0=left, 1=right, pointing pose
+	XrAction    s_aimAction[2]  = { XR_NULL_HANDLE, XR_NULL_HANDLE };  // 0=left, 1=right, pointing pose
 	XrSpace     s_aimSpace[2]  = { XR_NULL_HANDLE, XR_NULL_HANDLE };
 	XrPosef     s_aimStage[2]  = {};   // aim pose in stage space, this frame
 	bool        s_aimValid[2]  = { false, false };
+	XrAction    s_handAction[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE }; // grip/pose — hand body position
+	XrSpace     s_handSpace[2]  = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+	XrPosef     s_handStage[2]  = {};  // grip pose in stage space, this frame
+	bool        s_handValid[2]  = { false, false };
 	bool        s_actionsReady = false;
 	float       s_stickX[2] = {0,0}, s_stickY[2] = {0,0}, s_trigger[2] = {0,0};   // raw per-hand
 	float       s_grip[2] = {0,0};                   // raw per-hand squeeze/grip
@@ -650,6 +654,8 @@ namespace {
 		mkAction("menu", XR_ACTION_TYPE_BOOLEAN_INPUT,  &s_menuAction);
 		mkAction("aimleft",  XR_ACTION_TYPE_POSE_INPUT, &s_aimAction[0]);
 		mkAction("aimright", XR_ACTION_TYPE_POSE_INPUT, &s_aimAction[1]);
+		mkAction("handleftpose",  XR_ACTION_TYPE_POSE_INPUT, &s_handAction[0]);
+		mkAction("handrightpose", XR_ACTION_TYPE_POSE_INPUT, &s_handAction[1]);
 
 		XrActionSuggestedBinding binds[] = {
 			{ s_stickAction[0],   path("/user/hand/left/input/thumbstick") },
@@ -667,6 +673,8 @@ namespace {
 			{ s_menuAction,    path("/user/hand/left/input/menu/click") },
 			{ s_aimAction[0],  path("/user/hand/left/input/aim/pose") },
 			{ s_aimAction[1],  path("/user/hand/right/input/aim/pose") },
+			{ s_handAction[0], path("/user/hand/left/input/grip/pose") },
+			{ s_handAction[1], path("/user/hand/right/input/grip/pose") },
 		};
 		XrInteractionProfileSuggestedBinding sb = { XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
 		sb.interactionProfile = path("/interaction_profiles/oculus/touch_controller");
@@ -681,9 +689,11 @@ namespace {
 
 		for (int h = 0; h < 2; ++h) {
 			XrActionSpaceCreateInfo sci = { XR_TYPE_ACTION_SPACE_CREATE_INFO };
-			sci.action = s_aimAction[h];
 			sci.poseInActionSpace.orientation.w = 1.0f;
-			if (XR_FAILED(xrCreateActionSpace(s_session, &sci, &s_aimSpace[h]))) A1VR_LOG("createActionSpace %d failed", h);
+			sci.action = s_aimAction[h];
+			if (XR_FAILED(xrCreateActionSpace(s_session, &sci, &s_aimSpace[h]))) A1VR_LOG("createAimSpace %d failed", h);
+			sci.action = s_handAction[h];
+			if (XR_FAILED(xrCreateActionSpace(s_session, &sci, &s_handSpace[h]))) A1VR_LOG("createHandSpace %d failed", h);
 		}
 
 		s_actionsReady = true;
@@ -796,7 +806,7 @@ extern "C" bool VR_BeginFrame(void)
 		for (int e = 0; e < kEyes; ++e)
 			s_stageFromEye[e] = pose_mul(s_stageFromHead, s_views[e].pose);
 
-		// Controller aim poses (for the menu pointer), in stage space.
+		// Controller aim poses (direction/orientation) and grip poses (hand position), in stage space.
 		for (int h = 0; h < 2; ++h) {
 			s_aimValid[h] = false;
 			if (s_aimSpace[h] != XR_NULL_HANDLE) {
@@ -806,6 +816,15 @@ extern "C" bool VR_BeginFrame(void)
 					(al.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
 					s_aimStage[h] = al.pose;
 					s_aimValid[h] = true;
+				}
+			}
+			s_handValid[h] = false;
+			if (s_handSpace[h] != XR_NULL_HANDLE) {
+				XrSpaceLocation hl = { XR_TYPE_SPACE_LOCATION };
+				xrLocateSpace(s_handSpace[h], s_stageSpace, s_frameState.predictedDisplayTime, &hl);
+				if ((hl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+					s_handStage[h] = hl.pose;
+					s_handValid[h] = true;
 				}
 			}
 		}
@@ -1470,9 +1489,11 @@ namespace {
 extern "C" bool VR_GetAimPoseStage(int hand, float pos3[3], float fwd3[3])
 {
 	if (hand < 0 || hand > 1 || !s_aimValid[hand]) return false;
-	pos3[0] = s_aimStage[hand].position.x;
-	pos3[1] = s_aimStage[hand].position.y;
-	pos3[2] = s_aimStage[hand].position.z;
+	// Position from grip pose (physical hand location); fall back to aim if grip unavailable.
+	const XrPosef& pp = s_handValid[hand] ? s_handStage[hand] : s_aimStage[hand];
+	pos3[0] = pp.position.x;
+	pos3[1] = pp.position.y;
+	pos3[2] = pp.position.z;
 	// Forward = the pose's -Z, pitched by aimPitchAdjust about the pose's local right axis (the OpenXR
 	// aim pose points higher than a held-gun barrel; negative tilts down). m: col0=right, col1=up,
 	// col2=back. fwd = sin(th)*up - cos(th)*back  (th=0 -> -back -> plain poseFwd).
@@ -1507,10 +1528,12 @@ extern "C" bool VR_IsTwoHandedActive()
 	const int offHand = 1 - domHand;
 	if (!s_aimValid[domHand] || !s_aimValid[offHand]) return false;
 	if (s_grip[offHand] <= 0.5f) return false;
-	// Proximity check: hands must be within 0.5 m
-	float dx = s_aimStage[domHand].position.x - s_aimStage[offHand].position.x;
-	float dy = s_aimStage[domHand].position.y - s_aimStage[offHand].position.y;
-	float dz = s_aimStage[domHand].position.z - s_aimStage[offHand].position.z;
+	// Proximity check: hands must be within 0.5 m (use grip pose — physical hand position).
+	const XrPosef& dp = s_handValid[domHand] ? s_handStage[domHand] : s_aimStage[domHand];
+	const XrPosef& op = s_handValid[offHand] ? s_handStage[offHand] : s_aimStage[offHand];
+	float dx = dp.position.x - op.position.x;
+	float dy = dp.position.y - op.position.y;
+	float dz = dp.position.z - op.position.z;
 	return (dx*dx + dy*dy + dz*dz) < 0.5f * 0.5f;
 }
 
@@ -1519,9 +1542,12 @@ extern "C" bool VR_GetTwoHandedFwdStage(float fwd3[3])
 	const int domHand = s_settings.dominantHand ? 0 : 1;
 	const int offHand = 1 - domHand;
 	if (!s_aimValid[domHand] || !s_aimValid[offHand]) return false;
-	fwd3[0] = s_aimStage[offHand].position.x - s_aimStage[domHand].position.x;
-	fwd3[1] = s_aimStage[offHand].position.y - s_aimStage[domHand].position.y;
-	fwd3[2] = s_aimStage[offHand].position.z - s_aimStage[domHand].position.z;
+	// Inter-hand vector from grip poses (physical hand positions).
+	const XrPosef& dp = s_handValid[domHand] ? s_handStage[domHand] : s_aimStage[domHand];
+	const XrPosef& op = s_handValid[offHand] ? s_handStage[offHand] : s_aimStage[offHand];
+	fwd3[0] = op.position.x - dp.position.x;
+	fwd3[1] = op.position.y - dp.position.y;
+	fwd3[2] = op.position.z - dp.position.z;
 	const float l = std::sqrt(fwd3[0]*fwd3[0] + fwd3[1]*fwd3[1] + fwd3[2]*fwd3[2]);
 	if (l < 1e-6f) return false;
 	fwd3[0] /= l; fwd3[1] /= l; fwd3[2] /= l;
