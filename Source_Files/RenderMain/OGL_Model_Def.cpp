@@ -148,7 +148,7 @@ OGL_ModelData *OGL_GetModelData(short Collection, short Sequence, short& ModelSe
 			if (SMIter->Sequence == Sequence)
 			{
 				ModelSequence = SMIter->ModelSequence;
-				if (!MdlIter->ModelData.ModelPresent()) MdlIter->ModelData.Load();
+				if (!MdlIter->ModelData.ModelPresent()) OGL_LoadModels(Collection);
 				return MdlIter->ModelData.ModelPresent() ? &MdlIter->ModelData : NULL;
 			}
 		}
@@ -156,11 +156,11 @@ OGL_ModelData *OGL_GetModelData(short Collection, short Sequence, short& ModelSe
 		// Now check the neutral sequence
 		if (MdlIter->Sequence == Sequence)
 		{
-			if (!MdlIter->ModelData.ModelPresent()) MdlIter->ModelData.Load();
+			if (!MdlIter->ModelData.ModelPresent()) OGL_LoadModels(Collection);
 			return MdlIter->ModelData.ModelPresent() ? &MdlIter->ModelData : NULL;
 		}
 	}
-	
+
 	// Fallback for the case of a hashtable miss;
 	// do a linear search and then update the hash entry appropriately.
 	vector<ModelDataEntry>& ML = MdlList[Collection];
@@ -177,7 +177,7 @@ OGL_ModelData *OGL_GetModelData(short Collection, short Sequence, short& ModelSe
 				HashVal.ModelIndex = Indx;
 				HashVal.ModelSeqTabIndex = SMIndx;
 				ModelSequence = SMIter->ModelSequence;
-				if (!MdlIter->ModelData.ModelPresent()) MdlIter->ModelData.Load();
+				if (!MdlIter->ModelData.ModelPresent()) OGL_LoadModels(Collection);
 				return MdlIter->ModelData.ModelPresent() ? &MdlIter->ModelData : NULL;
 			}
 		}
@@ -187,7 +187,7 @@ OGL_ModelData *OGL_GetModelData(short Collection, short Sequence, short& ModelSe
 		{
 			HashVal.ModelIndex = Indx;
 			HashVal.ModelSeqTabIndex = NONE;
-			if (!MdlIter->ModelData.ModelPresent()) MdlIter->ModelData.Load();
+			if (!MdlIter->ModelData.ModelPresent()) OGL_LoadModels(Collection);
 			return MdlIter->ModelData.ModelPresent() ? &MdlIter->ModelData : NULL;
 		}
 	}

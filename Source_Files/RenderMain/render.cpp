@@ -686,10 +686,21 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 	short count = 0;
 	weapon_display_information display_data;
 
+	// Cache last successfully rendered 3D weapon so we can hold the pose during
+	// brief frames where get_weapon_display_information returns 0 items (e.g. empty-click).
+	static OGL_ModelData* s_cachedWpnModel   = nullptr;
+	static short          s_cachedWpnColl    = NONE;
+	static short          s_cachedWpnClut    = 0;
+	static int            s_cachedWpnHand    = 0;
+	static float          s_cachedWpnAmbient = 0.5f;
+	bool loopHadItems  = false;
+	bool any3DThisCall = false;
+
 	while (get_weapon_display_information(&count, &display_data))
 	{
 		// Skip shell casings (_shell_casing_type == 1 stored in low nibble of interpolation_data)
 		if ((display_data.interpolation_data & 0x0F) == 1) continue;
+		loopHadItems = true;
 
 		shape_information_data* si =
 			extended_get_shape_information(display_data.collection,
@@ -724,14 +735,6 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 			const bool primary_valid   = get_player_weapon_drawn(current_player_index, _weapon_pistol, 0);
 			const bool secondary_valid = get_player_weapon_drawn(current_player_index, _weapon_pistol, 1);
 			hand = (!primary_valid && secondary_valid) ? offHand : domHand;
-#ifdef __ANDROID__
-			static int plog = 0;
-			if ((plog++ % 15) == 0)
-				__android_log_print(ANDROID_LOG_INFO, "A1VR",
-					"pistol idx=%d hpos=%d pri=%d sec=%d hand=%d dom=%d off=%d",
-					vrWeaponIdx, (int)display_data.horizontal_position,
-					(int)primary_valid, (int)secondary_valid, hand, domHand, offHand);
-#endif
 		} else {
 			hand = domHand;
 		}
@@ -853,10 +856,74 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 		bool renderedAs3D = weaponMdl &&
 			OGL_RenderVRWeaponModel(rect, display_data.collection, 0 /*CLUT*/,
 				weaponMdl, cwx, cwy, cwz, wrx, wup_mdl, wfwd_mdl);
+		if (renderedAs3D) {
+			s_cachedWpnModel   = weaponMdl;
+			s_cachedWpnColl    = display_data.collection;
+			s_cachedWpnClut    = 0;
+			s_cachedWpnHand    = hand;
+			s_cachedWpnAmbient = float(rect.ambient_shade) / float(FIXED_ONE);
+			any3DThisCall = true;
+		}
 		if (!renderedAs3D)
 			OGL_RenderVRWeaponQuad(rect, verts);
 		if (weapon_is_dual && hand == offHand) offHandRendered = true;
 		vrWeaponIdx++;
+	}
+
+	// If the game provided no display items this frame but we have a cached 3D weapon,
+	// recalculate its world transform from current VR pose and hold it visible.
+	if (!loopHadItems && s_cachedWpnModel) {
+		float ps[3], fs[3], stage_right[3], stage_up[3];
+		if (VR_GetAimPoseStage(s_cachedWpnHand, ps, fs) &&
+		    VR_GetAimOrientStage(s_cachedWpnHand, stage_right, stage_up))
+		{
+			float stage_fwd_eff[3] = { fs[0], fs[1], fs[2] };
+			if (!weapon_is_dual && VR_IsTwoHandedActive()) {
+				float th_fwd[3];
+				if (VR_GetTwoHandedFwdStage(th_fwd)) {
+					float new_up[3] = {
+						stage_right[1]*th_fwd[2] - stage_right[2]*th_fwd[1],
+						stage_right[2]*th_fwd[0] - stage_right[0]*th_fwd[2],
+						stage_right[0]*th_fwd[1] - stage_right[1]*th_fwd[0]
+					};
+					float ul = sqrtf(new_up[0]*new_up[0] + new_up[1]*new_up[1] + new_up[2]*new_up[2]);
+					if (ul > 1e-6f) {
+						new_up[0]/=ul; new_up[1]/=ul; new_up[2]/=ul;
+						float new_right[3] = {
+							th_fwd[1]*new_up[2] - th_fwd[2]*new_up[1],
+							th_fwd[2]*new_up[0] - th_fwd[0]*new_up[2],
+							th_fwd[0]*new_up[1] - th_fwd[1]*new_up[0]
+						};
+						stage_right[0]=new_right[0]; stage_right[1]=new_right[1]; stage_right[2]=new_right[2];
+						stage_up[0]=new_up[0];       stage_up[1]=new_up[1];       stage_up[2]=new_up[2];
+						stage_fwd_eff[0]=th_fwd[0];  stage_fwd_eff[1]=th_fwd[1];  stage_fwd_eff[2]=th_fwd[2];
+					}
+				}
+			}
+			const float qx  = (ps[0] - hp[0]) * W;
+			const float qsy = (ps[1] - hp[1]) * W;
+			const float qz  = (ps[2] - hp[2]) * W;
+			const float rx = -qx, ry = -qz, rz = qsy;
+			const float cwx = camx + (float)(rx * cy - ry * sy);
+			const float cwy = camy + (float)(rx * sy + ry * cy);
+			const float cwz = camz + rz;
+			auto stageToWorldDir = [&](const float s[3], float w[3]) {
+				const float zx = -s[0], zy = -s[2], zz = s[1];
+				w[0] = (float)(zx * cy - zy * sy);
+				w[1] = (float)(zx * sy + zy * cy);
+				w[2] = zz;
+			};
+			float wrx[3], wfwd_mdl[3], wup_mdl[3];
+			stageToWorldDir(stage_right,   wrx);
+			stageToWorldDir(stage_fwd_eff, wfwd_mdl);
+			wup_mdl[0] = wfwd_mdl[1]*wrx[2] - wfwd_mdl[2]*wrx[1];
+			wup_mdl[1] = wfwd_mdl[2]*wrx[0] - wfwd_mdl[0]*wrx[2];
+			wup_mdl[2] = wfwd_mdl[0]*wrx[1] - wfwd_mdl[1]*wrx[0];
+			rectangle_definition rect;
+			rect.ambient_shade = (short)(s_cachedWpnAmbient * float(FIXED_ONE));
+			OGL_RenderVRWeaponModel(rect, s_cachedWpnColl, s_cachedWpnClut,
+				s_cachedWpnModel, cwx, cwy, cwz, wrx, wup_mdl, wfwd_mdl);
+		}
 	}
 
 	// Tell VR whether the off-hand actually has a weapon (suppresses its trigger when absent).

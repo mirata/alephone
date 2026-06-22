@@ -1086,18 +1086,49 @@ namespace {
 	float s_panelC[3] = {0,0,0}, s_panelR[3] = {1,0,0}, s_panelU[3] = {0,1,0}, s_panelN[3] = {0,0,1};
 	float s_panelHalfW = 1, s_panelHalfH = 1;
 	bool  s_panelPlaced = false;
-	// Pointer result (computed in VR_PresentScreenLayer): which hand hit the panel + screen pixel + UV.
-	bool  s_ptrActive = false; int s_ptrHand = 1;
-	int   s_ptrX = 0, s_ptrY = 0; float s_ptrU = 0.5f, s_ptrV = 0.5f;
+	// Per-hand pointer result (computed in VR_PresentScreenLayer): each controller's ray hit on the panel.
+	struct PtrHit { bool active; int x, y; float u, v; };
+	PtrHit s_ptr[2] = {};
+	int s_ptrClickHand = -1;  // hand locked for the current click (-1 = none)
 }
 extern "C" void VR_MarkWorldFramePresented(void) { s_worldFramePresented = true; s_panelPlaced = false; /* re-place the 2D panel next time a menu is shown */ }
 extern "C" bool VR_TakeWorldFramePresented(void) { bool v = s_worldFramePresented; s_worldFramePresented = false; return v; }
 
-// Menu pointer: the screen-layer pixel the active controller ray is hitting (false = no hit), and
-// whether that controller's trigger is pressed (for a click). Computed in VR_PresentScreenLayer.
-extern "C" bool VR_GetPointerScreen(int* x, int* y) { if (s_ptrActive) { if (x) *x = s_ptrX; if (y) *y = s_ptrY; } return s_ptrActive; }
-extern "C" bool VR_GetPointerClick(void) { if (!s_ptrActive) return false; return s_trigger[s_ptrHand] > 0.5f; }   // raw per-hand trigger (s_fire is the routed dominant one)
-extern "C" bool VR_GetPointerGrip(void) { if (!s_ptrActive) return false; return s_grip[s_ptrHand] > 0.5f; }       // grip/squeeze on the pointing hand (cheat modifier in menus)
+// Menu pointer: the screen-layer pixel the dominant (or any) controller ray is hitting (false = no hit).
+// s_ptrClickHand is locked at DOWN and held through UP so both events come from the same cursor position.
+// VR_GetPointerScreen must be called before VR_GetPointerClick each frame (screen.cpp does this).
+extern "C" bool VR_GetPointerScreen(int* x, int* y) {
+	int dom = s_settings.dominantHand ? 0 : 1, off = 1 - dom;
+	// If no click in progress, check whether one is starting now.
+	if (s_ptrClickHand < 0) {
+		const int order[2] = {dom, off};
+		for (int i = 0; i < 2; ++i) {
+			int h = order[i];
+			if (s_ptr[h].active && s_trigger[h] > 0.5f) { s_ptrClickHand = h; break; }
+		}
+	}
+	// Use locked click hand for consistent DOWN/UP position; VR_GetPointerClick clears lock on release.
+	if (s_ptrClickHand >= 0 && s_ptr[s_ptrClickHand].active) {
+		if (x) *x = s_ptr[s_ptrClickHand].x; if (y) *y = s_ptr[s_ptrClickHand].y;
+		return true;
+	}
+	// Normal hover: prefer dominant hand, fall back to off-hand.
+	const PtrHit& h = s_ptr[dom].active ? s_ptr[dom] : s_ptr[off];
+	if (!h.active) return false;
+	if (x) *x = h.x; if (y) *y = h.y;
+	return true;
+}
+extern "C" bool VR_GetPointerClick(void) {
+	if (s_ptrClickHand >= 0) {
+		if (s_ptr[s_ptrClickHand].active && s_trigger[s_ptrClickHand] > 0.5f) return true;
+		s_ptrClickHand = -1;  // trigger released: unlock hand
+	}
+	return false;
+}
+extern "C" bool VR_GetPointerGrip(void) {
+	for (int h = 0; h < 2; ++h) if (s_ptr[h].active && s_grip[h] > 0.5f) return true;
+	return false;
+}
 
 // ---------------------------------------------------------- screen layer ----
 namespace {
@@ -1154,17 +1185,19 @@ namespace {
 		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
 		glBindVertexArray(0);
 
-		// Cursor program: a solid-coloured quad (reuses the same VAO) drawn at the pointer hit.
+		// Cursor program: a circle (reuses the same [-1,1] quad VAO; fragment discards outside unit circle).
 		static const char* cvs =
 			"#version 300 es\n"
 			"layout(location=0) in vec2 aPos;\n"
+			"out vec2 vPos;\n"
 			"uniform mat4 uMVP;\n"
-			"void main(){ gl_Position = uMVP * vec4(aPos,0.0,1.0); }\n";
+			"void main(){ vPos = aPos; gl_Position = uMVP * vec4(aPos,0.0,1.0); }\n";
 		static const char* cfs =
 			"#version 300 es\n"
 			"precision mediump float;\n"
+			"in vec2 vPos;\n"
 			"uniform vec4 uColor; out vec4 o;\n"
-			"void main(){ o = uColor; }\n";
+			"void main(){ if(length(vPos)>1.0) discard; o = uColor; }\n";
 		GLuint cv = compile(GL_VERTEX_SHADER, cvs), cf = compile(GL_FRAGMENT_SHADER, cfs);
 		s_curProg = glCreateProgram();
 		glAttachShader(s_curProg, cv); glAttachShader(s_curProg, cf); glLinkProgram(s_curProg);
@@ -1461,27 +1494,26 @@ namespace {
 		s_panelPlaced = true;
 	}
 
-	// Intersect each controller aim ray with the panel; pick the closest hit -> screen pixel + UV.
+	// Intersect each controller aim ray with the panel independently; both can hit at once.
 	void updatePointer() {
-		s_ptrActive = false;
-		float bestT = 1e9f;
-		for (int h=0; h<2; ++h) {
+		for (int h = 0; h < 2; ++h) {
+			s_ptr[h].active = false;
 			if (!s_aimValid[h]) continue;
 			float O[3] = { s_aimStage[h].position.x, s_aimStage[h].position.y, s_aimStage[h].position.z };
 			float Dd[3]; poseFwd(s_aimStage[h], Dd);
 			float denom = vdot(Dd, s_panelN);
-			if (denom > -1e-4f) continue;                 // ray must point at the panel's front face
+			if (denom > -1e-4f) continue;
 			float oc[3]; vsub(s_panelC, O, oc);
 			float t = vdot(oc, s_panelN)/denom;
-			if (t <= 0 || t >= bestT) continue;
+			if (t <= 0) continue;
 			float hit[3] = { O[0]+Dd[0]*t, O[1]+Dd[1]*t, O[2]+Dd[2]*t };
 			float loc[3]; vsub(hit, s_panelC, loc);
 			float u = vdot(loc, s_panelR)/s_panelHalfW;
 			float v = vdot(loc, s_panelU)/s_panelHalfH;
 			if (u<-1||u>1||v<-1||v>1) continue;
-			bestT = t; s_ptrActive = true; s_ptrHand = h; s_ptrU = u; s_ptrV = v;
-			s_ptrX = (int)((u*0.5f+0.5f) * kScreenW);
-			s_ptrY = (int)((1.0f-(v*0.5f+0.5f)) * kScreenH);
+			s_ptr[h].active = true; s_ptr[h].u = u; s_ptr[h].v = v;
+			s_ptr[h].x = (int)((u*0.5f+0.5f) * kScreenW);
+			s_ptr[h].y = (int)((1.0f-(v*0.5f+0.5f)) * kScreenH);
 		}
 	}
 }
@@ -1635,16 +1667,21 @@ extern "C" void VR_PresentScreenLayer(void)
 			s_panelU[0]*hh, s_panelU[1]*hh, s_panelU[2]*hh, 0,
 			s_panelN[0],    s_panelN[1],    s_panelN[2],    0,
 			s_panelC[0],    s_panelC[1],    s_panelC[2],    1 };
-		// Cursor: small quad at the hit point, a hair toward the head so it sits in front of the panel.
+		// Cursor quads: one per active hand, a hair in front of the panel.
 		const float cs = 0.012f;
-		const float cc[3] = { s_panelC[0] + s_ptrU*hw*s_panelR[0] + s_ptrV*hh*s_panelU[0] + s_panelN[0]*0.01f,
-		                      s_panelC[1] + s_ptrU*hw*s_panelR[1] + s_ptrV*hh*s_panelU[1] + s_panelN[1]*0.01f,
-		                      s_panelC[2] + s_ptrU*hw*s_panelR[2] + s_ptrV*hh*s_panelU[2] + s_panelN[2]*0.01f };
-		float curModel[16] = {
-			s_panelR[0]*cs, s_panelR[1]*cs, s_panelR[2]*cs, 0,
-			s_panelU[0]*cs, s_panelU[1]*cs, s_panelU[2]*cs, 0,
-			s_panelN[0],    s_panelN[1],    s_panelN[2],    0,
-			cc[0],          cc[1],          cc[2],          1 };
+		float curModel[2][16] = {};
+		for (int h = 0; h < 2; ++h) {
+			if (!s_ptr[h].active) continue;
+			const float u = s_ptr[h].u, v = s_ptr[h].v;
+			const float cx = s_panelC[0] + u*hw*s_panelR[0] + v*hh*s_panelU[0] + s_panelN[0]*0.01f;
+			const float cy = s_panelC[1] + u*hw*s_panelR[1] + v*hh*s_panelU[1] + s_panelN[1]*0.01f;
+			const float cz = s_panelC[2] + u*hw*s_panelR[2] + v*hh*s_panelU[2] + s_panelN[2]*0.01f;
+			curModel[h][0] = s_panelR[0]*cs; curModel[h][1] = s_panelR[1]*cs; curModel[h][2] = s_panelR[2]*cs; curModel[h][3] = 0;
+			curModel[h][4] = s_panelU[0]*cs; curModel[h][5] = s_panelU[1]*cs; curModel[h][6] = s_panelU[2]*cs; curModel[h][7] = 0;
+			curModel[h][8] = s_panelN[0];    curModel[h][9] = s_panelN[1];    curModel[h][10]= s_panelN[2];    curModel[h][11]= 0;
+			curModel[h][12]= cx;              curModel[h][13]= cy;              curModel[h][14]= cz;             curModel[h][15]= 1;
+		}
+		const int domIdx = s_settings.dominantHand ? 0 : 1;
 
 		for (int e = 0; e < kEyes; ++e) {
 			VR_BeginEye(e);
@@ -1665,12 +1702,13 @@ extern "C" void VR_PresentScreenLayer(void)
 			glUniform1i(s_quadTexLoc, 0);
 			glBindVertexArray(s_quadVAO);
 			glDrawArrays(GL_TRIANGLES, 0, 6);
-			// cursor
-			if (s_ptrActive) {
-				float cmvp[16]; mat_mul(cmvp, vp, curModel);
-				glUseProgram(s_curProg);
+			// cursors: red circles for both hands
+			glUseProgram(s_curProg);
+			glUniform4f(s_curColorLoc, 1.0f, 0.1f, 0.1f, 1.0f);
+			for (int h = 0; h < 2; ++h) {
+				if (!s_ptr[h].active) continue;
+				float cmvp[16]; mat_mul(cmvp, vp, curModel[h]);
 				glUniformMatrix4fv(s_curMVPLoc, 1, GL_FALSE, cmvp);
-				glUniform4f(s_curColorLoc, 1.0f, 0.85f, 0.1f, 1.0f);
 				glDrawArrays(GL_TRIANGLES, 0, 6);
 			}
 			glBindVertexArray(0);

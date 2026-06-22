@@ -2553,6 +2553,27 @@ void MainScreenSwap()
 				}
 				clickPrev = click;
 			}
+			// Move-stick Y -> mouse wheel for scrollable lists (level select etc.).
+			// First frame past deadzone fires immediately; subsequent ticks repeat at ~10/sec.
+			{
+				static float scrollAccum = 0.0f;
+				static bool scrollFired = false;
+				float mx = 0, my = 0; VR_GetMove(&mx, &my);
+				if (fabsf(my) > 0.15f) {
+					if (!scrollFired) {
+						// Immediate tick on first press
+						SDL_Event sw{}; sw.type = SDL_MOUSEWHEEL; sw.wheel.y = my > 0 ? 1 : -1;
+						SDL_PushEvent(&sw);
+						scrollFired = true; scrollAccum = 0.0f;
+					} else {
+						scrollAccum += my * (1.0f / 3.0f);
+						const int ticks = (int)scrollAccum;
+						if (ticks != 0) { scrollAccum -= (float)ticks;
+							SDL_Event sw{}; sw.type = SDL_MOUSEWHEEL; sw.wheel.y = ticks;
+							SDL_PushEvent(&sw); }
+					}
+				} else { scrollFired = false; scrollAccum = 0.0f; }
+			}
 		}
 		// Re-bind the screen-layer FBO so the next frame's 2D UI renders into it (not the pbuffer).
 		glBindFramebuffer(GL_FRAMEBUFFER, VR_ScreenLayerFramebuffer());
