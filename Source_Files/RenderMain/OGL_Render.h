@@ -94,6 +94,15 @@ bool OGL_RenderSprite(rectangle_definition& RenderRectangle);
 // (after render_tree, before SetForeground). Android-only.
 bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3]);
 
+// VR: render a 3D model attached to the controller in world space.
+// wrx/wup/wfwd are the controller's right/up/forward unit vectors in Marathon world space.
+// Returns false if the model or skin could not be rendered (caller should fall back to quad).
+struct OGL_ModelData;
+bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short CLUT,
+    OGL_ModelData* ModelPtr,
+    float cwx, float cwy, float cwz,
+    const float wrx[3], const float wup[3], const float wfwd[3]);
+
 // Rendering crosshairs
 bool OGL_RenderCrosshairs();
 

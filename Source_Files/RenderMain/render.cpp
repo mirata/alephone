@@ -217,6 +217,7 @@ Jan 17, 2001 (Loren Petrich):
 #include "AnimatedTextures.h"
 #ifdef HAVE_OPENGL
 #include "OGL_Render.h"
+#include "OGL_Model_Def.h"
 #endif
 
 #ifdef QUICKDRAW_DEBUG
@@ -785,9 +786,10 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 			w[1] = (float)(zx * sy + zy * cy);
 			w[2] = zz;
 		};
-		float wrx[3], wup[3];
+		float wrx[3], wup[3], wfwd[3];
 		stageToWorldDir(stage_right, wrx);
 		stageToWorldDir(stage_up,    wup);
+		stageToWorldDir(fs,          wfwd);
 
 		// Sprite half-sizes in Marathon world units.
 		const float spriteScaleM = 0.5f;
@@ -833,7 +835,14 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 		instantiate_rectangle_transfer_mode(view, &rect,
 			display_data.transfer_mode, display_data.transfer_phase);
 
-		OGL_RenderVRWeaponQuad(rect, verts);
+		short modelSeq = NONE;
+		OGL_ModelData* weaponMdl = OGL_GetModelData(
+			display_data.collection, display_data.shape_index, modelSeq);
+		bool renderedAs3D = weaponMdl &&
+			OGL_RenderVRWeaponModel(rect, display_data.collection, 0 /*CLUT*/,
+				weaponMdl, cwx, cwy, cwz, wrx, wup, wfwd);
+		if (!renderedAs3D)
+			OGL_RenderVRWeaponQuad(rect, verts);
 		if (weapon_is_dual && hand == offHand) offHandRendered = true;
 		vrWeaponIdx++;
 	}

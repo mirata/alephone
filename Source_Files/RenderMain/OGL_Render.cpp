@@ -3279,6 +3279,77 @@ static void SetBlend(short _BlendType)
 	}
 }
 
+// VR: render a 3D model attached to the VR controller in Marathon world space.
+// wrx/wup/wfwd are the controller's right/up/forward unit vectors in Marathon world space.
+// Uses the same model-render path as world-sprite replacement (StandardShaders / NormalShader).
+bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short CLUT,
+    OGL_ModelData* ModelPtr,
+    float cwx, float cwy, float cwz,
+    const float wrx[3], const float wup[3], const float wfwd[3])
+{
+    if (!OGL_IsActive() || !ModelPtr) return false;
+
+    OGL_SkinData* SkinPtr = ModelPtr->GetSkin(CLUT);
+    if (!SkinPtr) return false;
+
+    float amb = std::min(1.0f, std::max(0.0f, float(RR.ambient_shade) / float(FIXED_ONE)));
+    ShaderData.Color[0]   = amb;
+    ShaderData.Color[1]   = amb;
+    ShaderData.Color[2]   = amb;
+    ShaderData.Color[3]   = 1.0f;
+    ShaderData.ModelPtr   = ModelPtr;
+    ShaderData.SkinPtr    = SkinPtr;
+    ShaderData.Collection = Collection;
+    ShaderData.CLUT       = CLUT;
+
+    SET_FLAG(StandardShaders[0].Flags, ModelRenderer::ExtLight,   false);
+    SET_FLAG(StandardShaders[0].Flags, ModelRenderer::EL_SemiTpt, false);
+
+    bool IsBlended          = SkinPtr->OpacityType != OGL_OpacType_Crisp;
+    bool IsGlowing          = SkinPtr->GlowImg.IsPresent();
+    int  NumShaders         = IsGlowing ? 2 : 1;
+    int  NumSepShaders      = IsBlended ? 0 : 1;
+
+    if (ModelPtr->Sidedness < 0) {
+        glEnable(GL_CULL_FACE);
+        glFrontFace(GL_CCW);
+    } else if (ModelPtr->Sidedness == 0) {
+        glDisable(GL_CULL_FACE);
+    }
+
+    // Controller model→world matrix (column-major for GL).
+    // Columns: right (wrx), up (wup), forward (wfwd), translation.
+    GLfloat m[16] = {
+        wrx[0],  wrx[1],  wrx[2],  0.0f,
+        wup[0],  wup[1],  wup[2],  0.0f,
+        wfwd[0], wfwd[1], wfwd[2], 0.0f,
+        cwx,     cwy,     cwz,     1.0f
+    };
+
+    glDisable(GL_ALPHA_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+
+    glPushMatrix();
+    glMultMatrixf(m);
+
+    ModelRenderObject.Render(ModelPtr->Model, StandardShaders,
+        NumShaders, NumSepShaders, true);
+
+    glPopMatrix();
+
+    SetBlend(OGL_BlendType_Crossfade);
+
+    if (ModelPtr->Sidedness <= 0) {
+        glEnable(GL_CULL_FACE);
+        glFrontFace(GL_CW);
+    }
+
+    return true;
+}
+
 // VR: render a textured quad in Marathon world space (world units, Z-up) using the GL
 // projection + modelview that Rasterizer_Shader::SetView() loaded for the current VR eye.
 // Called after render_tree() / render_vr_aim_debug() while those matrices are still active.
