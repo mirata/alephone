@@ -612,7 +612,7 @@ namespace {
 	float       s_stickX[2] = {0,0}, s_stickY[2] = {0,0}, s_trigger[2] = {0,0};   // raw per-hand
 	float       s_grip[2] = {0,0};                   // raw per-hand squeeze/grip
 	bool        s_stickClick[2] = {false, false};   // raw per-hand thumbstick press
-	float       s_moveX = 0, s_moveY = 0, s_turnX = 0;   // routed (handedness/switch-sticks applied)
+	float       s_moveX = 0, s_moveY = 0, s_turnX = 0, s_turnY = 0;   // routed (handedness/switch-sticks applied)
 	bool        s_fire = false, s_altFire = false, s_action = false;
 	bool        s_isDualWield = false;
 	bool        s_offHandHasWeapon = true;
@@ -733,7 +733,7 @@ namespace {
 		const int moveIdx = VR_Settings()->switchSticks ? offIdx : domIdx;
 		const int turnIdx = VR_Settings()->switchSticks ? domIdx : offIdx;
 		s_moveX = s_stickX[moveIdx]; s_moveY = s_stickY[moveIdx];
-		s_turnX = s_stickX[turnIdx];
+		s_turnX = s_stickX[turnIdx]; s_turnY = s_stickY[turnIdx];
 		s_fire    = s_trigger[domIdx] > 0.5f;
 		s_altFire = s_trigger[offIdx] > 0.5f;
 
@@ -956,6 +956,7 @@ extern "C" bool VR_GetHmdYawPitch(float* yawAngleUnits, float* pitchAngleUnits)
 
 extern "C" void VR_GetMove(float* x, float* y) { if (x) *x = s_moveX; if (y) *y = s_moveY; }
 extern "C" void VR_GetTurn(float* x)           { if (x) *x = s_turnX; }
+extern "C" void VR_GetTurnY(float* y)          { if (y) *y = s_turnY; }
 
 // Deadzoned + rescaled thumbstick so partial deflection gives proportionally slower movement.
 extern "C" void VR_GetAnalogMove(float* strafe, float* forward)
@@ -1757,6 +1758,7 @@ extern "C" bool VR_GetEyeResolution(int* w, int* h) { (void)w; (void)h; return f
 extern "C" bool VR_GetHmdYawPitch(float* y, float* p) { if (y) *y = 0; if (p) *p = 0; return false; }
 extern "C" void VR_GetMove(float* x, float* y) { if (x) *x = 0; if (y) *y = 0; }
 extern "C" void VR_GetTurn(float* x)           { if (x) *x = 0; }
+extern "C" void VR_GetTurnY(float* y)          { if (y) *y = 0; }
 extern "C" void VR_GetAnalogMove(float* s, float* f) { if (s) *s = 0; if (f) *f = 0; }
 extern "C" void VR_LatchHeadMove(void) {}
 extern "C" void VR_GetHeadMove(float* x, float* y) { if (x) *x = 0; if (y) *y = 0; }

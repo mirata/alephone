@@ -97,6 +97,8 @@ Feb 20, 2002 (Woody Zenfell):
 #include "Packing.h"
 #include "ActionQueues.h"
 #include "computer_interface.h"
+#include "screen.h"
+#include "ViewControl.h"
 #include "Console.h"
 #include "joystick.h"
 #include "Movie.h"
@@ -1447,18 +1449,43 @@ uint32 parse_keymap(void)
 #if defined(__ANDROID__)
 	// VR face buttons drive terminals here (build_terminal_action_flags overwrote `flags` above, and
 	// it reads the keyboard STATE which our injected key events don't update). Edge-triggered so a
-	// hold = one action. A/X => _terminal_next_state (next screen); Y/B => _terminal_page_up (back).
+	// hold = one action. A/X => advance; Y/B => back (or abort if already at the beginning).
 	if (VR_IsActive()) {
 		static bool advPrev = false, backPrev = false;
 		const bool adv = VR_GetAdvance(), bk = VR_GetBack();
 		if (adv && !advPrev) flags |= _left_trigger_state;   // == _terminal_next_state
-		if (bk  && !backPrev) flags |= _turning_left;        // == _terminal_page_up
+		if (bk  && !backPrev) {
+			if (player_terminal_at_beginning(local_player_index))
+				flags |= _action_trigger_state;  // == _any_abort_key_mask: exit terminal
+			else
+				flags |= _turning_left;          // == _terminal_page_up: scroll back
+		}
 		advPrev = adv; backPrev = bk;
 	}
 #endif
       }
+
+#if defined(__ANDROID__)
+	  // Non-dominant stick Y zooms the overhead map in/out while the map is open.
+	  if (VR_IsActive() && !player_in_terminal_mode(local_player_index) &&
+	      PLAYER_HAS_MAP_OPEN(local_player) && View_MapActive()) {
+		  static float mapZoomAccum = 0.0f;
+		  float turnY = 0; VR_GetTurnY(&turnY);
+		  if (fabsf(turnY) > 0.15f) {
+			  mapZoomAccum += turnY * (1.0f / 8.0f);
+			  const int ticks = (int)mapZoomAccum;
+			  if (ticks != 0) {
+				  mapZoomAccum -= (float)ticks;
+				  for (int i = 0; i < ticks;  ++i) zoom_overhead_map_in();
+				  for (int i = 0; i > ticks;  --i) zoom_overhead_map_out();
+			  }
+		  } else {
+			  mapZoomAccum = 0.0f;
+		  }
+	  }
+#endif
     } // if(get_keyboard_controller_status())
-  
+
   return flags;
 }
 

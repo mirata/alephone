@@ -658,6 +658,33 @@ bool player_in_terminal_mode(
 	return in_terminal_mode;
 }
 
+bool player_terminal_at_beginning(short player_index)
+{
+	struct player_terminal_data *terminal = get_player_terminal_data(player_index);
+	if (!terminal || terminal->current_line > 0) return false;
+	terminal_text_t *terminal_text = get_indexed_terminal_data(terminal->terminal_id);
+	if (!terminal_text) return false;
+	// Mirror previous_terminal_group's scan without touching state:
+	// returns true when there is no displayable group behind current_group.
+	short gi = terminal->current_group - 1;
+	bool done = false, can_go_back = false;
+	do {
+		if (gi < 0) { done = true; break; }
+		struct terminal_groupings *g = get_indexed_grouping(terminal_text, gi);
+		if (!g) { done = true; break; }
+		switch (g->type) {
+			case _logon_group: case _end_group:
+			case _unfinished_group: case _success_group: case _failure_group: case _static_group:
+				done = true; break;
+			case _sound_group: case _tag_group:
+				gi--; break;
+			default:
+				can_go_back = true; done = true; break;
+		}
+	} while (!done);
+	return !can_go_back;
+}
+
 void _render_computer_interface(void)
 {
 	struct player_terminal_data *terminal_data= get_player_terminal_data(current_player_index);

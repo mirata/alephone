@@ -108,6 +108,7 @@ void dirty_terminal_view(short player_index);
 void abort_terminal_mode(short player_index);
 
 bool player_in_terminal_mode(short player_index);
+bool player_terminal_at_beginning(short player_index);  // true when at line 0 (back would do nothing)
 
 // LP: to pack and unpack this data;
 // these hide the unpacked data from the outside world.

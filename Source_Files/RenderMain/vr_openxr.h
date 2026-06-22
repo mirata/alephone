@@ -108,7 +108,8 @@ void VR_RecenterHead(void);
 // Added to view->origin.z so the visibility tree uses the true eye height; subtracted in the
 // Rasterizer so the rendered camera is unchanged.
 float VR_GetEyeZOffset(void);
-void VR_GetTurn(float* x);             // right thumbstick X: snap/smooth turn
+void VR_GetTurn(float* x);             // non-dominant thumbstick X: snap/smooth turn
+void VR_GetTurnY(float* y);            // non-dominant thumbstick Y: used for map zoom in-game
 bool VR_GetFire(void);                 // right trigger
 bool VR_GetSecondaryFire(void);        // left trigger
 bool VR_GetAction(void);               // A button (use terminals/switches)
