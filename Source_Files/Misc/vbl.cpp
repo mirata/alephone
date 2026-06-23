@@ -1444,6 +1444,13 @@ uint32 parse_keymap(void)
       }
 		
       
+#if defined(__ANDROID__)
+	  // Always track VR advance/back button edges, even outside terminal mode, so that the button
+	  // press that opens a terminal isn't also seen as the first "advance" inside it.
+	  static bool s_vrAdvPrev = false, s_vrBackPrev = false;
+	  const bool s_vrAdv = VR_IsActive() && VR_GetAdvance();
+	  const bool s_vrBk  = VR_IsActive() && VR_GetBack();
+#endif
       if (player_in_terminal_mode(local_player_index)) {
 	flags = build_terminal_action_flags((char *)key_map);
 #if defined(__ANDROID__)
@@ -1451,19 +1458,19 @@ uint32 parse_keymap(void)
 	// it reads the keyboard STATE which our injected key events don't update). Edge-triggered so a
 	// hold = one action. A/X => advance; Y/B => back (or abort if already at the beginning).
 	if (VR_IsActive()) {
-		static bool advPrev = false, backPrev = false;
-		const bool adv = VR_GetAdvance(), bk = VR_GetBack();
-		if (adv && !advPrev) flags |= _left_trigger_state;   // == _terminal_next_state
-		if (bk  && !backPrev) {
+		if (s_vrAdv && !s_vrAdvPrev) flags |= _left_trigger_state;   // == _terminal_next_state
+		if (s_vrBk  && !s_vrBackPrev) {
 			if (player_terminal_at_beginning(local_player_index))
 				flags |= _action_trigger_state;  // == _any_abort_key_mask: exit terminal
 			else
 				flags |= _turning_left;          // == _terminal_page_up: scroll back
 		}
-		advPrev = adv; backPrev = bk;
 	}
 #endif
       }
+#if defined(__ANDROID__)
+	  s_vrAdvPrev = s_vrAdv; s_vrBackPrev = s_vrBk;
+#endif
 
 #if defined(__ANDROID__)
 	  // Non-dominant stick Y zooms the overhead map in/out while the map is open.
