@@ -123,6 +123,23 @@ void Rasterizer_Shader_Class::SetView(view_data& view) {
 
 		float vrProj[16];
 		VR_GetEyeProjection(eye, vrProj, 0.05f, (128.0f * 1024.0f) / WUperMetre);
+
+		// Mirror the flat renderer's teleport/fold distortion: world_to_screen_x/y are modified
+		// by update_render_effect() relative to their "real" values during _render_effect_fold_in/out.
+		// The flat path scales xtan/ytan by real/modified before glFrustum; apply the same ratio to
+		// the VR projection matrix entries directly. proj[0]/proj[5] are the FOV scale factors;
+		// proj[8]/proj[9] are the per-eye centre offsets — scaling them together preserves the IPD
+		// convergence direction while changing the apparent FOV.
+		if (view.effect != NONE &&
+		    view.real_world_to_screen_x != 0 && view.real_world_to_screen_y != 0 &&
+		    VR_Settings()->teleportDistortion)
+		{
+			const float sx = float(view.world_to_screen_x) / float(view.real_world_to_screen_x);
+			const float sy = float(view.world_to_screen_y) / float(view.real_world_to_screen_y);
+			vrProj[0] *= sx;  vrProj[8]  *= sx;
+			vrProj[5] *= sy;  vrProj[9]  *= sy;
+		}
+
 		glMatrixMode(GL_PROJECTION);
 		glLoadMatrixf(vrProj);
 

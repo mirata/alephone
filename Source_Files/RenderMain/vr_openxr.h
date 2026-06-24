@@ -44,6 +44,7 @@ typedef struct {
 	float hudTiltDeg;       // degrees the HUD bottom-anchor is pitched down from horizontal (0 = eye level,
 	                        //   30 = lower dashboard look, negative = above horizontal)
 	int   mapPlayerUp;      // 1 = rotate the overhead map so the player's facing direction is always at the top
+	int   teleportDistortion; // 1 = apply horizontal-stretch/vertical-compress warp during teleport fold effect
 } vr_settings_t;
 
 vr_settings_t* VR_Settings(void);
