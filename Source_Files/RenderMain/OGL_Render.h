@@ -101,7 +101,8 @@ struct OGL_ModelData;
 bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short CLUT,
     OGL_ModelData* ModelPtr,
     float cwx, float cwy, float cwz,
-    const float wrx[3], const float wup[3], const float wfwd[3]);
+    const float wrx[3], const float wup[3], const float wfwd[3],
+    bool isStatic = false);
 
 // Rendering crosshairs
 bool OGL_RenderCrosshairs();

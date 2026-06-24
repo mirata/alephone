@@ -1669,7 +1669,7 @@ extern "C" void VR_PresentScreenLayer(void)
 			s_panelN[0],    s_panelN[1],    s_panelN[2],    0,
 			s_panelC[0],    s_panelC[1],    s_panelC[2],    1 };
 		// Cursor quads: one per active hand, a hair in front of the panel.
-		const float cs = 0.012f;
+		const float cs = 0.012f * 1.3f;
 		float curModel[2][16] = {};
 		for (int h = 0; h < 2; ++h) {
 			if (!s_ptr[h].active) continue;
@@ -1703,15 +1703,18 @@ extern "C" void VR_PresentScreenLayer(void)
 			glUniform1i(s_quadTexLoc, 0);
 			glBindVertexArray(s_quadVAO);
 			glDrawArrays(GL_TRIANGLES, 0, 6);
-			// cursors: red circles for both hands
+			// cursors: grey translucent circles for both hands
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 			glUseProgram(s_curProg);
-			glUniform4f(s_curColorLoc, 1.0f, 0.1f, 0.1f, 1.0f);
+			glUniform4f(s_curColorLoc, 0.5f, 0.5f, 0.5f, 0.5f);
 			for (int h = 0; h < 2; ++h) {
 				if (!s_ptr[h].active) continue;
 				float cmvp[16]; mat_mul(cmvp, vp, curModel[h]);
 				glUniformMatrix4fv(s_curMVPLoc, 1, GL_FALSE, cmvp);
 				glDrawArrays(GL_TRIANGLES, 0, 6);
 			}
+			glDisable(GL_BLEND);
 			glBindVertexArray(0);
 			VR_FinishEye(e);
 		}

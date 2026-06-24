@@ -269,6 +269,9 @@ GLuint    g_currentProgram   = 0;
 GLuint g_vao = 0, g_vbo = 0, g_ibo = 0;
 GLuint g_builtinProg = 0;
 GLint  u_mvp = -1, u_texmat = -1, u_useTex = -1, u_useVColor = -1, u_color = -1, u_tex = -1;
+GLint  u_isStatic = -1, u_staticTime = -1;
+float  g_builtinStaticTime = 0.0f;
+int    g_builtinIsStatic    = 0;
 
 // Recorded fog state (set via glFogf/glFogfv; uploaded as the a1_Fog uniform to engine shaders).
 float g_fogColor[4]  = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -403,11 +406,28 @@ void ensureBuiltin() {
         "in vec4 vColor;\n"
         "uniform int uUseTex;\n"
         "uniform sampler2D uTex;\n"
+        "uniform int uIsStatic;\n"
+        "uniform float uStaticTime;\n"
         "out vec4 fragColor;\n"
+        "highp float rand(highp vec2 co) {\n"
+        "  highp float dt = dot(co, vec2(12.9898, 78.233));\n"
+        "  return fract(sin(mod(dt, 3.14159)) * 43758.5453);\n"
+        "}\n"
         "void main() {\n"
-        "  vec4 c = vColor;\n"
-        "  if (uUseTex != 0) c *= texture(uTex, vTex);\n"
-        "  fragColor = c;\n"
+        "  if (uIsStatic != 0) {\n"
+        "    highp float moment = fract(uStaticTime / 10000.0);\n"
+        "    highp float bx = floor(gl_FragCoord.x / 2.0);\n"
+        "    highp float by = floor(gl_FragCoord.y / 2.0);\n"
+        "    highp float sr = rand(vec2(moment * bx, moment * by));\n"
+        "    highp float sg = rand(vec2(moment * bx * sr, moment * by));\n"
+        "    highp float sb = rand(vec2(moment * bx * sg, moment * by * sg));\n"
+        "    float a = (uUseTex != 0) ? texture(uTex, vTex).a : 1.0;\n"
+        "    fragColor = vec4(sr, sg, sb, a);\n"
+        "  } else {\n"
+        "    vec4 c = vColor;\n"
+        "    if (uUseTex != 0) c *= texture(uTex, vTex);\n"
+        "    fragColor = c;\n"
+        "  }\n"
         "}\n";
 
     GLuint v = compileSh(GL_VERTEX_SHADER, kVert);
@@ -426,12 +446,14 @@ void ensureBuiltin() {
     glDeleteShader(v);
     glDeleteShader(f);
 
-    u_mvp       = glGetUniformLocation(g_builtinProg, "uMVP");
-    u_texmat    = glGetUniformLocation(g_builtinProg, "uTexMat");
-    u_useTex    = glGetUniformLocation(g_builtinProg, "uUseTex");
-    u_useVColor = glGetUniformLocation(g_builtinProg, "uUseVColor");
-    u_color     = glGetUniformLocation(g_builtinProg, "uColor");
-    u_tex       = glGetUniformLocation(g_builtinProg, "uTex");
+    u_mvp        = glGetUniformLocation(g_builtinProg, "uMVP");
+    u_texmat     = glGetUniformLocation(g_builtinProg, "uTexMat");
+    u_useTex     = glGetUniformLocation(g_builtinProg, "uUseTex");
+    u_useVColor  = glGetUniformLocation(g_builtinProg, "uUseVColor");
+    u_color      = glGetUniformLocation(g_builtinProg, "uColor");
+    u_tex        = glGetUniformLocation(g_builtinProg, "uTex");
+    u_isStatic   = glGetUniformLocation(g_builtinProg, "uIsStatic");
+    u_staticTime = glGetUniformLocation(g_builtinProg, "uStaticTime");
 
     ensureBuffers();
 }
@@ -522,6 +544,8 @@ void flushBuiltin(GLenum mode, const std::vector<int>& verts) {
     glUniform1i(u_useVColor, useVColor ? 1 : 0);
     glUniform4fv(u_color, 1, g_color);
     glUniform1i(u_tex, 0);
+    glUniform1i(u_isStatic, g_builtinIsStatic);
+    glUniform1f(u_staticTime, g_builtinStaticTime);
 
     glDrawArrays(mode, 0, (GLsizei)verts.size());
     glUseProgram(0);
@@ -610,6 +634,11 @@ void a1ffFrontFace(GLenum mode) {
 }
 
 void a1ffUseProgram(GLuint program) { g_currentProgram = program; glUseProgram(program); }
+
+void a1ffStaticMode(int on, float time) {
+    g_builtinIsStatic  = on;
+    g_builtinStaticTime = time;
+}
 
 // Fog parameter capture (GL_FOG_* tokens; values per classic glFog semantics).
 void a1ffFogf(GLenum pname, GLfloat param) {

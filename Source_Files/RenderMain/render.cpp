@@ -420,11 +420,10 @@ void initialize_view_data(
 }
 
 #if defined(__ANDROID__)
-#include <android/log.h>
-// ---- 3D virtual-gun aim debug (calibration) -------------------------------------------------
-// For each controller, draw a marker at the controller + a ray to the first world-geometry hit +
-// a dot at the hit. Dominant hand = red, off-hand = blue. Drawn per-eye while the world
-// projection/modelview from SetView are active, so vertices are in Marathon world units.
+// ---- 3D aim reticle (red dot projected onto world geometry) ---------------------------------
+// Raycasts from the dominant controller along its aim direction and draws a camera-facing red
+// filled disc at the hit point. Drawn per-eye while the world projection/modelview from SetView
+// are active, so vertices are in Marathon world units.
 
 // Raycast from `origin` (inside `poly`) along the unit direction (dx,dy,dz) up to maxDist; stop at the
 // first solid wall / floor / ceiling. Geometry only (ignores monsters). Returns the hit point.
@@ -477,162 +476,101 @@ static world_point3d vr_raycast_geometry(world_point3d origin, short poly, doubl
 	return cur;
 }
 
-static void render_vr_aim_debug(view_data* view)
+static void render_vr_aim_reticle(view_data* view)
 {
 	if (!VR_IsActive()) return;
 
+	short weap_type = NONE, weap_mode = 0;
+	get_player_weapon_mode_and_type(current_player_index, &weap_type, &weap_mode);
+	if (weap_type == _weapon_fist) return;
+	const bool weapon_is_dual = (weap_type == _weapon_doublefisted_pistols ||
+	                              weap_type == _weapon_doublefisted_shotguns);
+
 	const double W = VR_Settings()->worldScaleWUM;
-	// Map controller poses RELATIVE TO THE HEAD into world units, then anchor at the camera world
-	// position. This cancels the player's absolute position in the play space and the head offset
-	// (which the renderer applies to view.origin, not the eye matrix) -- so no double-count. yaw is
-	// the same body yaw Rasterizer_Shader::SetView rotates by (view->virtual_yaw).
 	const double yaw = view->virtual_yaw * (360.0 / (double(FIXED_ONE) * double(FULL_CIRCLE))) * (8.0 * atan(1.0) / 360.0);
 	const double cy = cos(yaw), sy = sin(yaw);
-	// Camera (eye) world position: view.origin carries the horizontal head offset; eye-Z removes the
-	// vis-tree eye-Z bump so this sits at the rendered eye height.
 	const double camx = view->origin.x;
 	const double camy = view->origin.y;
-	// Keep the true eye Z (including VR eye-height offset) so crouch/seated motion lowers hands.
 	const double camz = view->origin.z;
-	const int domHand = VR_Settings()->dominantHand ? 0 : 1;   // 0=left,1=right
+	const int domHand = VR_Settings()->dominantHand ? 0 : 1;
+	const int offHand = 1 - domHand;
 
 	float hp[3];
 	if (!VR_GetHeadPosStage(hp)) return;
 
-	glUseProgram(0);                                  // shim built-in colored path (no engine shader)
+	glUseProgram(0);
 	glDisable(GL_TEXTURE_2D);
 	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 	glDisableClientState(GL_COLOR_ARRAY);
 	glEnableClientState(GL_VERTEX_ARRAY);
-	glDisable(GL_DEPTH_TEST);                         // overlay always visible during calibration
-	glLineWidth(2.0f);
+	glDisable(GL_DEPTH_TEST);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glColor4f(1.0f, 0.0f, 0.0f, 0.9f);
 
-	const bool twoHanded = VR_IsTwoHandedActive();
-	for (int h = 0; h < 2; ++h) {
-		// When two-handed steadying is active, suppress the off-hand debug lines entirely.
-		if (twoHanded && h != domHand) continue;
+	const float dotR = (float)(0.05 / 3.0 * W);
+	const int NSEG = 18;
+	GLfloat dv[(NSEG+2)*3];
 
+	auto draw_dot = [&](int hand) {
 		float ps[3], fs[3];
-		if (!VR_GetAimPoseStage(h, ps, fs)) continue;
+		if (!VR_GetAimPoseStage(hand, ps, fs)) return;
 
-		// When two-handed, override the dominant forward with the inter-hand aim direction.
-		if (twoHanded && h == domHand) {
+		if (hand == domHand && VR_IsTwoHandedActive()) {
 			float th_fwd[3];
-			if (VR_GetTwoHandedFwdStage(th_fwd)) {
-				fs[0] = th_fwd[0]; fs[1] = th_fwd[1]; fs[2] = th_fwd[2];
-			}
+			if (VR_GetTwoHandedFwdStage(th_fwd)) { fs[0]=th_fwd[0]; fs[1]=th_fwd[1]; fs[2]=th_fwd[2]; }
 		}
 
-		// controller relative to head (stage metres) -> world (WU,Z-up): w = camWorld + Rz(yaw)*Z^T*(rel*W).
-		// Z^T maps stage->world pre-rotation: (sx,sy,sz) -> (-sx, -sz, sy).
-		const double qx = (ps[0]-hp[0])*W, qsy = (ps[1]-hp[1])*W, qz = (ps[2]-hp[2])*W;
-		const double rx = -qx, ry = -qz, rz = qsy;
+		const double qx = (ps[0]-hp[0])*W, qsyr = (ps[1]-hp[1])*W, qz = (ps[2]-hp[2])*W;
+		const double rx = -qx, ry = -qz, rz = qsyr;
 		world_point3d cw;
 		cw.x = (world_distance)(camx + rx*cy - ry*sy);
 		cw.y = (world_distance)(camy + rx*sy + ry*cy);
 		cw.z = (world_distance)(camz + rz);
 
-		// forward dir through the same rotation (W cancels under normalization)
 		double dx = -fs[0], dy = -fs[2], dz = fs[1];
 		double wx = dx*cy - dy*sy, wy = dx*sy + dy*cy, wz = dz;
 		double dl = sqrt(wx*wx + wy*wy + wz*wz); if (dl < 1e-6) dl = 1;
 		wx/=dl; wy/=dl; wz/=dl;
 
-		// world_distance is int16 (+-32767); a ray must be clamped to map bounds or the endpoint wraps
-		// to a garbage point. clampLen returns the largest t along dir that keeps (ox,oy,oz)+dir*t in bounds.
-		const double LIM = 30000.0;
-		auto clampLen = [&](double ox, double oy, double oz, double target)->double {
-			double t = target;
-			auto cl = [&](double c, double d){
-				if (fabs(d) > 1e-9) { double lim = ((d > 0 ? LIM : -LIM) - c) / d; if (lim > 0 && lim < t) t = lim; }
-			};
-			cl(ox, wx); cl(oy, wy); cl(oz, wz);
-			return t;
-		};
-
-		// DECOUPLED direction ray: a fixed-length segment from the controller along the aim direction,
-		// independent of the raycast. Shows pure controller orientation so we can separate an orientation
-		// problem from a hit-detection problem.
-		const double tfix = clampLen(cw.x, cw.y, cw.z, 6.0 * WORLD_ONE);
-		world_point3d rayEnd;
-		rayEnd.x = (world_distance)(cw.x + wx*tfix);
-		rayEnd.y = (world_distance)(cw.y + wy*tfix);
-		rayEnd.z = (world_distance)(cw.z + wz*tfix);
-
-		// Raycast hit (the dot): cast from the CONTROLLER `cw` along the same dir as the drawn line, so
-		// the dot lands exactly ON the line (sharing the eye origin instead caused an arm's-length
-		// parallax that shifted the dot off the line as the hand moved). The earlier "hit beyond the
-		// near wall" was the int32 overflow, now fixed by the step-marched walk. cw's polygon is found
-		// by tracking from the eye (short segment, no overflow); NONE (hand poked through a wall) falls
-		// back to the eye's polygon.
 		short cpoly = find_new_object_polygon((world_point2d*)&view->origin, (world_point2d*)&cw, view->origin_polygon_index);
 		if (cpoly == NONE) cpoly = view->origin_polygon_index;
 		world_point3d hit = vr_raycast_geometry(cw, cpoly, wx, wy, wz, 64.0 * WORLD_ONE);
 
-		// Diagnostic for the "mirror at far-left rotation" report: dump BOTH hands' stage forward +
-		// world dir + cw/hit, periodically AND whenever the world direction reverses >90deg between
-		// frames (a "FLIP" -- the mirror). grep the log for "FLIP". (logcat -s A1VR)
-		{
-			static double pw[2][3] = {{0,0,0},{0,0,0}};
-			static int dbgc[2] = {0,0};
-			const double dotp = wx*pw[h][0] + wy*pw[h][1] + wz*pw[h][2];
-			const bool seeded = pw[h][0] || pw[h][1] || pw[h][2];
-			const bool flip = seeded && dotp < 0.0;
-			if (flip || (dbgc[h]++ % 30) == 0)
-				__android_log_print(ANDROID_LOG_INFO, "A1VR",
-					"aim h=%d%s fs=(%.3f,%.3f,%.3f) wdir=(%.3f,%.3f,%.3f) cw=(%d,%d,%d) hit=(%d,%d,%d) cpoly=%d",
-					h, flip?" FLIP":"", fs[0],fs[1],fs[2], wx,wy,wz, cw.x,cw.y,cw.z, hit.x,hit.y,hit.z, cpoly);
-			pw[h][0]=wx; pw[h][1]=wy; pw[h][2]=wz;
+		double cdir[3] = { camx-hit.x, camy-hit.y, camz-hit.z };
+		double cdl = sqrt(cdir[0]*cdir[0]+cdir[1]*cdir[1]+cdir[2]*cdir[2]); if (cdl < 1.0) cdl = 1.0;
+		cdir[0]/=cdl; cdir[1]/=cdl; cdir[2]/=cdl;
+		double right[3] = { -cdir[1], cdir[0], 0.0 };
+		double rl = sqrt(right[0]*right[0]+right[1]*right[1]); if (rl < 1e-6) { right[0]=1.0; right[1]=0.0; rl=1.0; }
+		right[0]/=rl; right[1]/=rl;
+		double up[3] = { cdir[1]*right[2]-cdir[2]*right[1],
+		                 cdir[2]*right[0]-cdir[0]*right[2],
+		                 cdir[0]*right[1]-cdir[1]*right[0] };
+
+		const double hx = hit.x + cdir[0]*1.5;
+		const double hy = hit.y + cdir[1]*1.5;
+		const double hz = hit.z + cdir[2]*1.5;
+
+		int dn = 0;
+		auto push = [&](double x, double y, double z){ dv[dn++]=(float)x; dv[dn++]=(float)y; dv[dn++]=(float)z; };
+		push(hx, hy, hz);
+		for (int i = 0; i <= NSEG; ++i) {
+			float a = (float)(i * 6.28318530718f / NSEG);
+			float cs = cosf(a), sn = sinf(a);
+			push(hx + dotR*(cs*right[0]+sn*up[0]),
+			     hy + dotR*(cs*right[1]+sn*up[1]),
+			     hz + dotR*(cs*right[2]+sn*up[2]));
 		}
+		glVertexPointer(3, GL_FLOAT, 0, dv);
+		glDrawArrays(GL_TRIANGLE_FAN, 0, NSEG+2);
+	};
 
-		const float h1 = (float)(0.04 * W);   // controller marker half-size (WU)
-		const float h2 = (float)(0.03 * W);   // hit dot half-size
-		GLfloat v[14*3]; int n = 0;
-		auto push = [&](double x, double y, double z){ v[n++]=(float)x; v[n++]=(float)y; v[n++]=(float)z; };
-		// marker cross at the controller
-		push(cw.x-h1,cw.y,cw.z); push(cw.x+h1,cw.y,cw.z);
-		push(cw.x,cw.y-h1,cw.z); push(cw.x,cw.y+h1,cw.z);
-		push(cw.x,cw.y,cw.z-h1); push(cw.x,cw.y,cw.z+h1);
-		// aim ray (DECOUPLED: fixed length along the aim direction, not the raycast hit)
-		push(cw.x,cw.y,cw.z);    push(rayEnd.x,rayEnd.y,rayEnd.z);
-		// dot cross at the raycast hit (separate -- compare against the fixed ray)
-		push(hit.x-h2,hit.y,hit.z); push(hit.x+h2,hit.y,hit.z);
-		push(hit.x,hit.y-h2,hit.z); push(hit.x,hit.y+h2,hit.z);
-		push(hit.x,hit.y,hit.z-h2); push(hit.x,hit.y,hit.z+h2);
+	draw_dot(domHand);
+	if (weapon_is_dual) draw_dot(offHand);
 
-		if (h == domHand) glColor4f(1.0f, 0.0f, 0.0f, 1.0f);   // dominant = red
-		else              glColor4f(0.0f, 0.4f, 1.0f, 1.0f);   // off-hand = blue
-		glVertexPointer(3, GL_FLOAT, 0, v);
-		glDrawArrays(GL_LINES, 0, 14);
-	}
-
-	// When two-handed steadying is active, draw a blue crosshair at the off-hand controller
-	// world position — this marks the grip point on the weapon barrel.
-	if (twoHanded) {
-		const int offHand = 1 - domHand;
-		float ops[3], ofs[3];
-		if (VR_GetAimPoseStage(offHand, ops, ofs)) {
-			const double oqx = (ops[0]-hp[0])*W, oqsy = (ops[1]-hp[1])*W, oqz = (ops[2]-hp[2])*W;
-			const double orx = -oqx, ory = -oqz, orz = oqsy;
-			world_point3d ocw;
-			ocw.x = (world_distance)(camx + orx*cy - ory*sy);
-			ocw.y = (world_distance)(camy + orx*sy + ory*cy);
-			ocw.z = (world_distance)(camz + orz);
-			const float hc = (float)(0.04 * W);
-			GLfloat cv[6*3]; int cn = 0;
-			auto cpush = [&](float x, float y, float z){ cv[cn++]=x; cv[cn++]=y; cv[cn++]=z; };
-			cpush(ocw.x-hc, ocw.y,    ocw.z   ); cpush(ocw.x+hc, ocw.y,    ocw.z   );
-			cpush(ocw.x,    ocw.y-hc, ocw.z   ); cpush(ocw.x,    ocw.y+hc, ocw.z   );
-			cpush(ocw.x,    ocw.y,    ocw.z-hc); cpush(ocw.x,    ocw.y,    ocw.z+hc);
-			glColor4f(0.0f, 0.4f, 1.0f, 1.0f);
-			glVertexPointer(3, GL_FLOAT, 0, cv);
-			glDrawArrays(GL_LINES, 0, 6);
-		}
-	}
-
-	// restore the state the world/sprite passes expect
-	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	glDisable(GL_BLEND);
 	glEnable(GL_DEPTH_TEST);
+	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 	glEnable(GL_TEXTURE_2D);
 	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 }
@@ -822,12 +760,29 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 		if (should_flip)
 			display_data.flip_horizontal = !display_data.flip_horizontal;
 
+		// Reload slide-down: mirror the desktop behaviour where vertical_position > idle_height
+		// pushes the weapon sprite toward (and eventually off) the bottom of the screen.
+		// At 3*FIXED_ONE/2 the sprite is fully off-screen in the desktop renderer.
+		// We translate that to a world-space downward (-Z) offset so VR weapons hide during reload.
+		float cwz_slid = cwz;
+		{
+			const float kIdleV = float(display_data.idle_height);  // weapon's actual resting position
+			const float kHideV = float(3 * FIXED_ONE / 2);
+			const float vpos   = float(display_data.vertical_position);
+			if (vpos >= kHideV) { vrWeaponIdx++; continue; }
+			if (vpos > kIdleV) {
+				// Slide down proportionally: at kHideV the weapon drops 4 half-heights below normal.
+				const float frac = (vpos - kIdleV) / (kHideV - kIdleV);
+				cwz_slid = cwz - frac * hh * 4.0f;
+			}
+		}
+
 		// Quad corners in world space using full controller right/up (tracks pitch+roll+yaw)
 		float verts[4][3] = {
-			{ cwx - hw*wrx[0] + hh*wup[0], cwy - hw*wrx[1] + hh*wup[1], cwz - hw*wrx[2] + hh*wup[2] },  // TL
-			{ cwx + hw*wrx[0] + hh*wup[0], cwy + hw*wrx[1] + hh*wup[1], cwz + hw*wrx[2] + hh*wup[2] },  // TR
-			{ cwx + hw*wrx[0] - hh*wup[0], cwy + hw*wrx[1] - hh*wup[1], cwz + hw*wrx[2] - hh*wup[2] },  // BR
-			{ cwx - hw*wrx[0] - hh*wup[0], cwy - hw*wrx[1] - hh*wup[1], cwz - hw*wrx[2] - hh*wup[2] }   // BL
+			{ cwx - hw*wrx[0] + hh*wup[0], cwy - hw*wrx[1] + hh*wup[1], cwz_slid - hw*wrx[2] + hh*wup[2] },  // TL
+			{ cwx + hw*wrx[0] + hh*wup[0], cwy + hw*wrx[1] + hh*wup[1], cwz_slid + hw*wrx[2] + hh*wup[2] },  // TR
+			{ cwx + hw*wrx[0] - hh*wup[0], cwy + hw*wrx[1] - hh*wup[1], cwz_slid + hw*wrx[2] - hh*wup[2] },  // BR
+			{ cwx - hw*wrx[0] - hh*wup[0], cwy - hw*wrx[1] - hh*wup[1], cwz_slid - hw*wrx[2] - hh*wup[2] }   // BL
 		};
 
 		rectangle_definition rect;
@@ -850,12 +805,14 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 		instantiate_rectangle_transfer_mode(view, &rect,
 			display_data.transfer_mode, display_data.transfer_phase);
 
+		const bool isStaticWpn = (rect.transfer_mode == _static_transfer);
+
 		short modelSeq = NONE;
 		OGL_ModelData* weaponMdl = OGL_GetModelData(
 			display_data.collection, display_data.shape_index, modelSeq);
 		bool renderedAs3D = weaponMdl &&
 			OGL_RenderVRWeaponModel(rect, display_data.collection, 0 /*CLUT*/,
-				weaponMdl, cwx, cwy, cwz, wrx, wup_mdl, wfwd_mdl);
+				weaponMdl, cwx, cwy, cwz_slid, wrx, wup_mdl, wfwd_mdl, isStaticWpn);
 		if (renderedAs3D) {
 			s_cachedWpnModel   = weaponMdl;
 			s_cachedWpnColl    = display_data.collection;
@@ -930,6 +887,7 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 	VR_SetOffHandHasWeapon(!weapon_is_dual || offHandRendered);
 
 	// Restore GL state for subsequent passes (HUD layer, etc.)
+	glUseProgram(0);  // engine shaders (e.g. S_Invincible from VR static mode) may still be bound
 	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 	glEnable(GL_DEPTH_TEST);
 	glEnable(GL_CULL_FACE);
@@ -1041,7 +999,7 @@ void render_view(
 						RasPtr->SetView(*view);
 						RasPtr->Begin();
 						RenPtr->render_tree();
-						render_vr_aim_debug(view);   // controller aim marker/ray/dot (world matrices still active)
+						render_vr_aim_reticle(view);   // red dot reticle at aim hit point
 						render_vr_weapon_sprites_3d(view);   // 3D weapon quads at controller positions
 						RasPtr->End();
 						VR_PresentHudEye(eye);   // head-locked 2D HUD plane

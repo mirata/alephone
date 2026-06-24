@@ -442,6 +442,11 @@ GLfloat ViewDir[2];
 // Shader lists for the object renderer
 static ModelRenderShader StandardShaders[2];
 static ModelRenderShader StaticModeShaders[4];
+static ModelRenderShader VRStaticShaders[1];
+
+// Shared animation clock for VR weapon static effect (sprite quad + 3D model).
+// Incremented each time a VR weapon is rendered so the noise animates each frame.
+static float g_vrStaticTime = 0.0f;
 
 // Data for static-mode shader callback: which one in sequence
 static int SequenceNumbers[4] = {0, 1, 2, 3};
@@ -2717,12 +2722,35 @@ void GlowingShader(void *Data)
 	SglColor4f(std::max(ShaderData.Color[0],GlowColor),std::max(ShaderData.Color[1],GlowColor),std::max(ShaderData.Color[2],GlowColor),ShaderData.Color[3]*(Using_sRGB ? ShaderData.Color[3] : 1.0));
 	glEnable(GL_BLEND);
 	glDisable(GL_ALPHA_TEST);
-	
+
 	if (ShaderData.ModelPtr->Use(ShaderData.CLUT,OGL_SkinManager::Glowing))
 	{
 		LoadModelSkin(ShaderData.SkinPtr->GlowImg, ShaderData.Collection, ShaderData.CLUT);
 		SetBlend(ShaderData.SkinPtr->GlowBlend);
 	}
+}
+
+static void VRStaticModelShader(void* /*Data*/)
+{
+	// Bind the model skin so the invincible shader can read its alpha for silhouette masking.
+	if (ShaderData.ModelPtr->Use(ShaderData.CLUT, OGL_SkinManager::Normal))
+	{
+		LoadModelSkin(ShaderData.SkinPtr->NormalImg, ShaderData.Collection, ShaderData.CLUT);
+		SetBlend(ShaderData.SkinPtr->NormalBlend);
+	}
+
+	// Per-pixel noise via the same shader used for world-sprite invincibility.
+	Shader* s = Shader::get(Shader::S_Invincible);
+	s->enable();
+	s->setFloat(Shader::U_TransferFadeOut, 0.0f);
+	s->setFloat(Shader::U_Time, g_vrStaticTime);
+	// Get eye-buffer pixel dimensions for blockSize in invincible.frag.
+	GLint vp[4];
+	glGetIntegerv(GL_VIEWPORT, vp);
+	s->setFloat(Shader::U_LogicalWidth,  float(vp[2]));
+	s->setFloat(Shader::U_LogicalHeight, float(vp[3]));
+	s->setFloat(Shader::U_PixelWidth,    float(vp[2]));
+	s->setFloat(Shader::U_PixelHeight,   float(vp[3]));
 }
 
 
@@ -2924,6 +2952,9 @@ void SetupShaders()
 	StaticModeShaders[3].Flags = ModelRenderer::Textured;
 	StaticModeShaders[3].TextureCallback = StaticModeShader;
 	StaticModeShaders[3].TextureCallbackData = SequenceNumbers + 3;
+
+	VRStaticShaders[0].Flags = ModelRenderer::Textured;
+	VRStaticShaders[0].TextureCallback = VRStaticModelShader;
 }
 
 
@@ -3285,7 +3316,8 @@ static void SetBlend(short _BlendType)
 bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short CLUT,
     OGL_ModelData* ModelPtr,
     float cwx, float cwy, float cwz,
-    const float wrx[3], const float wup[3], const float wfwd[3])
+    const float wrx[3], const float wup[3], const float wfwd[3],
+    bool isStatic)
 {
     if (!OGL_IsActive() || !ModelPtr) return false;
 
@@ -3307,8 +3339,8 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
 
     bool IsBlended          = SkinPtr->OpacityType != OGL_OpacType_Crisp;
     bool IsGlowing          = SkinPtr->GlowImg.IsPresent();
-    int  NumShaders         = IsGlowing ? 2 : 1;
-    int  NumSepShaders      = IsBlended ? 0 : 1;
+    int  NumShaders         = isStatic ? 1 : (IsGlowing ? 2 : 1);
+    int  NumSepShaders      = isStatic ? 1 : (IsBlended ? 0 : 1);
 
     if (ModelPtr->Sidedness < 0) {
         glEnable(GL_CULL_FACE);
@@ -3335,8 +3367,13 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
     glPushMatrix();
     glMultMatrixf(m);
 
-    ModelRenderObject.Render(ModelPtr->Model, StandardShaders,
-        NumShaders, NumSepShaders, true);
+    if (isStatic) {
+        g_vrStaticTime += 16.7f;
+        ModelRenderObject.Render(ModelPtr->Model, VRStaticShaders, NumShaders, NumSepShaders, true);
+        glUseProgram(0);  // VRStaticModelShader leaves S_Invincible active; reset so HUD/2D draw normally
+    } else {
+        ModelRenderObject.Render(ModelPtr->Model, StandardShaders, NumShaders, NumSepShaders, true);
+    }
 
     glPopMatrix();
 
@@ -3404,13 +3441,21 @@ bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3])
 
 	TMgr.SetupTextureMatrix();
 	TMgr.RenderNormal();
-	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-
-	if (TMgr.IsGlowMapped()) {
-		float gc = TMgr.MinGlowIntensity();
-		glColor4f(std::max(gc, amb), std::max(gc, amb), std::max(gc, amb), 1.0f);
-		TMgr.RenderGlowing();
+	if (RR.transfer_mode == _static_transfer) {
+		// Per-pixel noise via the builtin shader's uIsStatic path (same rand() as invincible.frag).
+		g_vrStaticTime += 16.7f;
+		a1ffStaticMode(1, g_vrStaticTime);
 		glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+		a1ffStaticMode(0, 0.0f);
+	} else {
+		glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+
+		if (TMgr.IsGlowMapped()) {
+			float gc = TMgr.MinGlowIntensity();
+			glColor4f(std::max(gc, amb), std::max(gc, amb), std::max(gc, amb), 1.0f);
+			TMgr.RenderGlowing();
+			glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+		}
 	}
 
 	TMgr.RestoreTextureMatrix();

@@ -1462,6 +1462,7 @@ bool get_weapon_display_information(
 				data->vertical_positioning_mode= _position_center;
 				data->horizontal_positioning_mode= _position_center;
 				data->vertical_position= height;
+				data->idle_height= definition->idle_height;
 				data->horizontal_position= width;
 				if(flags & _flip_shape_vertical)
 				{

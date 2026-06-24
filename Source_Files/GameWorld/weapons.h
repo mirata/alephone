@@ -101,6 +101,10 @@ struct weapon_display_information
 
 	// type in bits 0-1 and shell casing id in bits 4-7
 	short interpolation_data;
+
+	// Weapon's resting vertical position (from definition); used by VR renderer to compute
+	// the reload slide-down offset relative to the weapon's actual baseline, not a hardcoded value.
+	_fixed idle_height;
 };
 
 // SB: This needs to be accessed in lua_script.cpp

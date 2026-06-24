@@ -426,6 +426,7 @@ void a1ffGetDoublev(GLenum pname, GLdouble* params);
 extern "C" {
 #endif
 void a1ffUseProgram(GLuint program);
+void a1ffStaticMode(int on, float time);  // enable per-pixel noise in the builtin shader
 void a1ffDrawArrays(GLenum mode, GLint first, GLsizei count);
 void a1ffDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices);
 #ifdef __cplusplus
