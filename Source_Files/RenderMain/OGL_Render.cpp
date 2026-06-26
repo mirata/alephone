@@ -3342,20 +3342,32 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
     int  NumShaders         = isStatic ? 1 : (IsGlowing ? 2 : 1);
     int  NumSepShaders      = isStatic ? 1 : (IsBlended ? 0 : 1);
 
+    // Mirroring: negate the right axis to reflect the model through its forward-up plane.
+    // This matches the two sprite-flip conditions: shape _X_MIRRORED_BIT and off-hand dual-wield.
+    // Negating one column of a rotation matrix produces a reflection, which changes the sign of the
+    // transform's determinant: non-mirrored VR modelview has det=-1 (from zUpToYUp); mirrored has
+    // det=+1 (two reflections cancel). This reverses which face winding is front in screen space, so
+    // glFrontFace must be flipped for ALL culled models (Sidedness != 0), not only Sidedness < 0.
+    const float sx = RR.flip_horizontal ? -1.0f : 1.0f;
+
     if (ModelPtr->Sidedness < 0) {
         glEnable(GL_CULL_FACE);
-        glFrontFace(GL_CCW);
+        glFrontFace(RR.flip_horizontal ? GL_CW : GL_CCW);
     } else if (ModelPtr->Sidedness == 0) {
         glDisable(GL_CULL_FACE);
+    } else if (RR.flip_horizontal) {
+        // Sidedness > 0: culling is already enabled (inherits GL_CW front); flip to GL_CCW so the
+        // det-sign change from mirroring doesn't invert which faces are visible.
+        glFrontFace(GL_CCW);
     }
 
     // Controller model→world matrix (column-major for GL).
     // Columns: right (wrx), up (wup), forward (wfwd), translation.
     GLfloat m[16] = {
-        wrx[0],  wrx[1],  wrx[2],  0.0f,
-        wup[0],  wup[1],  wup[2],  0.0f,
-        wfwd[0], wfwd[1], wfwd[2], 0.0f,
-        cwx,     cwy,     cwz,     1.0f
+        sx*wrx[0],  sx*wrx[1],  sx*wrx[2],  0.0f,
+        wup[0],     wup[1],     wup[2],     0.0f,
+        wfwd[0],    wfwd[1],    wfwd[2],    0.0f,
+        cwx,        cwy,        cwz,        1.0f
     };
 
     glDisable(GL_ALPHA_TEST);
@@ -3382,6 +3394,8 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
     if (ModelPtr->Sidedness <= 0) {
         glEnable(GL_CULL_FACE);
         glFrontFace(GL_CW);
+    } else if (RR.flip_horizontal) {
+        glFrontFace(GL_CW);  // restore from the CCW we set above
     }
 
     return true;

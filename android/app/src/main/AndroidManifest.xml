@@ -15,7 +15,9 @@
     <uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="true" />
 
     <application
-        android:label="Aleph One"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:allowBackup="true"
         android:hardwareAccelerated="true">
 
@@ -26,7 +28,7 @@
              Phase 2 will swap to an OpenXR/TBXR-hosted activity for VR. -->
         <activity
             android:name="org.alephone.AlephOneActivity"
-            android:label="Aleph One"
+            android:label="@string/app_name"
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
             android:launchMode="singleTask"
             android:resizeableActivity="false"

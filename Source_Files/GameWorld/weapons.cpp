@@ -1795,6 +1795,29 @@ static void fire_weapon(
 	trigger_definition= get_player_trigger_definition(player_index, which_trigger);
 	trigger= get_player_trigger_data(player_index, which_trigger);
 
+#ifdef __ANDROID__
+	if (VR_IsActive() && player_index == current_player_index) {
+		float ms, amp;
+		if (definition->weapon_class == _melee_class) {
+			ms = 50.0f; amp = 1.0f;
+		} else if (trigger_definition->charging_ticks > 0) {
+			float t = (float)charged_amount / (float)FIXED_ONE;
+			ms  = 100.0f + t * 150.0f;
+			amp = 0.75f  + t * 0.25f;
+		} else if (definition->flags & _weapon_is_automatic) {
+			ms = 60.0f; amp = 0.7f;
+		} else {
+			ms = 130.0f; amp = 0.85f;
+		}
+		const int domHand   = (VR_Settings()->dominantHand == 0) ? 1 : 0;
+		const int firingHand = (which_trigger == _primary_weapon) ? domHand : (1 - domHand);
+		VR_Vibrate(firingHand, ms, amp);
+		// Two-handed steadying: off-hand also feels the recoil
+		if (which_trigger == _primary_weapon && VR_IsTwoHandedActive())
+			VR_Vibrate(1 - domHand, ms, amp);
+	}
+#endif
+
 	/* Calculate the number of rounds to fire.. */
 	if(trigger_definition->burst_count)
 	{

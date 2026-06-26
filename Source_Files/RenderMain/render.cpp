@@ -588,7 +588,8 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 	short weap_type = NONE, weap_mode = 0;
 	get_player_weapon_mode_and_type(current_player_index, &weap_type, &weap_mode);
 	const bool weapon_is_dual = (weap_type == _weapon_doublefisted_pistols ||
-	                              weap_type == _weapon_doublefisted_shotguns);
+	                              weap_type == _weapon_doublefisted_shotguns ||
+	                              weap_type == _weapon_fist);
 	VR_SetIsDualWield(weapon_is_dual);
 	// Suppress grip-based secondary fire for weapons whose secondary is identical to primary.
 	VR_SetGripAltFireEnabled(weap_type != _weapon_fist && weap_type != _weapon_pistol);

@@ -68,6 +68,12 @@ bool VR_TakeYawRecenter(int* targetAngleUnits);
 // after the world is rendered into the eye FBO. No-op at brightness >= 1.
 void VR_DimCurrentEye(void);
 
+// Queue a haptic vibration on the given controller (0=left, 1=right). durationMs is duration in
+// milliseconds, amplitude in [0,1]. Silently ignored if a vibration is already queued for that hand
+// this frame (prevents automatic-fire from stacking -- the existing vibration carries through).
+// Applied at the start of the next frame via xrApplyHapticFeedback. No-op off Android.
+void VR_Vibrate(int hand, float durationMs, float amplitude);
+
 // Create and make-current a headless (pbuffer) GLES3 EGL context that the engine renders with.
 // Immersive VR apps get no SurfaceView Surface, so SDL can't make a window GL context; we own one
 // instead (the QuestZDoom/TBXR approach). Call on the engine/render thread before any GL use.

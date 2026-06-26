@@ -899,13 +899,31 @@ void damage_player(
 				L_Call_Player_Damaged(player_index, aggressor_player_index, aggressor_index, damage->type, damage_amount, projectile_index);
 				if (player->suit_oxygen < 0) player->suit_oxygen= 0;
 				if (player_index==current_player_index) mark_oxygen_display_as_dirty();
+#ifdef __ANDROID__
+				if (VR_IsActive() && player_index == current_player_index) {
+					float d = damage_amount < 100 ? (float)damage_amount : 100.0f;
+					float amp = 0.4f + 0.6f * d / 100.0f;
+					float ms  = 80.0f + d * 1.5f;
+					VR_Vibrate(0, ms, amp);
+					VR_Vibrate(1, ms, amp);
+				}
+#endif
 				break;
 			}
 			default:
 			{
 				// LP change: pegging to maximum value
 				player->suit_energy= int16(MIN(int32(player->suit_energy)-int32(damage_amount),int32(INT16_MAX)));
-				L_Call_Player_Damaged(player_index, aggressor_player_index, aggressor_index, damage->type, damage_amount, projectile_index);			
+				L_Call_Player_Damaged(player_index, aggressor_player_index, aggressor_index, damage->type, damage_amount, projectile_index);
+#ifdef __ANDROID__
+				if (VR_IsActive() && player_index == current_player_index) {
+					float d = damage_amount < 100 ? (float)damage_amount : 100.0f;
+					float amp = 0.4f + 0.6f * d / 100.0f;
+					float ms  = 80.0f + d * 1.5f;
+					VR_Vibrate(0, ms, amp);
+					VR_Vibrate(1, ms, amp);
+				}
+#endif			
 				/* damage the player, recording the kill if the aggressor was another player and we died */
 				if (player->suit_energy<0)
 				{

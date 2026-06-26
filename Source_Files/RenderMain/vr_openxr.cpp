@@ -609,6 +609,9 @@ namespace {
 	XrSpace     s_handSpace[2]  = { XR_NULL_HANDLE, XR_NULL_HANDLE };
 	XrPosef     s_handStage[2]  = {};  // grip pose in stage space, this frame
 	bool        s_handValid[2]  = { false, false };
+	XrAction    s_vibrateAction[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE }; // haptic output, 0=left 1=right
+	float       s_vibDuration[2] = { 0.0f, 0.0f };   // pending vibration duration in ms (0=none)
+	float       s_vibIntensity[2] = { 0.0f, 0.0f };  // pending vibration amplitude [0,1]
 	bool        s_actionsReady = false;
 	float       s_stickX[2] = {0,0}, s_stickY[2] = {0,0}, s_trigger[2] = {0,0};   // raw per-hand
 	float       s_grip[2] = {0,0};                   // raw per-hand squeeze/grip
@@ -657,6 +660,8 @@ namespace {
 		mkAction("aimright", XR_ACTION_TYPE_POSE_INPUT, &s_aimAction[1]);
 		mkAction("handleftpose",  XR_ACTION_TYPE_POSE_INPUT, &s_handAction[0]);
 		mkAction("handrightpose", XR_ACTION_TYPE_POSE_INPUT, &s_handAction[1]);
+		mkAction("vibrateleft",  XR_ACTION_TYPE_VIBRATION_OUTPUT, &s_vibrateAction[0]);
+		mkAction("vibrateright", XR_ACTION_TYPE_VIBRATION_OUTPUT, &s_vibrateAction[1]);
 
 		XrActionSuggestedBinding binds[] = {
 			{ s_stickAction[0],   path("/user/hand/left/input/thumbstick") },
@@ -676,6 +681,8 @@ namespace {
 			{ s_aimAction[1],  path("/user/hand/right/input/aim/pose") },
 			{ s_handAction[0], path("/user/hand/left/input/grip/pose") },
 			{ s_handAction[1], path("/user/hand/right/input/grip/pose") },
+			{ s_vibrateAction[0], path("/user/hand/left/output/haptic") },
+			{ s_vibrateAction[1], path("/user/hand/right/output/haptic") },
 		};
 		XrInteractionProfileSuggestedBinding sb = { XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
 		sb.interactionProfile = path("/interaction_profiles/oculus/touch_controller");
@@ -699,6 +706,22 @@ namespace {
 
 		s_actionsReady = true;
 		A1VR_LOG("input actions attached");
+	}
+
+	void processHaptics() {
+		if (!s_actionsReady || !s_sessionRunning) return;
+		for (int h = 0; h < 2; ++h) {
+			if (s_vibDuration[h] > 0.0f) {
+				XrHapticVibration vib = { XR_TYPE_HAPTIC_VIBRATION };
+				vib.amplitude = s_vibIntensity[h];
+				vib.duration  = (XrDuration)(s_vibDuration[h] * 1e6f); // ms -> ns
+				vib.frequency = 3000.0f;
+				XrHapticActionInfo hai = { XR_TYPE_HAPTIC_ACTION_INFO };
+				hai.action = s_vibrateAction[h];
+				xrApplyHapticFeedback(s_session, &hai, (const XrHapticBaseHeader*)&vib);
+				s_vibDuration[h] = 0.0f;
+			}
+		}
 	}
 
 	void syncInput() {
@@ -773,6 +796,7 @@ extern "C" bool VR_BeginFrame(void)
 	if (!startSession()) return false;   // waits for the GL context
 	pollEvents();
 	if (!s_sessionRunning) return false; // session not running yet -> no frame begun
+	processHaptics();
 	syncInput();
 
 	XrFrameWaitInfo wfi = { XR_TYPE_FRAME_WAIT_INFO };
@@ -1446,6 +1470,14 @@ namespace {
 		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
 		glBindVertexArray(0);
 	}
+}
+
+extern "C" void VR_Vibrate(int hand, float durationMs, float amplitude)
+{
+	if (hand < 0 || hand > 1) return;
+	if (s_vibDuration[hand] > 0.0f) return; // already queued for this frame
+	s_vibDuration[hand]  = durationMs;
+	s_vibIntensity[hand] = amplitude;
 }
 
 extern "C" void VR_DimCurrentEye(void)
