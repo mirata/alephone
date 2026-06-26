@@ -76,6 +76,9 @@ Feb 3, 2003 (Woody Zenfell):
 
 #include <string.h>
 #include <limits.h>
+#ifdef __ANDROID__
+#include "vr_openxr.h"
+#endif
 
 /* ---------- constants */
 
@@ -312,10 +315,20 @@ void update_control_panels(
 			{
 				bool still_in_use= false;
 
-				if (player->variables.direction == player->variables.last_direction &&
-					player->variables.last_position.x == player->variables.position.x &&
-					player->variables.last_position.y == player->variables.position.y &&
-					player->variables.last_position.z == player->variables.position.z)
+				// In VR, head rotation constantly updates physics direction and room-scale
+				// leaning shifts the body position each tick; skip the direction check and
+				// allow a half-WU positional tolerance so natural lean/sway doesn't cut
+				// the charge while walking away still does.
+#ifdef __ANDROID__
+				const bool _vr_active = VR_IsActive();
+#else
+				const bool _vr_active = false;
+#endif
+				const _fixed _vr_pos_tol = _vr_active ? (FIXED_ONE / 48) : 0;
+				if ((_vr_active || player->variables.direction == player->variables.last_direction) &&
+					std::abs(player->variables.last_position.x - player->variables.position.x) <= _vr_pos_tol &&
+					std::abs(player->variables.last_position.y - player->variables.position.y) <= _vr_pos_tol &&
+					std::abs(player->variables.last_position.z - player->variables.position.z) <= _vr_pos_tol)
 				{
 					switch (definition->_class)
 					{

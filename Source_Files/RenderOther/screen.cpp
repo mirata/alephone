@@ -51,6 +51,7 @@
 #include "fades.h"
 #include "game_window.h"
 #include "screen.h"
+#include "media.h"
 #include "preferences.h"
 #include "computer_interface.h"
 #include "Crosshairs.h"
@@ -1363,6 +1364,22 @@ void update_world_view_camera()
 			world_view->origin.x = finalp.x;
 			world_view->origin.y = finalp.y;
 			if (poly != NONE) world_view->origin_polygon_index = poly;
+		}
+
+		// Sync the underwater fade tint at render-frame rate. Normally set_fade_effect is called
+		// once per physics tick (30fps), so the colour tint can lag the visual water surface by up
+		// to 33ms when crouching slowly in VR. Re-evaluate here using the already-corrected eye Z
+		// (step_height already removed above) so tint transitions exactly when the eye crosses the
+		// water surface. set_fade_effect is a no-op when the type is unchanged, so this is cheap.
+		{
+			struct polygon_data *p = get_polygon_data(world_view->origin_polygon_index);
+			if (p && p->media_index != NONE) {
+				struct media_data *m = get_media_data(p->media_index);
+				set_fade_effect((m && world_view->origin.z <= m->height)
+				                ? get_media_submerged_fade_effect(p->media_index) : NONE);
+			} else {
+				set_fade_effect(NONE);
+			}
 		}
 	}
 #endif
