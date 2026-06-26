@@ -1648,6 +1648,10 @@ static void vr_dialog(void *arg)
 	table->dual_add(aim_pitch_w->label("Aim Pitch"), d);
 	table->dual_add(aim_pitch_w, d);
 
+	w_toggle *laser_sight_w = new w_toggle(vr->showLaserSight != 0);
+	table->dual_add(laser_sight_w->label("Laser Sight"), d);
+	table->dual_add(laser_sight_w, d);
+
 	table->add_row(new w_spacer(), true);
 
 	// Comfort
@@ -1745,6 +1749,7 @@ static void vr_dialog(void *arg)
 		vr->dominantHand    = hand_w->get_selection();
 		vr->switchSticks    = switch_sticks_w->get_selection() ? 1 : 0;
 		vr->aimPitchAdjust  = vr_aim_pitch_values[aim_pitch_w->get_selection()];
+		vr->showLaserSight  = laser_sight_w->get_selection() ? 1 : 0;
 		vr->disableBob           = bob_w->get_selection() ? 1 : 0;
 		vr->teleportDistortion   = teleport_distortion_w->get_selection() ? 1 : 0;
 		vr->snapTurn             = turn_style_w->get_selection();
@@ -4327,6 +4332,7 @@ InfoTree vr_preferences_tree()
 	root.put_attr("hud_tilt_deg", vr->hudTiltDeg);
 	root.put_attr("map_player_up", vr->mapPlayerUp);
 	root.put_attr("teleport_distortion", vr->teleportDistortion);
+	root.put_attr("laser_sight", vr->showLaserSight);
 	return root;
 }
 #endif
@@ -5402,6 +5408,7 @@ void parse_vr_preferences(InfoTree root, std::string version)
 	root.read_attr("hud_tilt_deg", vr->hudTiltDeg);
 	root.read_attr("map_player_up", vr->mapPlayerUp);
 	root.read_attr("teleport_distortion", vr->teleportDistortion);
+	root.read_attr("laser_sight", vr->showLaserSight);
 }
 #endif
 

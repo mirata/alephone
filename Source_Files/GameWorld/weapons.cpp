@@ -3515,6 +3515,14 @@ static void update_sequence(
 			if(frame==high_level_data->key_frame)
 			{
 				play_weapon_sound(player_index, sound_id, pitch);
+#ifdef __ANDROID__
+				if (VR_IsActive() && player_index == current_player_index
+						&& trigger->state == _weapon_charged && sound_id != NONE) {
+					const int domHand = (VR_Settings()->dominantHand == 0) ? 1 : 0;
+					VR_Vibrate(domHand, 40.0f, 0.4f);
+					if (VR_IsTwoHandedActive()) VR_Vibrate(1 - domHand, 40.0f, 0.3f);
+				}
+#endif
 			}
 			
 			phase= 0;

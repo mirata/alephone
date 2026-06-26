@@ -479,6 +479,7 @@ static world_point3d vr_raycast_geometry(world_point3d origin, short poly, doubl
 static void render_vr_aim_reticle(view_data* view)
 {
 	if (!VR_IsActive()) return;
+	if (!VR_Settings()->showLaserSight) return;
 
 	short weap_type = NONE, weap_mode = 0;
 	get_player_weapon_mode_and_type(current_player_index, &weap_type, &weap_mode);
@@ -596,6 +597,7 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 
 	if (!view->show_weapons_in_hand) return;
 	if (!VR_IsActive() || !OGL_IsActive()) return;
+	if (PLAYER_IS_DEAD(get_player_data(current_player_index))) return;
 
 	const float W   = (float)VR_Settings()->worldScaleWUM;
 	const double yaw = view->virtual_yaw

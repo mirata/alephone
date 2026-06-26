@@ -45,6 +45,7 @@ typedef struct {
 	                        //   30 = lower dashboard look, negative = above horizontal)
 	int   mapPlayerUp;      // 1 = rotate the overhead map so the player's facing direction is always at the top
 	int   teleportDistortion; // 1 = apply horizontal-stretch/vertical-compress warp during teleport fold effect
+	int   showLaserSight;   // 1 = draw the laser-sight dot at the controller aim point; default 0 (off)
 } vr_settings_t;
 
 vr_settings_t* VR_Settings(void);
