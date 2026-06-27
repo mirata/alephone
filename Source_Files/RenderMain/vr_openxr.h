@@ -246,6 +246,12 @@ bool VR_TakeMenuButton(void);
 // and drops to the system overlay -> the engine pauses the game while unfocused.
 bool VR_HasFocus(void);
 
+// Per-eye horizontal offset from the head centre in Marathon world units (IPD separation).
+// Add to view->origin before building the per-eye visibility tree so each eye's vis-tree
+// is computed from the correct eye position. Restore view->origin before GPU rendering
+// (SetView already encodes the IPD via VR_GetEyeViewMetres; do NOT double-count).
+void VR_GetEyeIPDOffsetWU(int eye, float* wx, float* wy);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1774,6 +1774,19 @@ extern "C" bool VR_RenderTestFrame(void)
 	return s_active;
 }
 
+extern "C" void VR_GetEyeIPDOffsetWU(int eye, float* wx, float* wy)
+{
+    if (wx) *wx = 0; if (wy) *wy = 0;
+    if (!s_headPoseValid || eye < 0 || eye >= kEyes) return;
+    const float dhx = s_stageFromEye[eye].position.x - s_stageFromHead.position.x;
+    const float dhz = s_stageFromEye[eye].position.z - s_stageFromHead.position.z;
+    const float W   = s_settings.worldScaleWUM;
+    const float yr  = s_yawOffset * (2.0f * 3.14159265358979f / 512.0f);
+    const float c   = std::cos(yr), s = std::sin(yr);
+    if (wx) *wx = W * (-c * dhx + s * dhz);
+    if (wy) *wy = W * (-s * dhx - c * dhz);
+}
+
 #else // !__ANDROID__
 
 extern "C" bool VR_InitOpenXR(void)     { return false; }
@@ -1846,5 +1859,6 @@ extern "C" bool VR_TakeMenuButton(void) { return false; }
 extern "C" bool VR_HasFocus(void) { return false; }
 extern "C" int  VR_ScreenLayerWidth(void)  { return 0; }
 extern "C" int  VR_ScreenLayerHeight(void) { return 0; }
+extern "C" void VR_GetEyeIPDOffsetWU(int, float* wx, float* wy) { if (wx) *wx = 0; if (wy) *wy = 0; }
 
 #endif

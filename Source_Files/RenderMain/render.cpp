@@ -989,24 +989,75 @@ void render_view(
 			RenPtr->RasPtr = RasPtr;
 
 #if defined(__ANDROID__)
-			// VR: the scene tree was built once above; render it twice (once per eye) with the
-			// OpenXR per-eye projection + head-pose view (SetView reads VR_CurrentEye()).
+			// VR: rebuild the scene tree per eye from the true eye world position so that
+			// each eye's vis-tree and sprite clip planes are correct. Without this, polygons
+			// visible only from the side eye snap in late when peeking around corners, and
+			// sprite clips are computed from the wrong viewpoint.
+			// view->origin_polygon_index is updated via find_new_object_polygon (same call
+			// screen.cpp uses for room-scale leaning) so the BSP walk starts from the right
+			// polygon. On NONE (eye inside a wall), we fall back to the head-centre polygon.
+			// view->origin is restored to head-centre before SetView: VR_GetEyeViewMetres
+			// already encodes the per-eye IPD, so the origin must not be pre-shifted.
 			if (VR_IsActive())
 			{
 				const bool render = VR_BeginFrame();
 				if (render)
 				{
+					const world_point3d  base_origin = view->origin;
+					const short          base_poly   = view->origin_polygon_index;
 					for (int eye = 0; eye < 2; ++eye)
 					{
+						// render_flags is a global flat array; the outer build_render_tree call
+						// (above) already set every endpoint/line flag. Without this clear the
+						// per-eye traversal skips all of them and the vis-tree sees nothing.
+						objlist_clear(render_flags, RENDER_FLAGS_BUFFER_SIZE);
+
+						float ipd_wx = 0, ipd_wy = 0;
+						VR_GetEyeIPDOffsetWU(eye, &ipd_wx, &ipd_wy);
+						world_point3d eye_origin = base_origin;
+						eye_origin.x += (world_distance)ipd_wx;
+						eye_origin.y += (world_distance)ipd_wy;
+
+						short eye_poly = find_new_object_polygon(
+							(world_point2d*)&base_origin,
+							(world_point2d*)&eye_origin,
+							base_poly);
+						if (eye_poly == NONE) eye_poly = base_poly;
+
+						view->origin               = eye_origin;
+						view->origin_polygon_index = eye_poly;
+
+						RenderVisTree.view = view;
+						RenderVisTree.build_render_tree();
+						RenderSortPoly.view = view;
+						RenderSortPoly.sort_render_tree();
+						RenderPlaceObjs.view = view;
+						RenderPlaceObjs.build_render_object_list();
+
+						// SetView needs head-centre: VR_GetEyeViewMetres encodes the IPD
+						// offset in the OpenXR matrices, so the origin must not be pre-shifted.
+						view->origin               = base_origin;
+						view->origin_polygon_index = base_poly;
+
 						VR_BeginEye(eye);
 						RasPtr->SetView(*view);
 						RasPtr->Begin();
+
+						// Restore eye origin so render_tree's CPU sprite clip planes use the
+						// true eye position. The GPU matrices are already set above and are
+						// unaffected by view->origin from here.
+						view->origin = eye_origin;
 						RenPtr->render_tree();
-						render_vr_aim_reticle(view);   // red dot reticle at aim hit point
-						render_vr_weapon_sprites_3d(view);   // 3D weapon quads at controller positions
+						// Weapon and aim reticle build world-space quads using view->origin as
+						// the camera world position; restore base_origin so the GPU matrices
+						// (head-centre + OpenXR IPD) don't double-count the IPD offset.
+						view->origin = base_origin;
+						render_vr_aim_reticle(view);
+						render_vr_weapon_sprites_3d(view);
+
 						RasPtr->End();
-						VR_PresentHudEye(eye);   // head-locked 2D HUD plane
-						VR_PresentMapEye(eye);   // head-locked map overlay when map is open
+						VR_PresentHudEye(eye);
+						VR_PresentMapEye(eye);
 						VR_FinishEye(eye);
 					}
 				}

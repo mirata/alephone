@@ -1474,20 +1474,18 @@ uint32 parse_keymap(void)
 
 #if defined(__ANDROID__)
 	  // Non-dominant stick Y zooms the overhead map in/out while the map is open.
+	  // Edge-triggered like snap-turn: fires once on the first tick the stick crosses
+	  // the threshold, then re-arms when it returns to centre.
 	  if (VR_IsActive() && !player_in_terminal_mode(local_player_index) &&
 	      PLAYER_HAS_MAP_OPEN(local_player) && View_MapActive()) {
-		  static float mapZoomAccum = 0.0f;
+		  static bool mapZoomArmed = true;
 		  float turnY = 0; VR_GetTurnY(&turnY);
-		  if (fabsf(turnY) > 0.15f) {
-			  mapZoomAccum += turnY * (1.0f / 8.0f);
-			  const int ticks = (int)mapZoomAccum;
-			  if (ticks != 0) {
-				  mapZoomAccum -= (float)ticks;
-				  for (int i = 0; i < ticks;  ++i) zoom_overhead_map_in();
-				  for (int i = 0; i > ticks;  --i) zoom_overhead_map_out();
-			  }
-		  } else {
-			  mapZoomAccum = 0.0f;
+		  const float kFire = 0.5f, kRelease = 0.2f;
+		  if (mapZoomArmed) {
+			  if (turnY >  kFire) { zoom_overhead_map_in();  mapZoomArmed = false; }
+			  if (turnY < -kFire) { zoom_overhead_map_out(); mapZoomArmed = false; }
+		  } else if (fabsf(turnY) < kRelease) {
+			  mapZoomArmed = true;
 		  }
 	  }
 #endif
