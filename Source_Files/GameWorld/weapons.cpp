@@ -1485,25 +1485,31 @@ bool get_weapon_display_information(
 					data->horizontal_position += M1_MISSILE_AMMO_XOFFSET;
 				}
 			
+				// 3D model animation frame — always set from this trigger's sequence,
+				// not from the player body animation (which is the walk cycle, unrelated).
+				data->Frame = frame;
+				{
+					short next = frame + 1;
+					if (next >= high_level_data->frames_per_view)
+						next = (short)high_level_data->loop_frame;
+					data->NextFrame = next;
+				}
+				data->Phase = GET_SEQUENCE_PHASE(weapon->triggers[which_trigger].sequence);
+				data->Ticks = high_level_data->ticks_per_frame;
+
 				/* Fill in the transfer mode and phase */
 				/* Cached, so that we only do it the first time through.. */
 				if(!(*count))
 				{
 					struct player_data *player= get_player_data(player_index);
-				
-					get_object_shape_and_transfer_mode(&player->camera_location, player->object_index, 
+
+					get_object_shape_and_transfer_mode(&player->camera_location, player->object_index,
 						&owner_transfer_data);
 					// Bug out in case of nonexistent shape
 					if (owner_transfer_data.collection_code == NONE) return false;
-					
+
 					data->transfer_mode= owner_transfer_data.transfer_mode;
 					data->transfer_phase= owner_transfer_data.transfer_phase;
-					
-					// LP: model animation data
-					data->Frame = owner_transfer_data.Frame;
-					data->NextFrame = owner_transfer_data.NextFrame;
-					data->Phase = owner_transfer_data.Phase;
-					data->Ticks = owner_transfer_data.Ticks;
 				}
 			} 
 			else if(type==_shell_casing_type)

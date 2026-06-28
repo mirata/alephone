@@ -3317,7 +3317,8 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
     OGL_ModelData* ModelPtr,
     float cwx, float cwy, float cwz,
     const float wrx[3], const float wup[3], const float wfwd[3],
-    bool isStatic)
+    bool isStatic,
+    int md3Frame, float md3Mix, int md3NextFrame)
 {
     if (!OGL_IsActive() || !ModelPtr) return false;
 
@@ -3369,6 +3370,9 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
         wfwd[0],    wfwd[1],    wfwd[2],    0.0f,
         cwx,        cwy,        cwz,        1.0f
     };
+
+    if (ModelPtr->Model.MD3NumFrames > 0)
+        ModelPtr->Model.FindPositions_MD3Frame(md3Frame, md3Mix, md3NextFrame);
 
     glDisable(GL_ALPHA_TEST);
     glEnable(GL_BLEND);

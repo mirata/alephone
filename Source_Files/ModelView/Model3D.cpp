@@ -1149,14 +1149,16 @@ bool Model3D::FindPositions_MD3Frame(int frameIdx, float mix, int nextFrameIdx)
 	const int numVerts = (int)(Positions.size() / 3);
 	if (numVerts == 0) return false;
 
-	if (frameIdx < 0 || frameIdx >= MD3NumFrames) return false;
+	// Clamp to valid range so single-frame models (or short animations) never fail.
+	frameIdx = frameIdx < 0 ? 0 : (frameIdx >= MD3NumFrames ? MD3NumFrames - 1 : frameIdx);
 
 	const GLfloat* src = MD3Positions.data() + frameIdx * numVerts * 3;
 	GLfloat* dst = Positions.data();
 
-	const bool doBlend = (mix != 0.f && nextFrameIdx >= 0
-	                      && nextFrameIdx < MD3NumFrames
-	                      && nextFrameIdx != frameIdx);
+	if (nextFrameIdx < 0 || nextFrameIdx >= MD3NumFrames)
+		nextFrameIdx = frameIdx;
+
+	const bool doBlend = (mix != 0.f && nextFrameIdx != frameIdx);
 
 	if (doBlend)
 	{

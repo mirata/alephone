@@ -112,7 +112,24 @@ public:
 	short DepthType;				// What sort of depth reference to use?
 									// (+: farthest point, -: nearest point, 0: center point)
 	bool  ForceSpriteDepth;			// Force sprites to be depth-sorted between model polys? (shader only)
-	
+
+	// First MD3 keyframe index for this sequence. Marathon frame N maps to MD3 frame (FirstMD3Frame + N).
+	// Allows a single MD3 file shared across sequences by giving each sequence a different offset.
+	int FirstMD3Frame;
+
+	// If >= 0, this model only renders when display_data.Frame matches. -1 = always render.
+	// Lets you assign a different model to each frame of a sequence (e.g. per-frame flash variants).
+	int SpecificFrame;
+
+	// Number of MD3 keyframes this sequence uses starting at FirstMD3Frame.
+	// 0 = unlimited (clamp only at MD3 bounds). 1 = always stay on FirstMD3Frame regardless
+	// of display_data.Frame, which prevents idle bob frames from cycling keyframes.
+	int MD3FrameCount;
+
+	// If true, sub-frame interpolation is applied between MD3 keyframes using Phase/Ticks.
+	// Set per model so e.g. the gun body blends but a flash overlay does not.
+	bool BlendMD3Frames;
+
 	// Should a rotation rate be included, in order to get that Quake look?
 	
 	// The model itself (static, single-skin [only one skin at a time])
@@ -126,6 +143,7 @@ public:
 	OGL_ModelData():
 		Scale(1), XRot(0), YRot(0), ZRot(0), XShift(0), YShift(0), ZShift(0), Sidedness(1),
 			NormalType(1), NormalSplit(0.5), LightType(0), DepthType(0), ForceSpriteDepth(false),
+			FirstMD3Frame(0), SpecificFrame(-1), MD3FrameCount(0), BlendMD3Frames(false),
 			mLoadAttempted(false) {}
 
 private:
@@ -133,9 +151,13 @@ private:
 };
 
 
-// Returns NULL if a collectiona and sequence do not have an associated model;
-// also returns which model sequence was found (
+// Returns NULL if a collection and sequence do not have an associated model;
+// also returns which model sequence was found.
 OGL_ModelData *OGL_GetModelData(short Collection, short Sequence, short& ModelSequence);
+
+// Returns the full list of models for (Collection, Sequence) — [0] primary, [1+] overlays.
+// Multiple <model> MML entries with the same coll/seq populate this list.
+vector<OGL_ModelData> *OGL_GetAllModels(short Collection, short Sequence, short& ModelSequence);
 
 // Resets all model skins; arg is whether to clear OpenGL textures
 void OGL_ResetModelSkins(bool Clear_OGL_Txtrs);

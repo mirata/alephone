@@ -336,22 +336,15 @@ void OGL_StartTextures()
 			TxtrTypeInfo.ColorFormat = GL_RGBA8;
 	}
 
-	// Model skin
+	// Model skin — inherit filter settings from WeaponsInHand so model textures
+	// automatically respect the user's texture-quality preference, which drives
+	// TxtrTypeInfoList[OGL_Txtr_WeaponsInHand] but never ModelConfig.
 	{
 		OGL_Texture_Configure& TxtrConfigure = ConfigureData.ModelConfig;
 		TxtrTypeInfoData& TxtrTypeInfo = ModelSkinInfo;
-		
-		short NearFilter = TxtrConfigure.NearFilter;
-		if (NearFilter < NUMBER_OF_NEAR_FILTERS)
-			TxtrTypeInfo.NearFilter = NearFilterList[NearFilter];
-		else
-			TxtrTypeInfo.NearFilter = GL_NEAREST;
-		
-		short FarFilter = TxtrConfigure.FarFilter;
-		if (FarFilter < NUMBER_OF_FAR_FILTERS)
-			TxtrTypeInfo.FarFilter = FarFilterList[FarFilter];
-		else
-			TxtrTypeInfo.FarFilter = GL_NEAREST;
+
+		TxtrTypeInfo.NearFilter = TxtrTypeInfoList[OGL_Txtr_WeaponsInHand].NearFilter;
+		TxtrTypeInfo.FarFilter  = TxtrTypeInfoList[OGL_Txtr_WeaponsInHand].FarFilter;
 		
 		TxtrTypeInfo.Resolution = TxtrConfigure.Resolution;
 		

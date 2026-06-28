@@ -102,7 +102,8 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
     OGL_ModelData* ModelPtr,
     float cwx, float cwy, float cwz,
     const float wrx[3], const float wup[3], const float wfwd[3],
-    bool isStatic = false);
+    bool isStatic = false,
+    int md3Frame = 0, float md3Mix = 0.f, int md3NextFrame = -1);
 
 // Rendering crosshairs
 bool OGL_RenderCrosshairs();

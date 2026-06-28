@@ -629,11 +629,12 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 
 	// Cache last successfully rendered 3D weapon so we can hold the pose during
 	// brief frames where get_weapon_display_information returns 0 items (e.g. empty-click).
-	static OGL_ModelData* s_cachedWpnModel   = nullptr;
-	static short          s_cachedWpnColl    = NONE;
-	static short          s_cachedWpnClut    = 0;
-	static int            s_cachedWpnHand    = 0;
-	static float          s_cachedWpnAmbient = 0.5f;
+	static OGL_ModelData* s_cachedWpnModel    = nullptr;
+	static short          s_cachedWpnColl     = NONE;
+	static short          s_cachedWpnClut     = 0;
+	static int            s_cachedWpnHand     = 0;
+	static float          s_cachedWpnAmbient  = 0.5f;
+	static int            s_cachedMd3Frame    = 0;
 	bool loopHadItems  = false;
 	bool any3DThisCall = false;
 
@@ -811,17 +812,52 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 		const bool isStaticWpn = (rect.transfer_mode == _static_transfer);
 
 		short modelSeq = NONE;
-		OGL_ModelData* weaponMdl = OGL_GetModelData(
+		vector<OGL_ModelData>* allModels = OGL_GetAllModels(
 			display_data.collection, display_data.shape_index, modelSeq);
+		OGL_ModelData* weaponMdl = (allModels && !allModels->empty()) ? &(*allModels)[0] : nullptr;
+		if (weaponMdl && weaponMdl->SpecificFrame >= 0 &&
+		    weaponMdl->SpecificFrame != display_data.Frame)
+			weaponMdl = nullptr;
+		auto md3Params = [&](OGL_ModelData* mdl, int& frame, float& mix, int& next) {
+			int rawFrame = display_data.Frame;
+			int rawNext  = display_data.NextFrame;
+			if (mdl->MD3FrameCount > 0) {
+				const int cap = mdl->MD3FrameCount - 1;
+				rawFrame = rawFrame > cap ? cap : rawFrame;
+				rawNext  = rawNext  > cap ? cap : rawNext;
+			}
+			frame = mdl->FirstMD3Frame + rawFrame;
+			if (mdl->BlendMD3Frames && display_data.Ticks > 0 && rawNext > rawFrame) {
+				mix  = float(display_data.Phase) / float(display_data.Ticks);
+				next = mdl->FirstMD3Frame + rawNext;
+			} else {
+				mix  = 0.f;
+				next = -1;
+			}
+		};
+		int pFrame = 0; float pMix = 0.f; int pNext = -1;
+		if (weaponMdl) md3Params(weaponMdl, pFrame, pMix, pNext);
 		bool renderedAs3D = weaponMdl &&
 			OGL_RenderVRWeaponModel(rect, display_data.collection, 0 /*CLUT*/,
-				weaponMdl, cwx, cwy, cwz_slid, wrx, wup_mdl, wfwd_mdl, isStaticWpn);
+				weaponMdl, cwx, cwy, cwz_slid, wrx, wup_mdl, wfwd_mdl, isStaticWpn,
+				pFrame, pMix, pNext);
 		if (renderedAs3D) {
+			for (size_t mi = 1; allModels && mi < allModels->size(); mi++) {
+				OGL_ModelData* ovl = &(*allModels)[mi];
+				if (ovl->SpecificFrame >= 0 && ovl->SpecificFrame != display_data.Frame)
+					continue;
+				int oFrame; float oMix; int oNext;
+				md3Params(ovl, oFrame, oMix, oNext);
+				OGL_RenderVRWeaponModel(rect, display_data.collection, 0,
+					ovl, cwx, cwy, cwz_slid, wrx, wup_mdl, wfwd_mdl, false,
+					oFrame, oMix, oNext);
+			}
 			s_cachedWpnModel   = weaponMdl;
 			s_cachedWpnColl    = display_data.collection;
 			s_cachedWpnClut    = 0;
 			s_cachedWpnHand    = hand;
 			s_cachedWpnAmbient = float(rect.ambient_shade) / float(FIXED_ONE);
+			s_cachedMd3Frame   = pFrame;
 			any3DThisCall = true;
 		}
 		if (!renderedAs3D)
@@ -882,7 +918,8 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 			rectangle_definition rect;
 			rect.ambient_shade = (short)(s_cachedWpnAmbient * float(FIXED_ONE));
 			OGL_RenderVRWeaponModel(rect, s_cachedWpnColl, s_cachedWpnClut,
-				s_cachedWpnModel, cwx, cwy, cwz, wrx, wup_mdl, wfwd_mdl);
+				s_cachedWpnModel, cwx, cwy, cwz, wrx, wup_mdl, wfwd_mdl,
+				false, s_cachedMd3Frame);
 		}
 	}
 

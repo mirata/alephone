@@ -70,12 +70,13 @@ struct ModelDataEntry
 	// Which Marathon-engine sequence gets translated into this model,
 	// if static, or the neutral sequence, if dynamic
 	short Sequence;
-	
+
 	vector<SequenceMapEntry> SequenceMap;
-	
-	// Make a member for more convenient access
-	OGL_ModelData ModelData;
-	
+
+	// [0] is the primary model; [1+] are overlay models (e.g. muzzle flash)
+	// Multiple <model> elements with the same coll/seq append to this list.
+	vector<OGL_ModelData> Models;
+
 	ModelDataEntry(): Sequence(NONE) {}
 };
 
@@ -119,55 +120,46 @@ static void MdlDeleteAll()
 }
 
 
-OGL_ModelData *OGL_GetModelData(short Collection, short Sequence, short& ModelSequence)
+// Internal: find the ModelDataEntry for (Collection, Sequence), populate ModelSequence,
+// trigger lazy load, and return a pointer to the entry (or NULL if not found / load failed).
+static ModelDataEntry* FindModelEntry(short Collection, short Sequence, short& ModelSequence)
 {
-	// Model is neutral unless specified otherwise
 	ModelSequence = NONE;
 
-	// Initialize the hash table if necessary
 	if (MdlHash[Collection].empty())
 	{
 		MdlHash[Collection].resize(MdlHashSize);
 		objlist_set(&MdlHash[Collection][0],NONE,MdlHashSize);
 	}
-	
-	// Set up a *reference* to the appropriate hashtable entry;
-	// this makes setting this entry a bit more convenient
+
 	ModelHashEntry& HashVal = MdlHash[Collection][MdlHashFunc(Sequence)];
-	
-	// Check to see if the model-data entry is correct;
-	// if it is, then we're done.
+
 	if (HashVal.ModelIndex != NONE)
 	{
-		// First, check in the sequence-map table
 		vector<ModelDataEntry>::iterator MdlIter = MdlList[Collection].begin() + HashVal.ModelIndex;
-		size_t MSTIndex = static_cast<size_t>(HashVal.ModelSeqTabIndex);  // Cast only safe b/c of following check
+		size_t MSTIndex = static_cast<size_t>(HashVal.ModelSeqTabIndex);
 		if (MSTIndex < MdlIter->SequenceMap.size())
 		{
 			vector<SequenceMapEntry>::iterator SMIter = MdlIter->SequenceMap.begin() + MSTIndex;
 			if (SMIter->Sequence == Sequence)
 			{
 				ModelSequence = SMIter->ModelSequence;
-				if (!MdlIter->ModelData.ModelPresent()) OGL_LoadModels(Collection);
-				return MdlIter->ModelData.ModelPresent() ? &MdlIter->ModelData : NULL;
+				if (!MdlIter->Models[0].ModelPresent()) OGL_LoadModels(Collection);
+				return MdlIter->Models[0].ModelPresent() ? &(*MdlIter) : NULL;
 			}
 		}
 
-		// Now check the neutral sequence
 		if (MdlIter->Sequence == Sequence)
 		{
-			if (!MdlIter->ModelData.ModelPresent()) OGL_LoadModels(Collection);
-			return MdlIter->ModelData.ModelPresent() ? &MdlIter->ModelData : NULL;
+			if (!MdlIter->Models[0].ModelPresent()) OGL_LoadModels(Collection);
+			return MdlIter->Models[0].ModelPresent() ? &(*MdlIter) : NULL;
 		}
 	}
 
-	// Fallback for the case of a hashtable miss;
-	// do a linear search and then update the hash entry appropriately.
 	vector<ModelDataEntry>& ML = MdlList[Collection];
 	int16 Indx = 0;
 	for (vector<ModelDataEntry>::iterator MdlIter = ML.begin(); MdlIter < ML.end(); MdlIter++, Indx++)
 	{
-		// First, search the sequence-map table
 		int16 SMIndx = 0;
 		vector<SequenceMapEntry>& SM = MdlIter->SequenceMap;
 		for (vector<SequenceMapEntry>::iterator SMIter = SM.begin(); SMIter < SM.end(); SMIter++, SMIndx++)
@@ -177,23 +169,33 @@ OGL_ModelData *OGL_GetModelData(short Collection, short Sequence, short& ModelSe
 				HashVal.ModelIndex = Indx;
 				HashVal.ModelSeqTabIndex = SMIndx;
 				ModelSequence = SMIter->ModelSequence;
-				if (!MdlIter->ModelData.ModelPresent()) OGL_LoadModels(Collection);
-				return MdlIter->ModelData.ModelPresent() ? &MdlIter->ModelData : NULL;
+				if (!MdlIter->Models[0].ModelPresent()) OGL_LoadModels(Collection);
+				return MdlIter->Models[0].ModelPresent() ? &(*MdlIter) : NULL;
 			}
 		}
 
-		// Now check the neutral sequence
 		if (MdlIter->Sequence == Sequence)
 		{
 			HashVal.ModelIndex = Indx;
 			HashVal.ModelSeqTabIndex = NONE;
-			if (!MdlIter->ModelData.ModelPresent()) OGL_LoadModels(Collection);
-			return MdlIter->ModelData.ModelPresent() ? &MdlIter->ModelData : NULL;
+			if (!MdlIter->Models[0].ModelPresent()) OGL_LoadModels(Collection);
+			return MdlIter->Models[0].ModelPresent() ? &(*MdlIter) : NULL;
 		}
 	}
 
-	// None found!
 	return NULL;
+}
+
+OGL_ModelData *OGL_GetModelData(short Collection, short Sequence, short& ModelSequence)
+{
+	ModelDataEntry* e = FindModelEntry(Collection, Sequence, ModelSequence);
+	return e ? &e->Models[0] : NULL;
+}
+
+vector<OGL_ModelData> *OGL_GetAllModels(short Collection, short Sequence, short& ModelSequence)
+{
+	ModelDataEntry* e = FindModelEntry(Collection, Sequence, ModelSequence);
+	return e ? &e->Models : NULL;
 }
 
 int OGL_SkinData::GetMaxSize()
@@ -558,9 +560,9 @@ void OGL_ModelData::Load()
 	}
 	else
 	{
-		// Static model
+		// Static model: bake transform directly into positions/normals.
 		size_t NumVerts = Model.Positions.size()/3;
-		
+
 		for (size_t k=0; k<NumVerts; k++)
 		{
 			GLfloat *Pos = Model.PosBase() + 3*k;
@@ -570,7 +572,7 @@ void OGL_ModelData::Load()
 			Pos[1] = NewPos[1] + YShift;
 			Pos[2] = NewPos[2] + ZShift;
 		}
-		
+
 		size_t NumNorms = Model.Normals.size()/3;
 		for (size_t k=0; k<NumNorms; k++)
 		{
@@ -578,8 +580,44 @@ void OGL_ModelData::Load()
 			GLfloat NewNorms[3];
 			MatVecMult(RotMatrix,Norms,NewNorms);	// Not scaled
 			objlist_copy(Norms,NewNorms,3);
-		}	
-	
+		}
+
+		// For MD3 morph animation: apply the same transform to every keyframe stored
+		// in MD3Positions/MD3Normals so FindPositions_MD3Frame always returns
+		// pre-transformed data and doesn't undo the rotation/scale/shift.
+		if (!Model.MD3Positions.empty())
+		{
+			const int nv = (int)(NumVerts);
+			for (int fr = 0; fr < Model.MD3NumFrames; ++fr)
+			{
+				GLfloat* pos = Model.MD3Positions.data() + fr * nv * 3;
+				for (int k = 0; k < nv; ++k)
+				{
+					GLfloat* p = pos + 3*k;
+					GLfloat np[3];
+					MatVecMult(NewRotMatrix, p, np);
+					p[0] = np[0] + XShift;
+					p[1] = np[1] + YShift;
+					p[2] = np[2] + ZShift;
+				}
+			}
+		}
+		if (!Model.MD3Normals.empty())
+		{
+			const int nv = (int)(NumNorms);
+			for (int fr = 0; fr < Model.MD3NumFrames; ++fr)
+			{
+				GLfloat* nrm = Model.MD3Normals.data() + fr * nv * 3;
+				for (int k = 0; k < nv; ++k)
+				{
+					GLfloat* n = nrm + 3*k;
+					GLfloat nn[3];
+					MatVecMult(RotMatrix, n, nn);
+					n[0] = nn[0]; n[1] = nn[1]; n[2] = nn[2];
+				}
+			}
+		}
+
 		// So as to be consistent with the new points
 		Model.FindBoundingBox();
 	}	
@@ -619,10 +657,10 @@ void OGL_LoadModels(short Collection)
 	vector<ModelDataEntry>& ML = MdlList[Collection];
 	for (vector<ModelDataEntry>::iterator MdlIter = ML.begin(); MdlIter < ML.end(); MdlIter++)
 	{
-		MdlIter->ModelData.Load();
-		if (MdlIter->ModelData.ForceSpriteDepth)
+		for (auto& mdl : MdlIter->Models)
 		{
-			ForcingSpriteDepth = true;
+			mdl.Load();
+			if (mdl.ForceSpriteDepth) ForcingSpriteDepth = true;
 		}
 		OGL_ProgressCallback(1);
 	}
@@ -633,7 +671,7 @@ void OGL_UnloadModels(short Collection)
 	vector<ModelDataEntry>& ML = MdlList[Collection];
 	for (vector<ModelDataEntry>::iterator MdlIter = ML.begin(); MdlIter < ML.end(); MdlIter++)
 	{
-		MdlIter->ModelData.Unload();
+		for (auto& mdl : MdlIter->Models) mdl.Unload();
 	}
 }
 
@@ -646,7 +684,7 @@ void OGL_ResetModelSkins(bool Clear_OGL_Txtrs)
 		vector<ModelDataEntry>& ML = MdlList[ic];
 		for (vector<ModelDataEntry>::iterator MdlIter = ML.begin(); MdlIter < ML.end(); MdlIter++)
 		{
-			MdlIter->ModelData.Reset(Clear_OGL_Txtrs);
+			for (auto& mdl : MdlIter->Models) mdl.Reset(Clear_OGL_Txtrs);
 		}
 	}
 }
@@ -691,13 +729,13 @@ void parse_mml_opengl_model(const InfoTree& root)
 		return;
 	
 	ModelDataEntry entry;
-	entry.ModelData = DefaultModelData;
+	entry.Models.push_back(DefaultModelData);
 	entry.Sequence = NONE;
 	entry.SequenceMap.clear();
-	
+
 	root.read_indexed("seq", entry.Sequence, MAXIMUM_SHAPES_PER_COLLECTION);
-		
-	OGL_ModelData& def = entry.ModelData;
+
+	OGL_ModelData& def = entry.Models.back();
 	root.read_attr("scale", def.Scale);
 	root.read_attr("x_rot", def.XRot);
 	root.read_attr("y_rot", def.YRot);
@@ -711,6 +749,10 @@ void parse_mml_opengl_model(const InfoTree& root)
 	root.read_indexed("light_type", def.LightType, NUMBER_OF_MODEL_LIGHT_TYPES);
 	read_sign_val(root, "depth_type", def.DepthType);
 	root.read_attr("force_sprite_depth", def.ForceSpriteDepth);
+	root.read_attr("first_frame", def.FirstMD3Frame);
+	root.read_attr("frame", def.SpecificFrame);
+	root.read_attr("frame_count", def.MD3FrameCount);
+	root.read_attr("blend_frames", def.BlendMD3Frames);
 	root.read_path("file", def.ModelFile);
 	root.read_path("file1", def.ModelFile1);
 	root.read_path("file2", def.ModelFile2);
@@ -828,8 +870,8 @@ void parse_mml_opengl_model(const InfoTree& root)
 		std::sort(nmap.begin(), nmap.end());
 		if (omap != nmap) continue;
 		
-		// Replace the data; it passed the tests
-		MdlIter->ModelData = def;
+		// Append as overlay (multiple <model> elements for same coll/seq)
+		MdlIter->Models.push_back(def);
 		found = true;
 		break;
 	}
