@@ -3349,14 +3349,15 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
     // transform's determinant: non-mirrored VR modelview has det=-1 (from zUpToYUp); mirrored has
     // det=+1 (two reflections cancel). This reverses which face winding is front in screen space, so
     // glFrontFace must be flipped for ALL culled models (Sidedness != 0), not only Sidedness < 0.
-    const float sx = RR.flip_horizontal ? -1.0f : 1.0f;
+    const bool flip3D = !RR.flip_horizontal;
+    const float sx = flip3D ? -1.0f : 1.0f;
 
     if (ModelPtr->Sidedness < 0) {
         glEnable(GL_CULL_FACE);
-        glFrontFace(RR.flip_horizontal ? GL_CW : GL_CCW);
+        glFrontFace(flip3D ? GL_CW : GL_CCW);
     } else if (ModelPtr->Sidedness == 0) {
         glDisable(GL_CULL_FACE);
-    } else if (RR.flip_horizontal) {
+    } else if (flip3D) {
         // Sidedness > 0: culling is already enabled (inherits GL_CW front); flip to GL_CCW so the
         // det-sign change from mirroring doesn't invert which faces are visible.
         glFrontFace(GL_CCW);
@@ -3398,7 +3399,7 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
     if (ModelPtr->Sidedness <= 0) {
         glEnable(GL_CULL_FACE);
         glFrontFace(GL_CW);
-    } else if (RR.flip_horizontal) {
+    } else if (flip3D) {
         glFrontFace(GL_CW);  // restore from the CCW we set above
     }
 

@@ -40,9 +40,21 @@ void main(void) {
 	} else {
 		relv = normalize(relDir);
 	}
-	float x = atan(-relv.x, -relv.z) / zoom + atan(facev.x, facev.y);
+	// In VR the per-pixel ray-cast is already spherical, so the flat-projection zoom
+	// correction is not only unnecessary but actively wrong: it scales the head-turn
+	// contribution by 1/zoom while leaving the snap-turn contribution (atan(facev))
+	// unscaled, making snap turns shift the landscape zoom× more than head turns.
+	// With zoom removed for VR, both inputs are scaled identically (by 1.0) and the
+	// landscape stays world-stationary for both head motion and snap turns.
 	float horizDist = length(relv.xz);
-	float y = -atan(relv.y, max(horizDist, 0.0001)) / zoom - (facev.z * pitch_adjust);
+	float x, y;
+	if (vrMode > 0.5) {
+		x = atan(-relv.x, -relv.z) + atan(facev.x, facev.y);
+		y = -atan(relv.y, max(horizDist, 0.0001)) - (facev.z * pitch_adjust);
+	} else {
+		x = atan(-relv.x, -relv.z) / zoom + atan(facev.x, facev.y);
+		y = -atan(relv.y, max(horizDist, 0.0001)) / zoom - (facev.z * pitch_adjust);
+	}
 	float v = offsety - y * scaley;
 	if (v < 0.0 || v > 1.0) {
 		// Sample the sky edge at the player's current forward azimuth (offsetx).
