@@ -229,6 +229,7 @@ extern WindowPtr screen_window;
 #include <string.h>
 #include <stdlib.h>
 
+
 // LP additions for decomposition of this code:
 #include "RenderVisTree.h"
 #include "RenderSortPoly.h"
@@ -636,6 +637,10 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 	static float          s_cachedWpnAmbient  = 0.5f;
 	static int            s_cachedMd3Frame    = 0;
 	static bool           s_cachedWpnIsStatic = false;
+	static float          s_cachedHh      = 0.0f; // hh at last 3D render, for cached-weapon offset
+	// Reload raise animation: persists across calls; decays each game-tick after weapon un-hides.
+	static float          s_lowerFrac = 0.0f;
+	static float          s_prevVpos  = -1.0f;
 	bool loopHadItems  = false;
 	bool any3DThisCall = false;
 
@@ -765,29 +770,44 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 		if (should_flip)
 			display_data.flip_horizontal = !display_data.flip_horizontal;
 
-		// Reload slide-down: mirror the desktop behaviour where vertical_position > idle_height
-		// pushes the weapon sprite toward (and eventually off) the bottom of the screen.
-		// At 3*FIXED_ONE/2 the sprite is fully off-screen in the desktop renderer.
-		// We translate that to a world-space downward (-Z) offset so VR weapons hide during reload.
+		// Reload slide: vpos > idle_height → descend; vpos >= kHideV → hidden.
+		// After un-hiding, vpos snaps back to idle_height for one frame before the engine
+		// runs the raise animation (vpos briefly > idle_height again then decreasing).
+		// s_lowerFrac is set to 1.0 while hidden and decays one step per game tick so
+		// the weapon rises smoothly from below the hand regardless of the vpos pattern.
 		float cwz_slid = cwz;
 		{
-			const float kIdleV = float(display_data.idle_height);  // weapon's actual resting position
+			const float kIdleV = float(display_data.idle_height);
 			const float kHideV = float(3 * FIXED_ONE / 2);
 			const float vpos   = float(display_data.vertical_position);
-			if (vpos >= kHideV) { vrWeaponIdx++; continue; }
-			if (vpos > kIdleV) {
-				// Slide down proportionally: at kHideV the weapon drops 4 half-heights below normal.
-				const float frac = (vpos - kIdleV) / (kHideV - kIdleV);
-				cwz_slid = cwz - frac * hh * 4.0f;
+
+			if (vpos >= kHideV) {
+				s_lowerFrac = 1.0f;
+				s_prevVpos  = vpos;
+				vrWeaponIdx++; continue;
 			}
+			const float descentFrac = (vpos > kIdleV)
+				? (vpos - kIdleV) / (kHideV - kIdleV) : 0.0f;
+			if (descentFrac >= s_lowerFrac) {
+				s_lowerFrac = descentFrac;  // weapon descending — track directly
+			} else {
+				// Decay once per game tick (vpos changes at 30 Hz; render may run faster)
+				if (vpos != s_prevVpos)
+					s_lowerFrac -= 1.0f / 12.0f;
+				s_lowerFrac = std::max(s_lowerFrac, descentFrac);
+				s_lowerFrac = std::max(s_lowerFrac, 0.0f);
+			}
+			s_prevVpos = vpos;
+			cwz_slid = cwz - s_lowerFrac * hh * 4.0f;
 		}
 
-		// Quad corners in world space using full controller right/up (tracks pitch+roll+yaw)
+		// Quad corners in world space. Use wup_mdl (cross(wfwd_eff, wrx)) so the sprite
+		// rotates with aimPitchAdjust, matching the 3D model orientation.
 		float verts[4][3] = {
-			{ cwx - hw*wrx[0] + hh*wup[0], cwy - hw*wrx[1] + hh*wup[1], cwz_slid - hw*wrx[2] + hh*wup[2] },  // TL
-			{ cwx + hw*wrx[0] + hh*wup[0], cwy + hw*wrx[1] + hh*wup[1], cwz_slid + hw*wrx[2] + hh*wup[2] },  // TR
-			{ cwx + hw*wrx[0] - hh*wup[0], cwy + hw*wrx[1] - hh*wup[1], cwz_slid + hw*wrx[2] - hh*wup[2] },  // BR
-			{ cwx - hw*wrx[0] - hh*wup[0], cwy - hw*wrx[1] - hh*wup[1], cwz_slid - hw*wrx[2] - hh*wup[2] }   // BL
+			{ cwx - hw*wrx[0] + hh*wup_mdl[0], cwy - hw*wrx[1] + hh*wup_mdl[1], cwz_slid - hw*wrx[2] + hh*wup_mdl[2] },  // TL
+			{ cwx + hw*wrx[0] + hh*wup_mdl[0], cwy + hw*wrx[1] + hh*wup_mdl[1], cwz_slid + hw*wrx[2] + hh*wup_mdl[2] },  // TR
+			{ cwx + hw*wrx[0] - hh*wup_mdl[0], cwy + hw*wrx[1] - hh*wup_mdl[1], cwz_slid + hw*wrx[2] - hh*wup_mdl[2] },  // BR
+			{ cwx - hw*wrx[0] - hh*wup_mdl[0], cwy - hw*wrx[1] - hh*wup_mdl[1], cwz_slid - hw*wrx[2] - hh*wup_mdl[2] }   // BL
 		};
 
 		rectangle_definition rect;
@@ -860,6 +880,7 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 			s_cachedWpnAmbient  = float(rect.ambient_shade) / float(FIXED_ONE);
 			s_cachedMd3Frame    = pFrame;
 			s_cachedWpnIsStatic = isStaticWpn;
+			s_cachedHh          = hh;
 			any3DThisCall = true;
 		}
 		if (!renderedAs3D)
@@ -920,8 +941,8 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 			rectangle_definition rect;
 			rect.ambient_shade = (short)(s_cachedWpnAmbient * float(FIXED_ONE));
 			OGL_RenderVRWeaponModel(rect, s_cachedWpnColl, s_cachedWpnClut,
-				s_cachedWpnModel, cwx, cwy, cwz, wrx, wup_mdl, wfwd_mdl,
-				s_cachedWpnIsStatic, s_cachedMd3Frame);
+				s_cachedWpnModel, cwx, cwy, cwz - s_lowerFrac * s_cachedHh * 4.0f,
+				wrx, wup_mdl, wfwd_mdl, s_cachedWpnIsStatic, s_cachedMd3Frame);
 		}
 	}
 
