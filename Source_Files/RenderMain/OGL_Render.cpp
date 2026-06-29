@@ -443,6 +443,7 @@ GLfloat ViewDir[2];
 static ModelRenderShader StandardShaders[2];
 static ModelRenderShader StaticModeShaders[4];
 static ModelRenderShader VRStaticShaders[1];
+static ModelRenderShader VRInfravisionShaders[1];
 
 // Shared animation clock for VR weapon static effect (sprite quad + 3D model).
 // Incremented each time a VR weapon is rendered so the noise animates each frame.
@@ -2537,9 +2538,19 @@ bool RenderModel(rectangle_definition& RenderRectangle, short Collection, short 
 			}
 		}
 		
+		// Transparent model skins use the painter's algorithm (back-to-front depth sort).
+		// With depth writes ON, a misorder from the centroid sort (inevitable for non-convex
+		// models) causes a transparent front poly to write a closer depth that fails the
+		// depth test for the back poly behind it, making it invisible through the transparency.
+		// Disabling depth writes lets the painter's algorithm composite correctly while still
+		// using the depth TEST to keep world geometry occluding the model.
+		if (IsBlended) glDepthMask(GL_FALSE);
+
 		ModelRenderObject.Render(ModelPtr->Model, StandardShaders, NumShaders,
 			NumSeparableShaders, true);
-		
+
+		if (IsBlended) glDepthMask(GL_TRUE);
+
 		// Revert to default blend
 		SetBlend(OGL_BlendType_Crossfade);
 		
@@ -2754,6 +2765,19 @@ static void VRStaticModelShader(void* /*Data*/)
 }
 
 
+static void VRInfravisionModelShader(void* /*Data*/)
+{
+    // Apply the infravision tint colour stored in ShaderData.Color (full brightness, no ambient dim).
+    SglColor4fv(ShaderData.Color);
+    if (ShaderData.ModelPtr->Use(ShaderData.CLUT, OGL_SkinManager::Normal))
+    {
+        LoadModelSkin(ShaderData.SkinPtr->NormalImg, ShaderData.Collection, ShaderData.CLUT);
+        SetBlend(ShaderData.SkinPtr->NormalBlend);
+    }
+    // sprite_infravision.frag: converts texture to greyscale × vertexColor (the tint).
+    Shader::get(Shader::S_SpriteInfravision)->enable();
+}
+
 void StaticModeIndivSetup(int SeqNo)
 {
 #ifdef USE_STIPPLE_STATIC_EFFECT
@@ -2955,6 +2979,9 @@ void SetupShaders()
 
 	VRStaticShaders[0].Flags = ModelRenderer::Textured;
 	VRStaticShaders[0].TextureCallback = VRStaticModelShader;
+
+	VRInfravisionShaders[0].Flags = ModelRenderer::Textured;
+	VRInfravisionShaders[0].TextureCallback = VRInfravisionModelShader;
 }
 
 
@@ -3326,10 +3353,14 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
     if (!SkinPtr) return false;
 
     float amb = std::min(1.0f, std::max(0.0f, float(RR.ambient_shade) / float(FIXED_ONE)));
-    ShaderData.Color[0]   = amb;
-    ShaderData.Color[1]   = amb;
-    ShaderData.Color[2]   = amb;
+    // Infravision: full-brightness tint (sprite_infravision.frag converts texture to greyscale × tint).
+    const bool isInfravision = IsInfravisionActive();
+    ShaderData.Color[0]   = isInfravision ? 1.0f : amb;
+    ShaderData.Color[1]   = isInfravision ? 1.0f : amb;
+    ShaderData.Color[2]   = isInfravision ? 1.0f : amb;
     ShaderData.Color[3]   = 1.0f;
+    if (isInfravision)
+        FindInfravisionVersionRGBA(Collection, ShaderData.Color);
     ShaderData.ModelPtr   = ModelPtr;
     ShaderData.SkinPtr    = SkinPtr;
     ShaderData.Collection = Collection;
@@ -3388,6 +3419,9 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
         g_vrStaticTime += 16.7f;
         ModelRenderObject.Render(ModelPtr->Model, VRStaticShaders, NumShaders, NumSepShaders, true);
         glUseProgram(0);  // VRStaticModelShader leaves S_Invincible active; reset so HUD/2D draw normally
+    } else if (isInfravision) {
+        ModelRenderObject.Render(ModelPtr->Model, VRInfravisionShaders, 1, 1, true);
+        glUseProgram(0);
     } else {
         ModelRenderObject.Render(ModelPtr->Model, StandardShaders, NumShaders, NumSepShaders, true);
     }
@@ -3423,6 +3457,16 @@ bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3])
 	TMgr.TransferData = RR.transfer_data;
 	TMgr.IsShadeless  = (RR.flags & _SHADELESS_BIT) != 0;
 	TMgr.TextureType  = OGL_Txtr_WeaponsInHand;
+	if (IsInfravisionActive()) {
+		// Load the normal texture into the infravision CLUT slot so that
+		// sprite_infravision.frag can convert it to greyscale × tint.
+		// Without this, the infravision shading table produces dark/black pixels
+		// and the greyscale conversion outputs nothing.  Mirrors setupSpriteTexture().
+		struct bitmap_definition* dummy;
+		extended_get_shape_bitmap_and_shading_table(
+			GET_DESCRIPTOR_COLLECTION(TMgr.ShapeDesc), TMgr.LowLevelShape,
+			&dummy, &TMgr.ShadingTables, _shading_normal);
+	}
 	if (!TMgr.Setup()) return false;
 
 	// Full texture coordinate ranges (no clipping)
@@ -3447,7 +3491,13 @@ bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3])
 	glDisable(GL_CULL_FACE);   // visible from both sides
 
 	float amb = std::min(1.0f, std::max(0.0f, float(RR.ambient_shade) / float(FIXED_ONE)));
-	glColor4f(amb, amb, amb, 1.0f);
+	// Infravision: sprite_infravision.frag converts texture to greyscale × tint; use full brightness.
+	GLfloat tint[3] = {1.0f, 1.0f, 1.0f};
+	if (IsInfravisionActive())
+		FindInfravisionVersionRGBA(GET_COLLECTION(GET_DESCRIPTOR_COLLECTION(RR.ShapeDesc)), tint);
+	glColor4f(IsInfravisionActive() ? tint[0] : amb,
+	          IsInfravisionActive() ? tint[1] : amb,
+	          IsInfravisionActive() ? tint[2] : amb, 1.0f);
 
 	// Always blend using texture alpha — the GLES3 builtin shader has no alpha-test,
 	// so blending is the only way to honour transparent pixels in the sprite.
@@ -3466,6 +3516,11 @@ bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3])
 		a1ffStaticMode(1, g_vrStaticTime);
 		glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 		a1ffStaticMode(0, 0.0f);
+	} else if (IsInfravisionActive()) {
+		// sprite_infravision.frag: texture → greyscale × vertexColor (tint set in glColor4f above).
+		Shader::get(Shader::S_SpriteInfravision)->enable();
+		glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+		glUseProgram(0);
 	} else {
 		glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 

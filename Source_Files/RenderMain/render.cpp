@@ -635,6 +635,7 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 	static int            s_cachedWpnHand     = 0;
 	static float          s_cachedWpnAmbient  = 0.5f;
 	static int            s_cachedMd3Frame    = 0;
+	static bool           s_cachedWpnIsStatic = false;
 	bool loopHadItems  = false;
 	bool any3DThisCall = false;
 
@@ -849,15 +850,16 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 				int oFrame; float oMix; int oNext;
 				md3Params(ovl, oFrame, oMix, oNext);
 				OGL_RenderVRWeaponModel(rect, display_data.collection, 0,
-					ovl, cwx, cwy, cwz_slid, wrx, wup_mdl, wfwd_mdl, false,
+					ovl, cwx, cwy, cwz_slid, wrx, wup_mdl, wfwd_mdl, isStaticWpn,
 					oFrame, oMix, oNext);
 			}
-			s_cachedWpnModel   = weaponMdl;
-			s_cachedWpnColl    = display_data.collection;
-			s_cachedWpnClut    = 0;
-			s_cachedWpnHand    = hand;
-			s_cachedWpnAmbient = float(rect.ambient_shade) / float(FIXED_ONE);
-			s_cachedMd3Frame   = pFrame;
+			s_cachedWpnModel    = weaponMdl;
+			s_cachedWpnColl     = display_data.collection;
+			s_cachedWpnClut     = 0;
+			s_cachedWpnHand     = hand;
+			s_cachedWpnAmbient  = float(rect.ambient_shade) / float(FIXED_ONE);
+			s_cachedMd3Frame    = pFrame;
+			s_cachedWpnIsStatic = isStaticWpn;
 			any3DThisCall = true;
 		}
 		if (!renderedAs3D)
@@ -919,7 +921,7 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 			rect.ambient_shade = (short)(s_cachedWpnAmbient * float(FIXED_ONE));
 			OGL_RenderVRWeaponModel(rect, s_cachedWpnColl, s_cachedWpnClut,
 				s_cachedWpnModel, cwx, cwy, cwz, wrx, wup_mdl, wfwd_mdl,
-				false, s_cachedMd3Frame);
+				s_cachedWpnIsStatic, s_cachedMd3Frame);
 		}
 	}
 

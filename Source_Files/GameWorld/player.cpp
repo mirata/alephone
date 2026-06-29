@@ -465,7 +465,7 @@ short new_player(
 	/* give the player his initial items */
 	give_player_initial_items(player_index);
 	try_and_strip_player_items(player_index);
-	
+
 	return player_index;
 }
 
@@ -1051,12 +1051,13 @@ void recreate_players_for_new_level(
 	void)
 {
 	short player_index;
-	
+
 	for (player_index= 0; player_index<dynamic_world->player_count; ++player_index)
 	{
-		/* Recreate all of the players for the new level.. */	
+		/* Recreate all of the players for the new level.. */
 		recreate_player(player_index);
 	}
+
 }
 
 void team_damage_from_player_data(void)

@@ -1265,12 +1265,6 @@ void RenderRasterize_Shader::_render_node_object_helper(render_object_data *obje
 	// BSP back-to-front order. (VR briefly forced depth-test ON to stop through-walls, but that z-fights
 	// the sprite's own floor -- the floor-clip bug. Depth-off restores the correct "sprite sits on its
 	// floor" look; the through-walls / horizontal portal bleed is fixed by the clip windows instead.)
-	//
-	// VR exception: use GL_LEQUAL instead of depth-test OFF. The BSP ordering can put the sprite draw
-	// call either before or after the ledge floor (depending on geometry), so depth-test OFF lets the
-	// sprite overdraw the ledge floor when the BSP happens to draw A before B. GL_LEQUAL:
-	//   - passes against the sprite's own floor (equal depth) → no floor-clip z-fighting
-	//   - fails against a closer ledge floor already in the buffer → sprite hidden correctly
 	bool force_sprite_depth = OGL_ForceSpriteDepth();
 	if (force_sprite_depth) {
 		// look for parasitic objects based on y position,
@@ -1283,11 +1277,6 @@ void RenderRasterize_Shader::_render_node_object_helper(render_object_data *obje
 			objectY = pos.y;
 		}
 	} else {
-#if defined(__ANDROID__)
-		if (VR_IsActive())
-			glDepthFunc(GL_LEQUAL);
-		else
-#endif
 		glDisable(GL_DEPTH_TEST);
 	}
 
@@ -1341,9 +1330,6 @@ void RenderRasterize_Shader::_render_node_object_helper(render_object_data *obje
 	}
 
 	if (rect.clip_top >= rect.clip_bottom || rect.y0 >= rect.y1) {
-#if defined(__ANDROID__)
-		if (VR_IsActive() && !force_sprite_depth) glDepthFunc(GL_LESS);
-#endif
 		glEnable(GL_DEPTH_TEST);
 		glPopMatrix();
 		Shader::disable();
@@ -1359,9 +1345,6 @@ void RenderRasterize_Shader::_render_node_object_helper(render_object_data *obje
 	const int clip_top_px = std::max<int>(rect.y0, rect.clip_top);
 	const int clip_bottom_px = std::min<int>(rect.y1, rect.clip_bottom);
 	if (clip_top_px >= clip_bottom_px) {
-#if defined(__ANDROID__)
-		if (VR_IsActive() && !force_sprite_depth) glDepthFunc(GL_LESS);
-#endif
 		glEnable(GL_DEPTH_TEST);
 		glPopMatrix();
 		Shader::disable();
@@ -1460,10 +1443,6 @@ void RenderRasterize_Shader::_render_node_object_helper(render_object_data *obje
 		}
 	}
 
-#if defined(__ANDROID__)
-	if (VR_IsActive() && !force_sprite_depth)
-		glDepthFunc(GL_LESS);
-#endif
 	glEnable(GL_DEPTH_TEST);
 	glPopMatrix();
 	Shader::disable();
