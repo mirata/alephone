@@ -646,8 +646,106 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 
 	while (get_weapon_display_information(&count, &display_data))
 	{
-		// Skip shell casings (_shell_casing_type == 1 stored in low nibble of interpolation_data)
-		if ((display_data.interpolation_data & 0x0F) == 1) continue;
+		// Shell casings: render as a camera-facing (billboarded) world-space quad
+		// ejecting from the dominant hand.  The 2D screen coords from the engine are
+		// mapped to world offsets: horizontal → camera-right, vertical → world-Z (up).
+		if ((display_data.interpolation_data & 0x0F) == 1) {
+			shape_information_data* csi = extended_get_shape_information(
+				display_data.collection, display_data.low_level_shape_index);
+			bitmap_definition* cbmp = nullptr;
+			void* cshade = nullptr;
+			if (csi) extended_get_shape_bitmap_and_shading_table(
+				display_data.collection, display_data.low_level_shape_index,
+				&cbmp, &cshade, view->shading_mode);
+			if (csi && cbmp) {
+				float ps[3], fs[3], stage_rc[3], stage_uc[3];
+				if (VR_GetAimPoseStage(domHand, ps, fs) &&
+				    VR_GetAimOrientStage(domHand, stage_rc, stage_uc)) {
+					const float qx  = (ps[0] - hp[0]) * W;
+					const float qsy = (ps[1] - hp[1]) * W;
+					const float qz  = (ps[2] - hp[2]) * W;
+					const float rx  = -qx, ry = -qz;
+					const float shx = camx + rx * cy - ry * sy;
+					const float shy = camy + rx * sy + ry * cy;
+					const float shz = camz + qsy;
+
+					// Weapon right and forward in world space (same stageToWorldDir as main loop)
+					const float zx_r = -stage_rc[0], zy_r = -stage_rc[2];
+					const float wrx_x = zx_r * cy - zy_r * sy;
+					const float wrx_y = zx_r * sy + zy_r * cy;
+					const float zx_f = -fs[0], zy_f = -fs[2];
+					const float wfwd_x = (float)(zx_f * cy - zy_f * sy);
+					const float wfwd_y = (float)(zx_f * sy + zy_f * cy);
+					const float wfwd_z = fs[1];
+
+					// Per-weapon forward offset for the eject position (configured via MML vr_casing).
+					const float fwd_off = VR_GetWeaponCasingFwdOffset(weap_type) * W;
+
+					// xFrac sign encodes ejection side: +ve = right, −ve = left (reversed)
+					// vertical_position = FIXED_ONE − casing_y; small vpos → casing high
+					const float xFrac = float(display_data.horizontal_position) / float(FIXED_ONE) - 0.5f;
+					const float yFrac = float(FIXED_ONE - display_data.vertical_position) / float(FIXED_ONE);
+					// position: eject along weapon right, rise along world Z, plus weapon-forward offset
+					const float ox = shx + xFrac * W * 0.5f * wrx_x + fwd_off * wfwd_x;
+					const float oy = shy + xFrac * W * 0.5f * wrx_y + fwd_off * wfwd_y;
+					const float oz = shz + yFrac * W * 0.4f          + fwd_off * wfwd_z;
+
+					const float cworld_w = fabsf(float(csi->world_right - csi->world_left));
+					const float cworld_h = fabsf(float(csi->world_bottom - csi->world_top));
+					// Use bitmap pixel dims as fallback to preserve aspect ratio.
+					const float raw_w = (cworld_w > 4.0f) ? cworld_w : float(cbmp->width  > 0 ? cbmp->width  : 32);
+					const float raw_h = (cworld_h > 4.0f) ? cworld_h : float(cbmp->height > 0 ? cbmp->height : 32);
+					const float chw = (raw_w / 1024.0f) * 0.25f * W;
+					const float chh = (raw_h / 1024.0f) * 0.25f * W;
+
+					// Spherical billboard: right/up axes from camera→casing vector so the quad
+					// faces the eye correctly even with head pitch (common in VR).
+					const float tx = ox - camx, ty = oy - camy, tz = oz - camz;
+					const float tlen = sqrtf(tx*tx + ty*ty + tz*tz);
+					// right = normalize(cross(world_up, T)) = normalize((-ty, tx, 0))
+					float brx = -ty, bry = tx;
+					const float brlen = sqrtf(brx*brx + bry*bry);
+					if (brlen > 1e-4f) { brx /= brlen; bry /= brlen; }
+					else               { brx = float(-cy); bry = float(-sy); }
+					// up = normalize(cross(T_hat, right))
+					const float tinv = tlen > 1e-4f ? 1.f/tlen : 1.f;
+					const float tx_n = tx*tinv, ty_n = ty*tinv, tz_n = tz*tinv;
+					const float bux = -tz_n*bry, buy = tz_n*brx, buz = tx_n*bry - ty_n*brx;
+					const float bulen = sqrtf(bux*bux + buy*buy + buz*buz);
+					const float bux_n = bulen > 1e-4f ? bux/bulen : 0.f;
+					const float buy_n = bulen > 1e-4f ? buy/bulen : 0.f;
+					const float buz_n = bulen > 1e-4f ? buz/bulen : 1.f;
+					float cverts[4][3] = {
+						{ ox - chw*brx + chh*bux_n, oy - chw*bry + chh*buy_n, oz + chh*buz_n },  // TL
+						{ ox + chw*brx + chh*bux_n, oy + chw*bry + chh*buy_n, oz + chh*buz_n },  // TR
+						{ ox + chw*brx - chh*bux_n, oy + chw*bry - chh*buy_n, oz - chh*buz_n },  // BR
+						{ ox - chw*brx - chh*bux_n, oy - chw*bry - chh*buy_n, oz - chh*buz_n }   // BL
+					};
+
+					rectangle_definition crect;
+					crect.ModelPtr        = nullptr;
+					crect.Opacity         = 1;
+					crect.ShapeDesc       = BUILD_DESCRIPTOR(display_data.collection, 0);
+					crect.LowLevelShape   = display_data.low_level_shape_index;
+					crect.texture         = cbmp;
+					crect.shading_tables  = cshade;
+					crect.transfer_mode   = display_data.transfer_mode;
+					crect.transfer_data   = 0;
+					crect.flags           = 0;
+					crect.flip_horizontal = display_data.flip_horizontal;
+					crect.flip_vertical   = display_data.flip_vertical;
+					crect.depth           = 0;
+					crect.ambient_shade   = get_light_intensity(
+						get_polygon_data(view->origin_polygon_index)->floor_lightsource_index);
+					crect.ambient_shade   = MAX(csi->minimum_light_intensity, crect.ambient_shade);
+					if (view->shading_mode == _shading_infravision) crect.flags |= _SHADELESS_BIT;
+					instantiate_rectangle_transfer_mode(view, &crect,
+						display_data.transfer_mode, display_data.transfer_phase);
+					OGL_RenderVRWeaponQuad(crect, cverts);
+				}
+			}
+			continue;  // don't advance vrWeaponIdx for casings
+		}
 		loopHadItems = true;
 
 		shape_information_data* si =

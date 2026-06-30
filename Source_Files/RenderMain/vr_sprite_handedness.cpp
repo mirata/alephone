@@ -18,10 +18,12 @@ static const std::map<std::string, short> kWeaponNames = {
 };
 
 static std::set<short> s_leftHandedWeapons;
+static std::map<short, float> s_casingFwdOffsets;
 
 void reset_mml_vr_sprites()
 {
 	s_leftHandedWeapons.clear();
+	s_casingFwdOffsets.clear();
 }
 
 void parse_mml_vr_sprites(const InfoTree& root)
@@ -43,9 +45,36 @@ void parse_mml_vr_sprites(const InfoTree& root)
 		if (index >= 0)
 			s_leftHandedWeapons.insert(index);
 	}
+	for (const InfoTree& child : root.children_named("vr_casing"))
+	{
+		short index = -1;
+		child.read_attr("index", index);
+		if (index < 0)
+		{
+			std::string name;
+			if (child.read_attr("name", name))
+			{
+				auto it = kWeaponNames.find(name);
+				if (it != kWeaponNames.end())
+					index = it->second;
+			}
+		}
+		if (index >= 0)
+		{
+			float fwd = 0.f;
+			child.read_attr("fwd_offset", fwd);
+			s_casingFwdOffsets[index] = fwd;
+		}
+	}
 }
 
 bool VR_IsWeaponNaturallyLeftHanded(short weapon_type)
 {
 	return s_leftHandedWeapons.count(weapon_type) > 0;
+}
+
+float VR_GetWeaponCasingFwdOffset(short weapon_type)
+{
+	auto it = s_casingFwdOffsets.find(weapon_type);
+	return it != s_casingFwdOffsets.end() ? it->second : 0.f;
 }
