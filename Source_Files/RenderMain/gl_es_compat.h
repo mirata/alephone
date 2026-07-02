@@ -186,7 +186,7 @@ static inline void a1es_noop_texenvf(GLenum, GLenum, GLfloat) {}
 static inline void a1es_noop_pushattrib(GLbitfield) {}
 static inline void a1es_noop_popattrib(void) {}
 #define glAlphaFunc   a1ffAlphaFunc
-#define glClipPlane   a1es_noop_clipplane
+#define glClipPlane   a1ffClipPlane
 #define glTexEnvi     a1es_noop_texenvi
 #define glTexEnvf     a1es_noop_texenvf
 #define glPushAttrib  a1es_noop_pushattrib
@@ -216,6 +216,14 @@ extern "C" {
 void a1ffSetTexture2D(GLboolean enabled);
 void a1ffSetAlphaTest(GLboolean enabled);
 void a1ffAlphaFunc(GLenum func, GLclampf ref);
+// Portal clipping. Desktop GL clips reached-through-portal polygons to their clip window with
+// glClipPlane(GL_CLIP_PLANE0/1); GLES has no fixed-function clip planes, so we record the plane
+// (transformed to eye space by the modelview at call time, exactly like GL) and the shaders discard
+// out-of-plane fragments. Without this, walls/floors render un-clipped past their portal opening --
+// harmless in ordinary geometry (depth hides it) but in Marathon's 5D space an overlapping far
+// polygon bleeds through. Only planes 0 and 1 (the horizontal portal clips) are tracked.
+void a1ffClipPlane(GLenum plane, const GLdouble* eqn);
+void a1ffSetClipPlaneEnabled(int index, GLboolean enabled);
 // The VR modelview is a correct (det=+1) axis remap, opposite handedness to the engine's det=-1
 // kViewBaseMatrix, so on-screen winding is reversed. Flip glFrontFace (CW<->CCW) so the engine's
 // back-face culling keeps the visible faces. (Harmless for the 2D path, which doesn't set it.)
@@ -241,11 +249,13 @@ static inline bool a1es_is_ff_cap(GLenum cap) {
 static inline void a1es_enable(GLenum cap)  {
     if (cap == GL_TEXTURE_2D) { a1ffSetTexture2D(GL_TRUE);  return; }
     if (cap == GL_ALPHA_TEST) { a1ffSetAlphaTest(GL_TRUE);  return; }
+    if (cap >= GL_CLIP_PLANE0 && cap <= GL_CLIP_PLANE5) { a1ffSetClipPlaneEnabled((int)cap - GL_CLIP_PLANE0, GL_TRUE);  return; }
     if (!a1es_is_ff_cap(cap)) glEnable(cap);
 }
 static inline void a1es_disable(GLenum cap) {
     if (cap == GL_TEXTURE_2D) { a1ffSetTexture2D(GL_FALSE); return; }
     if (cap == GL_ALPHA_TEST) { a1ffSetAlphaTest(GL_FALSE); return; }
+    if (cap >= GL_CLIP_PLANE0 && cap <= GL_CLIP_PLANE5) { a1ffSetClipPlaneEnabled((int)cap - GL_CLIP_PLANE0, GL_FALSE); return; }
     if (!a1es_is_ff_cap(cap)) glDisable(cap);
 }
 #define glEnable   a1es_enable

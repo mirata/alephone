@@ -284,6 +284,13 @@ float g_fogEnd       = 1.0f;
 GLboolean g_alphaTestEnabled = GL_FALSE;
 float     g_alphaTestRef     = 0.5f;
 
+// Recorded portal clip-plane state (planes 0 and 1 -- the horizontal clip-window edges set by
+// RenderRasterize_Shader::clip_to_window). Each is stored in EYE space (the modelview at glClipPlane
+// time already baked in, per GL semantics) so the vertex shader tests dot(plane, a1_MV*vertex) and
+// the fragment shader discards where it is negative. g_clipEnabledMask: bit0=plane0, bit1=plane1.
+float g_clipPlaneEq[2][4] = { {0,0,0,0}, {0,0,0,0} };
+int   g_clipEnabledMask   = 0;
+
 // Cached a1_* uniform locations for each engine shader program.
 struct EngineLocs {
     GLint mvp, mv, mvInv, normalMat, texMat0, texMat1;
@@ -291,6 +298,7 @@ struct EngineLocs {
     GLint alphaTest, alphaRef;
     GLint brightness;
     GLint depthScale;
+    GLint clipPlane, clipEnabled;
 };
 std::unordered_map<GLuint, EngineLocs> g_engineLocs;
 
@@ -312,6 +320,8 @@ const EngineLocs& engineLocsFor(GLuint prog) {
     L.alphaRef   = glGetUniformLocation(prog, "a1_AlphaRef");
     L.brightness = glGetUniformLocation(prog, "a1_Brightness");
     L.depthScale = glGetUniformLocation(prog, "a1_DepthScale");
+    L.clipPlane  = glGetUniformLocation(prog, "a1_ClipPlane[0]");
+    L.clipEnabled= glGetUniformLocation(prog, "a1_ClipEnabled");
     return g_engineLocs.emplace(prog, L).first->second;
 }
 
@@ -605,6 +615,8 @@ void flushEngine(GLenum mode, const std::vector<int>& verts) {
     if (L.fogEnd     >= 0) glUniform1f(L.fogEnd, g_fogEnd);
     if (L.alphaTest  >= 0) glUniform1i(L.alphaTest, g_alphaTestEnabled ? 1 : 0);
     if (L.alphaRef   >= 0) glUniform1f(L.alphaRef, g_alphaTestRef);
+    if (L.clipEnabled>= 0) glUniform1i(L.clipEnabled, g_clipEnabledMask);
+    if (L.clipPlane  >= 0) glUniform4fv(L.clipPlane, 2, &g_clipPlaneEq[0][0]);
     if (L.brightness >= 0) glUniform1f(L.brightness, VR_IsActive() ? VR_Settings()->brightness : 1.0f);
     // Depth-cue / fog distance scale: VR eye-space is metres, but classicDepth & fog expect world units.
     if (L.depthScale >= 0) glUniform1f(L.depthScale, VR_IsActive() ? VR_Settings()->worldScaleWUM : 1.0f);
@@ -626,6 +638,29 @@ void a1ffSetTexture2D(GLboolean enabled) { g_texture2DEnabled = enabled; }
 
 void a1ffSetAlphaTest(GLboolean enabled) { g_alphaTestEnabled = enabled; }
 void a1ffAlphaFunc(GLenum /*func*/, GLclampf ref) { g_alphaTestRef = ref; }
+
+// Record a clip plane, transforming it to eye space exactly as fixed-function GL does:
+// plane_eye = plane_object * inverse(modelview_at_call_time). The clip-window planes are given in a
+// player-recentred frame (clip_to_window pushes translate(origin)*rotate(yaw) before calling), and
+// because that recentre matrix cancels against the draw-time modelview, dot(plane_eye, a1_MV*vertex)
+// evaluates the plane against the world vertex regardless of which eye's view matrix is active.
+void a1ffClipPlane(GLenum plane, const GLdouble* eqn) {
+    int idx = (int)plane - 0x3000;   // GL_CLIP_PLANE0
+    if (idx < 0 || idx > 1 || !eqn) return;
+    Mat inv = invert4(g_modelview.top());
+    // column-major inverse: M_inv[row][col] = inv[col*4 + row]; plane_eye[col] = sum_row eqn[row]*M_inv[row][col]
+    for (int col = 0; col < 4; ++col) {
+        float s = 0.0f;
+        for (int row = 0; row < 4; ++row) s += (float)eqn[row] * inv[col * 4 + row];
+        g_clipPlaneEq[idx][col] = s;
+    }
+}
+
+void a1ffSetClipPlaneEnabled(int index, GLboolean enabled) {
+    if (index < 0 || index > 1) return;   // only the horizontal portal clips are shader-enforced
+    if (enabled) g_clipEnabledMask |=  (1 << index);
+    else         g_clipEnabledMask &= ~(1 << index);
+}
 
 void a1ffFrontFace(GLenum mode) {
 	// The VR modelview now matches the engine's handedness (det=-1 remap), so pass the winding

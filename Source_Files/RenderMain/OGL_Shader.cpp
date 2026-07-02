@@ -235,7 +235,23 @@ GLhandleARB parseShader(const GLcharARB* str, GLenum shaderType) {
 		"#define gl_TexCoord a1_TexCoordV\n"
 		// Depth-cue / fog distance scale: the VR modelview is in METRES, but classicDepth & fog expect
 		// WORLD UNITS, so multiply the eye-space distance by WUperMetre (set by the shim). 1.0 in flat mode.
-		"uniform float a1_DepthScale;\n";
+		"uniform float a1_DepthScale;\n"
+		// Portal clipping: replaces fixed-function glClipPlane (a no-op in GLES). The shim uploads the two
+		// clip-window edge planes (eye space) + an enable bitmask; we emit their signed distance as a
+		// varying and the fragment shader discards where it goes negative. Fixes 5D-space bleed-through
+		// (a polygon reached through a portal drawing past its opening). The wrapper main() runs the
+		// shader's own main (renamed a1_user_main) first, then computes the distances.
+		"uniform vec4 a1_ClipPlane[2];\n"
+		"uniform int  a1_ClipEnabled;\n"
+		"out highp float a1_ClipDistV[2];\n"
+		"void a1_user_main(void);\n"
+		"void main(void) {\n"
+		"  a1_user_main();\n"
+		"  highp vec4 a1_eyePos = a1_MV * a1_Vertex;\n"
+		"  a1_ClipDistV[0] = ((a1_ClipEnabled & 1) != 0) ? dot(a1_ClipPlane[0], a1_eyePos) : 1.0;\n"
+		"  a1_ClipDistV[1] = ((a1_ClipEnabled & 2) != 0) ? dot(a1_ClipPlane[1], a1_eyePos) : 1.0;\n"
+		"}\n"
+		"#define main a1_user_main\n";
 	static const char* kFragPreamble =
 		"#version 300 es\n"
 		"precision highp float;\n"
@@ -250,6 +266,8 @@ GLhandleARB parseShader(const GLcharARB* str, GLenum shaderType) {
 		"#define round a1round\n"
 		"in vec4 a1_TexCoordV[2];\n"
 		"#define gl_TexCoord a1_TexCoordV\n"
+		// Portal clip distances from the vertex shader; discard where either enabled plane is negative.
+		"in highp float a1_ClipDistV[2];\n"
 		"struct a1_FogParameters { vec4 color; float density; float start; float end; };\n"
 		"uniform a1_FogParameters a1_Fog;\n"
 		"#define gl_Fog a1_Fog\n"
@@ -265,7 +283,7 @@ GLhandleARB parseShader(const GLcharARB* str, GLenum shaderType) {
 		"uniform float a1_Brightness;\n"
 		"uniform float a1_DepthScale;\n"
 		"void a1_user_main(void);\n"
-		"void main(void) { a1_user_main(); if (a1_AlphaTest && a1_FragValue.a < a1_AlphaRef) discard; a1_FragColor_out = vec4(a1_FragValue.rgb * a1_Brightness, a1_FragValue.a); }\n"
+		"void main(void) { if (a1_ClipDistV[0] < 0.0 || a1_ClipDistV[1] < 0.0) discard; a1_user_main(); if (a1_AlphaTest && a1_FragValue.a < a1_AlphaRef) discard; a1_FragColor_out = vec4(a1_FragValue.rgb * a1_Brightness, a1_FragValue.a); }\n"
 		"#define main a1_user_main\n";
 	source.push_back(shaderType == GL_FRAGMENT_SHADER ? kFragPreamble : kVertPreamble);
 
