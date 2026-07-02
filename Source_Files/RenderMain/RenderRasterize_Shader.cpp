@@ -497,20 +497,7 @@ std::unique_ptr<TextureManager> RenderRasterize_Shader::setupWallTexture(const s
 		s->enable();
 	}
 
-	bool setupOK = TMgr->Setup();
-#if defined(__ANDROID__)
-	if (transferMode == _xfer_landscape || transferMode == _xfer_big_landscape) {
-		static int s_lsSetupLog = 0;
-		if (s_lsSetupLog++ < 5) {
-			__android_log_print(ANDROID_LOG_WARN, "A1VR",
-				"landscape setupWallTexture: Setup()=%s ShapeDesc=0x%x",
-				setupOK ? "OK" : "FAIL", (unsigned)Texture);
-			logWarning("landscape setupWallTexture: Setup()=%s ShapeDesc=0x%x",
-				setupOK ? "OK" : "FAIL", (unsigned)Texture);
-		}
-	}
-#endif
-	if(setupOK) {
+	if(TMgr->Setup()) {
 		TMgr->RenderNormal(); // must allocate first
 		if (TEST_FLAG(Get_OGL_ConfigureData().Flags, OGL_Flag_BumpMap)) {
 			glActiveTextureARB(GL_TEXTURE1_ARB);
@@ -688,20 +675,6 @@ void RenderRasterize_Shader::render_node_floor_or_ceiling(clipping_window_data *
 	// note: wobble and pulsate behave the same way on floors and ceilings
 	// note 2: stronger wobble looks more like classic with default shaders
 	auto TMgr = setupWallTexture(texture, surface->transfer_mode, wobble * 4.0, 0, intensity, offset, renderStep);
-#if defined(__ANDROID__)
-	{
-		static int s_floorLog = 0;
-		if (s_floorLog++ < 20) {
-			__android_log_print(ANDROID_LOG_WARN, "A1VR",
-				"floor/ceil xfer=%d ceil=%d ShapeDesc=%s tex=0x%x",
-				surface->transfer_mode, ceil ? 1 : 0,
-				TMgr->ShapeDesc == UNONE ? "UNONE" : "OK", (unsigned)texture);
-			logWarning("floor/ceil xfer=%d ceil=%d ShapeDesc=%s tex=0x%x",
-				surface->transfer_mode, ceil ? 1 : 0,
-				TMgr->ShapeDesc == UNONE ? "UNONE" : "OK", (unsigned)texture);
-		}
-	}
-#endif
 	if(TMgr->ShapeDesc == UNONE) { return; }
 
 	if (TMgr->IsBlended()) {
@@ -854,18 +827,6 @@ void RenderRasterize_Shader::render_node_side(clipping_window_data *window, vert
 		wobble = 0;
 	}
 	auto TMgr = setupWallTexture(texture, surface->transfer_mode, pulsate, wobble, intensity, offset, renderStep);
-#if defined(__ANDROID__)
-	if (surface->transfer_mode == _xfer_landscape || surface->transfer_mode == _xfer_big_landscape) {
-		static int s_lsWallLog = 0;
-		if (s_lsWallLog++ < 5) {
-			__android_log_print(ANDROID_LOG_WARN, "A1VR",
-				"landscape wall: xfer=%d ShapeDesc=%s tex=0x%x",
-				surface->transfer_mode, TMgr->ShapeDesc == UNONE ? "UNONE" : "OK", (unsigned)texture);
-			logWarning("landscape wall: xfer=%d ShapeDesc=%s tex=0x%x",
-				surface->transfer_mode, TMgr->ShapeDesc == UNONE ? "UNONE" : "OK", (unsigned)texture);
-		}
-	}
-#endif
 	if(TMgr->ShapeDesc == UNONE) { return; }
 
 	if (TMgr->IsBlended()) {
@@ -1159,11 +1120,6 @@ bool RenderModel(rectangle_definition& RenderRectangle, short Collection, short 
 	return true;
 }
 
-// VR: the current sprite clip window, so _render_node_object_helper can clip the billboard's horizontal
-// extent to it in world space (the GLES shim no-ops glClipPlane, so we do it on the CPU). nullptr =
-// no clipping (desktop / not a sprite).
-static clipping_window_data* g_vr_sprite_clip_window = nullptr;
-
 void RenderRasterize_Shader::render_node_object(render_object_data *object, bool other_side_of_media, RenderStep renderStep) {
 
     if (!object->clipping_windows)
@@ -1217,11 +1173,9 @@ void RenderRasterize_Shader::render_node_object(render_object_data *object, bool
 			}
 		}
 
-        clip_to_window(win);
-        g_vr_sprite_clip_window = win;   // VR: CPU-clip the billboard to this window
+        clip_to_window(win);   // sets GPU clip planes 0/1; sprite shaders discard out-of-window fragments
         _render_node_object_helper(object, renderStep);
     }
-    g_vr_sprite_clip_window = nullptr;
 
     glDisable(GL_CLIP_PLANE5);
 }
@@ -1387,60 +1341,16 @@ void RenderRasterize_Shader::_render_node_object_helper(render_object_data *obje
 		texCoords[1][0]
 	};
 
-	bool vr_fully_clipped = false;
-#if defined(__ANDROID__)
-	// VR: clip the billboard's horizontal extent to the cell's clip window (the original GL_CLIP_PLANE0/1
-	// from clip_to_window, which the GLES shim no-ops). The window edges (long_vector2d left/right) are
-	// world-space vertical planes through view->origin, with the normal taken in a frame rotated by
-	// view->yaw+90 (exactly as clip_to_window builds the GL planes). We solve, along the billboard's
-	// width (local y, from WorldLeft to WorldRight), the sub-range that stays inside both planes, then
-	// shrink the quad + interpolate the horizontal texcoord. Fixes sprites bleeding past wall/door edges.
-	if (VR_IsActive() && g_vr_sprite_clip_window)
-	{
-		clipping_window_data* win = g_vr_sprite_clip_window;
-		const double PI = 3.14159265358979323846;
-		const double th = view->yaw * (360.0 / double(FULL_CIRCLE)) * (PI / 180.0);  // billboard yaw
-		const double ph = th + PI / 2.0;                                            // clip-plane frame
-		const double cph = cos(ph), sph = sin(ph), cth = cos(th), sth = sin(th);
-		const double dpx = pos.x - view->origin.x, dpy = pos.y - view->origin.y;
-		const double yL = vertex_array[1], yR = vertex_array[4];
-		double s0 = 0.0, s1 = 1.0;   // kept sub-range along left(0)->right(1)
-		auto apply = [&](double ni, double nj, bool active) {
-			if (!active) return;
-			const double Nx = ni*cph - nj*sph, Ny = ni*sph + nj*cph;   // world normal = Rz(ph)*(ni,nj)
-			const double A = Nx*dpx + Ny*dpy;
-			const double B = -Nx*sth + Ny*cth;                          // d(keep)/dy
-			const double k0 = A + yL*B, k1 = A + yR*B;                   // keep value at left/right vert
-			if (k0 >= 0 && k1 >= 0) return;                             // wholly inside this plane
-			if (k0 < 0 && k1 < 0) { s0 = 1.0; s1 = 0.0; return; }       // wholly outside
-			const double sc = k0 / (k0 - k1);                           // crossing parameter
-			if (k0 < 0) s0 = std::max(s0, sc); else s1 = std::min(s1, sc);
-		};
-		apply(win->left.i,  win->left.j,  (win->left.i  != leftmost_clip.i  || win->left.j  != leftmost_clip.j));
-		apply(win->right.i, win->right.j, (win->right.i != rightmost_clip.i || win->right.j != rightmost_clip.j));
-		if (s0 >= s1) {
-			vr_fully_clipped = true;
-		} else if (s0 > 0.0 || s1 < 1.0) {
-			const double bL = texcoord_array[1], bR = texcoord_array[3];
-			const float nyL = (float)(yL + s0*(yR-yL)), nyR = (float)(yL + s1*(yR-yL));
-			const float nbL = (float)(bL + s0*(bR-bL)), nbR = (float)(bL + s1*(bR-bL));
-			vertex_array[1] = vertex_array[10] = nyL;   // left verts
-			vertex_array[4] = vertex_array[7]  = nyR;   // right verts
-			texcoord_array[1] = texcoord_array[7] = nbL;
-			texcoord_array[3] = texcoord_array[5] = nbR;
-		}
-	}
-#endif
-
+	// Billboard horizontal clipping to the portal window is done on the GPU: render_node_object set
+	// clip planes 0/1 via clip_to_window() and the sprite shaders discard out-of-window fragments
+	// (see the clip-distance preamble in OGL_Shader.cpp). No CPU quad clipping needed.
 	glVertexPointer(3, GL_FLOAT, 0, vertex_array);
 	glTexCoordPointer(2, GL_FLOAT, 0, texcoord_array);
 
-	if (!vr_fully_clipped) {
-		glDrawArrays(GL_QUADS, 0, 4);
+	glDrawArrays(GL_QUADS, 0, 4);
 
-		if (setupGlow(view, TMgr, 0, 1, weaponFlare, selfLuminosity, offset, renderStep)) {
-			glDrawArrays(GL_QUADS, 0, 4);
-		}
+	if (setupGlow(view, TMgr, 0, 1, weaponFlare, selfLuminosity, offset, renderStep)) {
+		glDrawArrays(GL_QUADS, 0, 4);
 	}
 
 	glEnable(GL_DEPTH_TEST);
