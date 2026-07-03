@@ -627,7 +627,56 @@ void OGL_ModelData::Load()
 
 	// Don't forget the skins
 	OGL_SkinManager::Load();
+
+#if defined(__ANDROID__)
+	// Upload MD3 keyframes to persistent vram for the VR GPU keyframe-lerp path.
+	VR_UploadBuffers();
+#endif
 }
+
+
+#if defined(__ANDROID__)
+void OGL_ModelData::VR_UploadBuffers()
+{
+	VR_FreeBuffers();   // idempotent; safe on reload
+
+	// Only MD3 morph models get the GPU path; the keyframes must be present and
+	// texcoords must cover every vertex (they are indexed with the same NumVerts).
+	if (Model.MD3NumFrames <= 0 || Model.MD3Positions.empty()) return;
+	if (Model.VertIndices.empty()) return;
+
+	VR_NumVerts   = static_cast<int>(Model.Positions.size() / 3);
+	VR_NumIndices = static_cast<int>(Model.VertIndices.size());
+	if (VR_NumVerts <= 0 || VR_NumIndices <= 0) return;
+	if (Model.TxtrCoords.size() < static_cast<size_t>(VR_NumVerts) * 2) return;
+
+	glGenBuffers(1, &VR_PosVBO);
+	glBindBuffer(GL_ARRAY_BUFFER, VR_PosVBO);
+	glBufferData(GL_ARRAY_BUFFER, Model.MD3Positions.size() * sizeof(GLfloat),
+		Model.MD3Positions.data(), GL_STATIC_DRAW);
+
+	glGenBuffers(1, &VR_TexVBO);
+	glBindBuffer(GL_ARRAY_BUFFER, VR_TexVBO);
+	glBufferData(GL_ARRAY_BUFFER, Model.TxtrCoords.size() * sizeof(GLfloat),
+		Model.TxtrCoords.data(), GL_STATIC_DRAW);
+
+	glGenBuffers(1, &VR_IBO);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, VR_IBO);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, Model.VertIndices.size() * sizeof(GLushort),
+		Model.VertIndices.data(), GL_STATIC_DRAW);
+
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+}
+
+void OGL_ModelData::VR_FreeBuffers()
+{
+	if (VR_PosVBO) { glDeleteBuffers(1, &VR_PosVBO); VR_PosVBO = 0; }
+	if (VR_TexVBO) { glDeleteBuffers(1, &VR_TexVBO); VR_TexVBO = 0; }
+	if (VR_IBO)    { glDeleteBuffers(1, &VR_IBO);    VR_IBO    = 0; }
+	VR_NumVerts = VR_NumIndices = 0;
+}
+#endif
 
 
 void OGL_ModelData::Unload()
@@ -635,7 +684,11 @@ void OGL_ModelData::Unload()
 	Model.Clear();
 	mLoadAttempted = false;
 	OGL_ResetForceSpriteDepth();
-	
+
+#if defined(__ANDROID__)
+	VR_FreeBuffers();
+#endif
+
 	// Don't forget the skins
 	OGL_SkinManager::Unload();
 }

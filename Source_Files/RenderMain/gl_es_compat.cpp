@@ -630,6 +630,60 @@ void flushIndexed(GLenum mode, const std::vector<int>& verts) {
     else                       flushBuiltin(mode, verts);
 }
 
+// --- VR GPU keyframe-lerp program (see a1ffDrawMorphMesh) ---
+// A tiny dedicated program, sibling of the builtin one. Two position attributes (frame A at
+// loc 0, frame B at loc 5) are lerped by uMix; the sampled skin is tinted by uColor. It owns its
+// own attribute setup so it never depends on which engine program happens to be bound.
+GLuint g_morphProg = 0;
+GLint  mo_mvp = -1, mo_mix = -1, mo_color = -1, mo_tex = -1;
+
+void ensureMorph() {
+    if (g_morphProg) return;
+    static const char* kVert =
+        "#version 300 es\n"
+        "layout(location=0) in vec3 aPosA;\n"
+        "layout(location=5) in vec3 aPosB;\n"
+        "layout(location=1) in vec2 aTex0;\n"
+        "uniform mat4 uMVP;\n"
+        "uniform float uMix;\n"
+        "out vec2 vTex;\n"
+        "void main() {\n"
+        "  vec3 p = mix(aPosA, aPosB, uMix);\n"
+        "  gl_Position = uMVP * vec4(p, 1.0);\n"
+        "  vTex = aTex0;\n"
+        "}\n";
+    static const char* kFrag =
+        "#version 300 es\n"
+        "precision mediump float;\n"
+        "in vec2 vTex;\n"
+        "uniform sampler2D uTex;\n"
+        "uniform vec4 uColor;\n"
+        "out vec4 fragColor;\n"
+        "void main() {\n"
+        "  fragColor = texture(uTex, vTex) * uColor;\n"
+        "}\n";
+    GLuint v = compileSh(GL_VERTEX_SHADER, kVert);
+    GLuint f = compileSh(GL_FRAGMENT_SHADER, kFrag);
+    g_morphProg = glCreateProgram();
+    glAttachShader(g_morphProg, v);
+    glAttachShader(g_morphProg, f);
+    glLinkProgram(g_morphProg);
+    GLint linked = 0;
+    glGetProgramiv(g_morphProg, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        char log[1024];
+        glGetProgramInfoLog(g_morphProg, sizeof log, nullptr, log);
+        __android_log_print(ANDROID_LOG_ERROR, "A1FF", "morph program link failed: %s", log);
+    }
+    glDeleteShader(v);
+    glDeleteShader(f);
+    mo_mvp   = glGetUniformLocation(g_morphProg, "uMVP");
+    mo_mix   = glGetUniformLocation(g_morphProg, "uMix");
+    mo_color = glGetUniformLocation(g_morphProg, "uColor");
+    mo_tex   = glGetUniformLocation(g_morphProg, "uTex");
+    ensureBuffers();
+}
+
 } // namespace
 
 extern "C" {
@@ -717,6 +771,49 @@ void a1ffDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indic
         verts.push_back(idx);
     }
     flushIndexed(mode, verts);
+}
+
+void a1ffDrawMorphMesh(GLuint posVBO, GLuint texVBO, GLuint ibo,
+                       int numVerts, int numIndices,
+                       int frameA, int frameB, float mixv, const float* color4) {
+    if (!posVBO || !texVBO || !ibo || numVerts <= 0 || numIndices <= 0) return;
+    ensureMorph();
+
+    glUseProgram(g_morphProg);
+
+    Mat mvp = multiply(g_projection.top(), g_modelview.top());
+    glUniformMatrix4fv(mo_mvp, 1, GL_FALSE, mvp.data());
+    glUniform1f(mo_mix, mixv);
+    const float white[4] = { 1.f, 1.f, 1.f, 1.f };
+    glUniform4fv(mo_color, 1, color4 ? color4 : white);
+    glUniform1i(mo_tex, 0);
+
+    glBindVertexArray(g_vao);
+
+    const size_t frameStride = (size_t)numVerts * 3 * sizeof(float);
+    glBindBuffer(GL_ARRAY_BUFFER, posVBO);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (const void*)((size_t)frameA * frameStride));
+    glEnableVertexAttribArray(5);
+    glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, 0, (const void*)((size_t)frameB * frameStride));
+
+    glBindBuffer(GL_ARRAY_BUFFER, texVBO);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, (const void*)0);
+
+    // Attributes this program doesn't read; disable so stale arrays never feed them.
+    glDisableVertexAttribArray(2);
+    glDisableVertexAttribArray(3);
+    glDisableVertexAttribArray(4);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+    glDrawElements(GL_TRIANGLES, numIndices, GL_UNSIGNED_SHORT, (const void*)0);
+
+    // Leave shared VAO state as the shim's own flushes (locations 0-4 + glDrawArrays) expect:
+    // disable our extra location-5 array and unbind the element buffer we set on the VAO.
+    glDisableVertexAttribArray(5);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 } // extern "C"

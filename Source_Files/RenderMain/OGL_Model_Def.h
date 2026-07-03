@@ -136,6 +136,20 @@ public:
 	Model3D Model;
 	bool ModelPresent() {return !Model.VertIndices.empty();}
 
+#if defined(__ANDROID__)
+	// Persistent GPU buffers for the VR GPU keyframe-lerp path (Android/Quest).
+	// All MD3 keyframes live resident in vram; the vertex shader lerps between two
+	// frames (see a1ffDrawMorphMesh) so there is no per-frame CPU repose or re-upload.
+	// Zero when absent (non-MD3, or not yet loaded) -> renderer falls back to the CPU path.
+	GLuint VR_PosVBO = 0;      // all keyframes of positions (MD3NumFrames * NumVerts * 3), STATIC
+	GLuint VR_TexVBO = 0;      // per-vertex texcoords, shared across frames, STATIC
+	GLuint VR_IBO    = 0;      // triangle indices, shared across frames, STATIC
+	int VR_NumVerts   = 0;     // vertices per keyframe
+	int VR_NumIndices = 0;     // total triangle indices
+	void VR_UploadBuffers();   // upload from Model.MD3Positions/TxtrCoords/VertIndices
+	void VR_FreeBuffers();
+#endif
+
 	// For convenience
 	void Load();
 	void Unload();

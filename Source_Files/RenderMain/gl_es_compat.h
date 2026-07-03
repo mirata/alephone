@@ -439,6 +439,17 @@ void a1ffUseProgram(GLuint program);
 void a1ffStaticMode(int on, float time);  // enable per-pixel noise in the builtin shader
 void a1ffDrawArrays(GLenum mode, GLint first, GLsizei count);
 void a1ffDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices);
+
+// VR GPU keyframe-lerp draw (GZDoom-style). Draws a model whose keyframes are already resident
+// in persistent VBOs: positions are lerped between frameA and frameB by `mix` in the vertex
+// shader, so there is no per-frame CPU repose or streaming re-upload. posVBO holds all keyframes
+// (frame f at offset f*numVerts*3 floats); texVBO holds the shared per-vertex texcoords; ibo holds
+// the shared triangle indices. The skin texture must already be bound to unit 0, and blend/depth
+// state set, by the caller. color4 tints the sampled texture (ambient shade). MVP is taken from the
+// shim's current matrix stack, so push the model's placement matrix before calling.
+void a1ffDrawMorphMesh(GLuint posVBO, GLuint texVBO, GLuint ibo,
+                       int numVerts, int numIndices,
+                       int frameA, int frameB, float mix, const float* color4);
 #ifdef __cplusplus
 }
 #endif
