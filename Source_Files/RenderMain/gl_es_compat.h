@@ -447,9 +447,12 @@ void a1ffDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indic
 // the shared triangle indices. The skin texture must already be bound to unit 0, and blend/depth
 // state set, by the caller. color4 tints the sampled texture (ambient shade). MVP is taken from the
 // shim's current matrix stack, so push the model's placement matrix before calling.
+// mode: 0 = normal (texture * color4), 1 = infravision (greyscale * color4 tint),
+//       2 = static/invincibility (block noise keyed to texture alpha; staticTime animates it).
 void a1ffDrawMorphMesh(GLuint posVBO, GLuint texVBO, GLuint ibo,
                        int numVerts, int numIndices,
-                       int frameA, int frameB, float mix, const float* color4);
+                       int frameA, int frameB, float mix, const float* color4,
+                       int mode, float staticTime);
 #ifdef __cplusplus
 }
 #endif

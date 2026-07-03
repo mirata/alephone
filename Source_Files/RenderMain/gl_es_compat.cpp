@@ -636,6 +636,7 @@ void flushIndexed(GLenum mode, const std::vector<int>& verts) {
 // own attribute setup so it never depends on which engine program happens to be bound.
 GLuint g_morphProg = 0;
 GLint  mo_mvp = -1, mo_mix = -1, mo_color = -1, mo_tex = -1;
+GLint  mo_mode = -1, mo_staticTime = -1, mo_pixelH = -1;
 
 void ensureMorph() {
     if (g_morphProg) return;
@@ -652,15 +653,43 @@ void ensureMorph() {
         "  gl_Position = uMVP * vec4(p, 1.0);\n"
         "  vTex = aTex0;\n"
         "}\n";
+    // uMode: 0 = normal (texture * tint), 1 = infravision (greyscale * tint),
+    //        2 = static/invincibility (screen-space block noise keyed to texture alpha).
+    // Effects mirror sprite_infravision.frag / invincible.frag (fog omitted -- irrelevant on a
+    // weapon in hand, matching the normal morph path).
     static const char* kFrag =
         "#version 300 es\n"
         "precision mediump float;\n"
         "in vec2 vTex;\n"
         "uniform sampler2D uTex;\n"
         "uniform vec4 uColor;\n"
+        "uniform int uMode;\n"
+        "uniform float uStaticTime;\n"
+        "uniform float uPixelHeight;\n"
         "out vec4 fragColor;\n"
+        "highp float rnd(highp vec2 co){\n"
+        "  highp float dt = dot(co, vec2(12.9898, 78.233));\n"
+        "  highp float sn = mod(dt, 3.14);\n"
+        "  return fract(sin(sn) * 43758.5453);\n"
+        "}\n"
         "void main() {\n"
-        "  fragColor = texture(uTex, vTex) * uColor;\n"
+        "  vec4 c = texture(uTex, vTex);\n"
+        "  if (uMode == 2) {\n"
+        "    highp float blockSize = max(round(uPixelHeight / 320.0), 1.0);\n"
+        "    highp float moment = fract(uStaticTime / 10000.0);\n"
+        "    highp float eX = moment * round(gl_FragCoord.x / blockSize);\n"
+        "    highp float eY = moment * round(gl_FragCoord.y / blockSize);\n"
+        "    highp vec2 e = vec2(eX, eY);\n"
+        "    highp float sr = rnd(e);\n"
+        "    highp float sg = rnd(e * sr);\n"
+        "    highp float sb = rnd(e * sg);\n"
+        "    fragColor = vec4(sr, sg, sb, uColor.a * c.a);\n"
+        "  } else if (uMode == 1) {\n"
+        "    float avg = (c.r + c.g + c.b) / 3.0;\n"
+        "    fragColor = vec4(uColor.rgb * avg, uColor.a * c.a);\n"
+        "  } else {\n"
+        "    fragColor = c * uColor;\n"
+        "  }\n"
         "}\n";
     GLuint v = compileSh(GL_VERTEX_SHADER, kVert);
     GLuint f = compileSh(GL_FRAGMENT_SHADER, kFrag);
@@ -677,10 +706,13 @@ void ensureMorph() {
     }
     glDeleteShader(v);
     glDeleteShader(f);
-    mo_mvp   = glGetUniformLocation(g_morphProg, "uMVP");
-    mo_mix   = glGetUniformLocation(g_morphProg, "uMix");
-    mo_color = glGetUniformLocation(g_morphProg, "uColor");
-    mo_tex   = glGetUniformLocation(g_morphProg, "uTex");
+    mo_mvp        = glGetUniformLocation(g_morphProg, "uMVP");
+    mo_mix        = glGetUniformLocation(g_morphProg, "uMix");
+    mo_color      = glGetUniformLocation(g_morphProg, "uColor");
+    mo_tex        = glGetUniformLocation(g_morphProg, "uTex");
+    mo_mode       = glGetUniformLocation(g_morphProg, "uMode");
+    mo_staticTime = glGetUniformLocation(g_morphProg, "uStaticTime");
+    mo_pixelH     = glGetUniformLocation(g_morphProg, "uPixelHeight");
     ensureBuffers();
 }
 
@@ -775,7 +807,8 @@ void a1ffDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indic
 
 void a1ffDrawMorphMesh(GLuint posVBO, GLuint texVBO, GLuint ibo,
                        int numVerts, int numIndices,
-                       int frameA, int frameB, float mixv, const float* color4) {
+                       int frameA, int frameB, float mixv, const float* color4,
+                       int mode, float staticTime) {
     if (!posVBO || !texVBO || !ibo || numVerts <= 0 || numIndices <= 0) return;
     ensureMorph();
 
@@ -787,6 +820,14 @@ void a1ffDrawMorphMesh(GLuint posVBO, GLuint texVBO, GLuint ibo,
     const float white[4] = { 1.f, 1.f, 1.f, 1.f };
     glUniform4fv(mo_color, 1, color4 ? color4 : white);
     glUniform1i(mo_tex, 0);
+    glUniform1i(mo_mode, mode);
+    if (mode == 2) {
+        // Static/invincibility block noise is screen-space; block size derives from eye-buffer height.
+        GLint vp[4] = { 0, 0, 0, 0 };
+        glGetIntegerv(GL_VIEWPORT, vp);
+        glUniform1f(mo_staticTime, staticTime);
+        glUniform1f(mo_pixelH, (float)vp[3]);
+    }
 
     glBindVertexArray(g_vao);
 

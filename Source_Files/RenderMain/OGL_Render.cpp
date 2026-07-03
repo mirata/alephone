@@ -3415,6 +3415,25 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
     glPushMatrix();
     glMultMatrixf(m);
 
+#if defined(__ANDROID__)
+    if (ModelPtr->VR_PosVBO && ModelPtr->Model.MD3NumFrames > 0) {
+        // GPU keyframe-lerp fast path: keyframes are resident in vram and the vertex shader lerps
+        // between them, so there is no per-frame CPU repose or streaming re-upload. The morph
+        // program also handles the static-invincibility (mode 2) and infravision (mode 1) effects.
+        const int nF = ModelPtr->Model.MD3NumFrames;
+        int fA = md3Frame < 0 ? 0 : (md3Frame >= nF ? nF - 1 : md3Frame);
+        int fB = md3NextFrame < 0 ? fA : (md3NextFrame >= nF ? nF - 1 : md3NextFrame);
+        float mixv = (fB != fA) ? md3Mix : 0.0f;
+        int mode = isStatic ? 2 : (isInfravision ? 1 : 0);
+        float staticTime = 0.0f;
+        if (isStatic) { g_vrStaticTime += 16.7f; staticTime = g_vrStaticTime; }
+        NormalShader(nullptr);   // bind skin to unit 0 + set blend, exactly like the CPU path
+        a1ffDrawMorphMesh(ModelPtr->VR_PosVBO, ModelPtr->VR_TexVBO, ModelPtr->VR_IBO,
+            ModelPtr->VR_NumVerts, ModelPtr->VR_NumIndices, fA, fB, mixv, ShaderData.Color,
+            mode, staticTime);
+        glUseProgram(0);
+    } else
+#endif
     if (isStatic) {
         g_vrStaticTime += 16.7f;
         ModelRenderObject.Render(ModelPtr->Model, VRStaticShaders, NumShaders, NumSepShaders, true);
@@ -3423,25 +3442,7 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
         ModelRenderObject.Render(ModelPtr->Model, VRInfravisionShaders, 1, 1, true);
         glUseProgram(0);
     } else {
-#if defined(__ANDROID__)
-        if (ModelPtr->VR_PosVBO && ModelPtr->Model.MD3NumFrames > 0) {
-            // GPU keyframe-lerp fast path: keyframes are resident in vram and the vertex shader
-            // lerps between them, so there is no per-frame CPU repose or streaming re-upload.
-            // (Static/infravision powerup cases above keep the CPU path -- they are rare and the
-            // effect shaders would need morph variants.)
-            const int nF = ModelPtr->Model.MD3NumFrames;
-            int fA = md3Frame < 0 ? 0 : (md3Frame >= nF ? nF - 1 : md3Frame);
-            int fB = md3NextFrame < 0 ? fA : (md3NextFrame >= nF ? nF - 1 : md3NextFrame);
-            float mixv = (fB != fA) ? md3Mix : 0.0f;
-            NormalShader(nullptr);   // bind skin to unit 0 + set blend, exactly like the CPU path
-            a1ffDrawMorphMesh(ModelPtr->VR_PosVBO, ModelPtr->VR_TexVBO, ModelPtr->VR_IBO,
-                ModelPtr->VR_NumVerts, ModelPtr->VR_NumIndices, fA, fB, mixv, ShaderData.Color);
-            glUseProgram(0);
-        } else
-#endif
-        {
-            ModelRenderObject.Render(ModelPtr->Model, StandardShaders, NumShaders, NumSepShaders, true);
-        }
+        ModelRenderObject.Render(ModelPtr->Model, StandardShaders, NumShaders, NumSepShaders, true);
     }
 
     glPopMatrix();
