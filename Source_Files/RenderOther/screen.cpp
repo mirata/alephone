@@ -1315,74 +1315,13 @@ void update_world_view_camera()
 		world_view->origin.z -= current_player->step_height;
 	world_view->origin_polygon_index = current_player->camera_polygon_index;
 
-#if defined(__ANDROID__)
-	// VR head lean/walk: offset the VIEW ORIGIN (and thus the visibility-tree origin + camera) by the
-	// head's horizontal position, clamped against walls. This is RENDER-SIDE only -- it never touches
-	// current_player's physics position (which Marathon predicts and would fling if nudged) -- so it
-	// can't fly, and it makes the visibility tree originate at the head (fixes leaning-reveals-missing-
-	// walls) while stopping the view at solid walls (no head-through-walls).
-	if (VR_IsActive())
-	{
-		// Raise/lower the view (and thus the visibility-tree) Z to the true HMD eye height so floors
-		// (e.g. step tops) are clipped for where the eye actually is. The Rasterizer subtracts this
-		// back, so the rendered camera height is unchanged.
-		world_view->origin.z += (world_distance)VR_GetEyeZOffset();
-
-		float ox = 0, oy = 0;
-		VR_GetHeadOffset(&ox, &oy);
-		if (ox != 0.0f || oy != 0.0f)
-		{
-			world_point3d raw = world_view->origin;
-			raw.x += (world_distance)ox;
-			raw.y += (world_distance)oy;
-			// keep_line_segment_out_of_walls stops solid walls but clamps to the precomputed PLAYER-
-			// radius exclusion zones -> camera stops ~a full player radius from the wall (too far for a
-			// head peek). So clamp, then push the result back TOWARD the wall along the clamp direction
-			// so the camera sits ~half-player-radius from the wall instead of a full radius.
-			world_point3d clamped = raw;
-			world_distance fl, ce; short support = world_view->origin_polygon_index;
-			keep_line_segment_out_of_walls(world_view->origin_polygon_index, &world_view->origin, &clamped,
-				WORLD_ONE, 0, &fl, &ce, &support);
-			world_point3d finalp = clamped;
-			const float px = (float)(raw.x - clamped.x), py = (float)(raw.y - clamped.y);
-			const float mag = std::sqrt(px * px + py * py);
-			if (mag > 1.0f)   // was clamped -> recover up to (playerRadius - cameraRadius) toward the wall
-			{
-				const float reduce = (float)(WORLD_ONE / 4 - WORLD_ONE / 16); // camera ~1/16 WU from wall (closer)
-				const float mv = (mag < reduce) ? mag : reduce;
-				finalp.x += (world_distance)(px / mag * mv);
-				finalp.y += (world_distance)(py / mag * mv);
-			}
-			short poly = find_new_object_polygon((world_point2d*)&world_view->origin,
-				(world_point2d*)&finalp, world_view->origin_polygon_index);
-			if (poly == NONE)   // recovered point re-entered a wall (corner) -> fall back to safe clamp
-			{
-				finalp = clamped;
-				poly = find_new_object_polygon((world_point2d*)&world_view->origin,
-					(world_point2d*)&finalp, world_view->origin_polygon_index);
-			}
-			world_view->origin.x = finalp.x;
-			world_view->origin.y = finalp.y;
-			if (poly != NONE) world_view->origin_polygon_index = poly;
-		}
-
-		// Sync the underwater fade tint at render-frame rate. Normally set_fade_effect is called
-		// once per physics tick (30fps), so the colour tint can lag the visual water surface by up
-		// to 33ms when crouching slowly in VR. Re-evaluate here using the already-corrected eye Z
-		// (step_height already removed above) so tint transitions exactly when the eye crosses the
-		// water surface. set_fade_effect is a no-op when the type is unchanged, so this is cheap.
-		{
-			struct polygon_data *p = get_polygon_data(world_view->origin_polygon_index);
-			if (p && p->media_index != NONE) {
-				struct media_data *m = get_media_data(p->media_index);
-				set_fade_effect((m && world_view->origin.z <= m->height)
-				                ? get_media_submerged_fade_effect(p->media_index) : NONE);
-			} else {
-				set_fade_effect(NONE);
-			}
-		}
-	}
-#endif
+	// NOTE (VR): the head lean/walk offset, eye-Z and underwater-tint re-eval used to live HERE, but
+	// this function also feeds the 30 Hz interpolation snapshots (enter_interpolated_world calls it to
+	// capture prev/next). Baking the wall-clamped head position into those snapshots made
+	// interpolate_world_view resample the lean at 30 Hz and -- because the wall clamp is nonlinear --
+	// snap between snapshots when leaning/moving near a wall. Those offsets now run LIVE at render rate
+	// in apply_vr_view_offsets(), called AFTER interpolate_world_view() in render_screen, so the body
+	// interpolates smoothly and the head offset rides on top. Keep this function body-only.
 
 	// Script-based camera control
 	auto use_cameras = UseLuaCameras();
@@ -1436,6 +1375,174 @@ void update_world_view_camera()
 		}
 	}
 }
+
+#if defined(__ANDROID__)
+#include <android/log.h>
+// Apply the VR-only view adjustments that must run at RENDER rate (72-90 Hz), AFTER the 30 Hz tick
+// interpolation in render_screen -- deliberately NOT in update_world_view_camera (see the note there),
+// because that function also populates the interpolation snapshots. At this point world_view->origin is
+// the smoothly interpolated BODY position; we add the live head lean + eye-Z on top and re-evaluate the
+// underwater tint for the true eye position. This is render-side only -- it never touches the physics
+// position -- so leaning/peeking can't fly, and the visibility tree originates at the head while the
+// wall clamp stops the view from passing through solid walls.
+//
+// world_view->origin (int16) drives the visibility tree + wall clamp, which MUST work in integer map
+// space. But that 1-WU (~2mm) quantisation -- and the nonlinear clamp/recover near walls -- makes the
+// RENDERED wall snap between a couple of int16 solutions as the HMD dithers sub-WU while you lean close
+// to a wall. So we also publish a CONTINUOUS float render camera (VR_SetRenderCameraXY) that the
+// Rasterizer uses instead of the int16 origin: the live raw target (body + lean) plus a LOW-PASSED copy
+// of just the wall-clamp pushback. Away from walls the pushback is 0, so the camera is exact and lag-
+// free; near a wall the pushback is smoothed instead of toggling.
+static void apply_vr_view_offsets()
+{
+	if (!VR_IsActive())
+		return;
+
+	// Locate THIS frame's head pose now, before we read it for the render camera below. Previously the
+	// pose was first located later, inside render_view's VR_BeginFrame -- so the render camera (built here
+	// from VR_GetHeadOffset) used the PREVIOUS frame's pose while the per-eye eye matrices used this
+	// frame's. Position lagging orientation by one frame makes the walls shear/jump when the head moves
+	// side to side. VR_BeginFrame is idempotent (render_view's later call reuses this located pose).
+	VR_BeginFrame();
+
+	// Continuous float base for the render camera = interpolated body + live lean (no int16 truncation).
+	// Use the FLOAT interpolated body (not world_view->origin, which interpolate_world_view rounded to
+	// int16 and snaps when heartbeat_fraction>1) so the camera is smooth while WALKING, not just while
+	// standing still and leaning. Falls back to the int16 origin if no interpolation state exists yet.
+	// This is captured BEFORE eye-Z is folded into origin.z: the render camera's Z is the body height
+	// only (the live head height rides in via the vrView matrix), so the rasterizer never re-adds eye-Z.
+	float bodyX, bodyY, bodyZ;
+	if (!get_interpolated_body_origin_float(&bodyX, &bodyY, &bodyZ))
+	{
+		bodyX = (float)world_view->origin.x;
+		bodyY = (float)world_view->origin.y;
+		bodyZ = (float)world_view->origin.z;
+	}
+
+	// Raise/lower the view (and thus the visibility-tree) Z to the true HMD eye height so floors
+	// (e.g. step tops) are clipped for where the eye actually is. This int16 origin.z drives ONLY the
+	// visibility tree now; the rendered camera height comes from bodyZ + vrView (published below).
+	world_view->origin.z += (world_distance)VR_GetEyeZOffset();
+
+	float ox = 0, oy = 0;
+	VR_GetHeadOffset(&ox, &oy);
+
+	// How far the int16 wall clamp (+recover) moved the target away from the raw lean position. 0 in the
+	// open; nonzero AND int16-quantised (hence toggling) only when the clamp engages near a wall.
+	float clampDispX = 0.f, clampDispY = 0.f;
+
+	// The int16 body position is the START point for the wall clamp + polygon trace below. Keep it
+	// (world_view->origin is not modified until the very end, where it's set to the render camera).
+	const world_point2d bodyPt = { world_view->origin.x, world_view->origin.y };
+
+	if (ox != 0.0f || oy != 0.0f)
+	{
+		world_point3d raw = world_view->origin;
+		raw.x += (world_distance)ox;
+		raw.y += (world_distance)oy;
+		// keep_line_segment_out_of_walls stops solid walls but clamps to the precomputed PLAYER-
+		// radius exclusion zones -> camera stops ~a full player radius from the wall (too far for a
+		// head peek). So clamp, then push the result back TOWARD the wall along the clamp direction
+		// so the camera sits ~1/16 WU from the wall instead of a full radius.
+		world_point3d clamped = raw;
+		world_distance fl, ce; short support = world_view->origin_polygon_index;
+		keep_line_segment_out_of_walls(world_view->origin_polygon_index, &world_view->origin, &clamped,
+			WORLD_ONE, 0, &fl, &ce, &support);
+
+		// Render-camera pushback (FLOAT, continuous): the wall pullback (clamped-raw) plus a "peek closer"
+		// recover toward the wall, all in float so a far lean can't jump. Fed to the low-pass below. The
+		// recover is done here (not on the int16 vis origin) so it can't trip the find_new_object_polygon
+		// NONE-fallback that used to SNAP ~192 WU on far leans.
+		const float cdx = (float)(raw.x - clamped.x);   // toward the wall (raw wanted to go further)
+		const float cdy = (float)(raw.y - clamped.y);
+		const float cd  = std::sqrt(cdx * cdx + cdy * cdy);
+		float recoverX = 0.f, recoverY = 0.f;
+		if (cd > 1.0f)   // wall clamped the lean -> peek up to (playerRadius - cameraRadius) back toward it
+		{
+			const float reduce = (float)(WORLD_ONE / 4 - WORLD_ONE / 16); // camera ~1/16 WU from wall (closer)
+			const float mv = (cd < reduce) ? cd : reduce;
+			recoverX = cdx / cd * mv;
+			recoverY = cdy / cd * mv;
+		}
+		clampDispX = (float)(clamped.x - raw.x) + recoverX;   // (pull back to safe) + (peek toward wall)
+		clampDispY = (float)(clamped.y - raw.y) + recoverY;
+	}
+
+	// Low-pass ONLY the wall-clamp pushback (not the live lean) so it stops toggling between int16
+	// solutions when leaning near a wall. kAlpha ~0.25 @ ~72-90 Hz is a ~40-55 ms time constant; the
+	// resulting lag is confined to the near-wall correction (0 elsewhere), so open-space head motion is
+	// unaffected. The recover already parks the camera ~1/16 WU from the wall, so the sub-WU smoothing
+	// transient never pokes the render camera through the wall.
+	static float s_dispX = 0.f, s_dispY = 0.f;
+	const float kAlpha = 0.25f;
+	s_dispX += kAlpha * (clampDispX - s_dispX);
+	s_dispY += kAlpha * (clampDispY - s_dispY);
+	const float renderCamX = bodyX + ox + s_dispX;
+	const float renderCamY = bodyY + oy + s_dispY;
+	VR_SetRenderCamera(renderCamX, renderCamY, bodyZ);
+
+	// Root the visibility tree at the ROUNDED render camera (not a player-radius behind it, as before).
+	// The vis tree builds portal clip windows/planes from world_view->origin; if that sits ~192 WU behind
+	// the rendered eye, the clip planes don't line up with what the eye sees and shimmer at certain
+	// near-wall spots as the head moves. Rounding the continuous render camera keeps vis and render matched
+	// to <1 WU with no int16 recover snap. On a failed trace (tight corner) keep the previous polygon so a
+	// stale index never jumps the position.
+	{
+		world_point2d visPt = { (world_distance)std::lround(renderCamX),
+		                        (world_distance)std::lround(renderCamY) };
+		world_point2d startPt = bodyPt;
+		short poly = find_new_object_polygon(&startPt, &visPt, world_view->origin_polygon_index);
+		world_view->origin.x = visPt.x;
+		world_view->origin.y = visPt.y;
+		if (poly != NONE) world_view->origin_polygon_index = poly;
+	}
+
+	// Re-apply the LIVE head yaw/pitch. update_world_view_camera set these from the live HMD, but
+	// interpolate_world_view (called just before this in render_screen) overwrote them with a 30 Hz-
+	// sampled lerp of the tick snapshots. The WALLS render at the live head rotation (via the vrView
+	// matrix), so a 30 Hz-lagged view->yaw makes the visibility cone + portal clip windows lag the
+	// geometry -> edges jitter during head rotation (most visible on WIDE leans, where you rotate toward
+	// the wall). Same mapping as update_world_view_camera so the vis tree tracks exactly what's rendered.
+	{
+		float hmdYaw = 0, hmdPitch = 0;
+		if (VR_GetHmdYawPitch(&hmdYaw, &hmdPitch))
+		{
+			const int yawOffset = (int)(VR_GetYawOffset() + 0.5f);
+			int hy = (int)(hmdYaw   >= 0 ? hmdYaw   + 0.5f : hmdYaw   - 0.5f);
+			int hp = (int)(hmdPitch >= 0 ? hmdPitch + 0.5f : hmdPitch - 0.5f);
+			if (hp >  112) hp =  112; else if (hp < -112) hp = -112;
+			world_view->yaw   = NORMALIZE_ANGLE(yawOffset + hy);
+			world_view->pitch = NORMALIZE_ANGLE(hp);
+			world_view->virtual_yaw = NORMALIZE_ANGLE(yawOffset) * FIXED_ONE;
+			world_view->virtual_pitch = 0;
+		}
+	}
+
+	// Diagnostic (throttled ~2 Hz to avoid per-frame log overhead confounding frame timing): render
+	// camera (float), body, rotation, interpolation phase.
+	{ static int c = 0; if ((c++ % 30) == 0) { float hy = 0, hp = 0; VR_GetHmdYawPitch(&hy, &hp);
+	  __android_log_print(ANDROID_LOG_INFO, "A1VR",
+		"vrf cam=%.2f,%.2f,%.1f yaw=%d hy=%.3f hp=%.3f hb=%.3f ox=%.1f oy=%.1f",
+		renderCamX, renderCamY, bodyZ, (int)world_view->yaw, hy, hp,
+		world_view->heartbeat_fraction, ox, oy); } }
+
+	// Sync the underwater fade tint at render-frame rate. Normally set_fade_effect is called
+	// once per physics tick (30fps), so the colour tint can lag the visual water surface by up
+	// to 33ms when crouching slowly in VR. Re-evaluate here using the already-corrected eye Z
+	// (step_height already removed above) so tint transitions exactly when the eye crosses the
+	// water surface. set_fade_effect is a no-op when the type is unchanged, so this is cheap.
+	{
+		struct polygon_data *p = get_polygon_data(world_view->origin_polygon_index);
+		if (p && p->media_index != NONE) {
+			struct media_data *m = get_media_data(p->media_index);
+			set_fade_effect((m && world_view->origin.z <= m->height)
+			                ? get_media_submerged_fade_effect(p->media_index) : NONE);
+		} else {
+			set_fade_effect(NONE);
+		}
+	}
+}
+#endif
 
 extern bool is_network_pregame;
 
@@ -1592,6 +1699,14 @@ void render_screen(short ticks_elapsed)
 	}
 
 	interpolate_world_view(heartbeat_fraction);
+
+#if defined(__ANDROID__)
+	// VR: now that the body position is interpolated between ticks, add the live head lean/eye-Z on top
+	// (render rate). Doing it here -- not in update_world_view_camera -- keeps the wall-clamped head
+	// position out of the 30 Hz interpolation snapshots, which was making walls snap when leaning/moving
+	// near them.
+	apply_vr_view_offsets();
+#endif
 
 #ifdef HAVE_OPENGL
 	// Is map to be drawn with OpenGL?

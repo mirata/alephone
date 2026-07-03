@@ -219,10 +219,25 @@ void Rasterizer_Shader_Class::SetView(view_data& view) {
 		glScalef(1.0f / WUperMetre, 1.0f / WUperMetre, 1.0f / WUperMetre);
 		glMultMatrixf(zUpToYUp);
 		glRotated(-yaw, 0.0, 0.0, 1.0);
-		// Subtract the eye-Z offset that update_world_view_camera added to origin.z for the visibility
-		// tree, so the rendered camera height is exactly as before (head height comes via vrView).
-		glTranslated(-view.origin.x, -view.origin.y,
-			-(view.origin.z - VR_GetEyeZOffset() - eyeHeightM * WUperMetre));
+		// view.origin (int16) drives the visibility tree + wall clamp in integer map space, but its 1-WU
+		// (~2mm) quantisation -- and the nonlinear clamp near walls -- makes close walls snap between a
+		// couple of positions as the HMD dithers while leaning. screen.cpp apply_vr_view_offsets publishes
+		// a CONTINUOUS float render camera (live body+lean plus a low-passed wall-clamp pushback); use it
+		// for the horizontal camera so the render is smooth while the vis tree keeps the integer origin.
+		// Z is made continuous just below by subtracting the float eye-Z offset (head height rides in via
+		// vrView). Falls back to the int16 origin if the float camera hasn't been published yet.
+		// Continuous float render camera (all 3 axes) published by apply_vr_view_offsets. X/Y = body+lean
+		// with the wall-clamp pushback low-passed; Z = interpolated BODY height only. The live head height
+		// (lean + duck) rides in entirely via vrView above, so we do NOT re-add eye-Z here -- that keeps
+		// the vertical continuous and free of the cross-call int16 read mismatch that snapped 1 WU. The
+		// int16 view.origin still drives the visibility tree/clamp; it's just not the render camera.
+		// Falls back to the int16 origin (minus eyeHeight) if the float camera hasn't been published yet.
+		double camX = view.origin.x, camY = view.origin.y, camZ = view.origin.z;
+		{
+			float rcx = 0.0f, rcy = 0.0f, rcz = 0.0f;
+			if (VR_GetRenderCamera(&rcx, &rcy, &rcz)) { camX = rcx; camY = rcy; camZ = rcz; }
+		}
+		glTranslated(-camX, -camY, -(camZ - eyeHeightM * WUperMetre));
 	}
 #endif
 }

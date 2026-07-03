@@ -752,6 +752,36 @@ void interpolate_world_view(float heartbeat_fraction)
 	}
 }
 
+// VR render camera needs the body origin as a CONTINUOUS float. interpolate_world_view() writes
+// view->origin as int16 (rounds every frame -> 1-WU stepping while walking) and, when heartbeat_fraction
+// exceeds 1, bails out to the raw tick position (a snap). Both are invisible standing still but reappear
+// as locomotion stutter once the lean is otherwise smooth. Reproduce the SAME lerp in float, fraction
+// clamped to [0,1] (so it holds at the latest tick instead of snapping), matching the int16 origin to
+// within <1 WU so it stays consistent with the visibility tree that still uses view->origin.
+bool get_interpolated_body_origin_float(float* x, float* y, float* z)
+{
+	auto prev = &previous_tick_world_view;
+	auto next = &current_tick_world_view;
+
+	// Same guards interpolate_world_view uses to decide NOT to interpolate -> use the latest tick body.
+	if (!world_is_interpolated ||
+		prev->origin_polygon_index == NONE ||
+		!should_interpolate(prev->origin, next->origin))
+	{
+		if (x) *x = (float)next->origin.x;
+		if (y) *y = (float)next->origin.y;
+		if (z) *z = (float)next->origin.z;
+		return true;
+	}
+
+	float t = world_view->heartbeat_fraction;
+	if (t < 0.f) t = 0.f; else if (t > 1.f) t = 1.f;   // clamp -> no >1 snap (hold at next)
+	if (x) *x = prev->origin.x + (next->origin.x - prev->origin.x) * t;
+	if (y) *y = prev->origin.y + (next->origin.y - prev->origin.y) * t;
+	if (z) *z = prev->origin.z + (next->origin.z - prev->origin.z) * t;
+	return true;
+}
+
 extern bool game_is_being_replayed();
 extern int get_replay_speed();
 

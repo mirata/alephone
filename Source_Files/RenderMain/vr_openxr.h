@@ -112,6 +112,17 @@ void VR_GetHeadMove(float* x, float* y);
 void VR_GetHeadOffset(float* wx, float* wy);
 void VR_RecenterHead(void);
 
+// Continuous FLOAT render-camera position (Marathon world units). The engine writes this each render
+// frame (screen.cpp apply_vr_view_offsets) so the Rasterizer can place the camera continuously instead
+// of at the int16 view.origin (whose 1-WU quantisation + nonlinear wall clamp makes close walls snap
+// when you lean). X/Y = smooth interpolated body + head lean with the wall-clamp pushback low-passed.
+// Z = the interpolated body height ONLY (no eye-Z): the live head height rides in via the vrView matrix,
+// so the rasterizer must NOT re-add eye-Z. Publishing Z here (rather than subtracting an int16 eye-Z in
+// the rasterizer) avoids a cross-call read mismatch that caused an occasional 1-WU vertical snap.
+// VR_GetRenderCamera returns false until the first write this session.
+void VR_SetRenderCamera(float wx, float wy, float wz);
+bool VR_GetRenderCamera(float* wx, float* wy, float* wz);
+
 // Vertical eye offset from neutral standing height, in Marathon world units (negative when seated).
 // Added to view->origin.z so the visibility tree uses the true eye height; subtracted in the
 // Rasterizer so the rendered camera is unchanged.

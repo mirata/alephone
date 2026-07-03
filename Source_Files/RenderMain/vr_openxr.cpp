@@ -790,7 +790,14 @@ namespace {
 
 extern "C" bool VR_BeginFrame(void)
 {
-	s_frameBegun = false;
+	// Idempotent within a frame. render_screen (apply_vr_view_offsets) now calls this EARLY so the head
+	// pose is freshly located BEFORE the render camera is computed; render_view then calls it again for
+	// the per-eye loop and must REUSE the same located pose. Otherwise the camera position comes from the
+	// previous frame's pose while the eye matrices (VR_GetEyeViewMetres) come from this frame's -> position
+	// lags orientation by a frame and the walls shear/jump when the head TRANSLATES side to side. (A second
+	// xrWaitFrame/xrBeginFrame would also be an OpenXR protocol error.) s_frameBegun is cleared in
+	// VR_SubmitFrame, which render_view always calls -> the state machine is false->begin->submit->false.
+	if (s_frameBegun) return s_frameShouldRender;
 	s_frameShouldRender = false;
 	if (!s_active) return false;
 	if (!startSession()) return false;   // waits for the GL context
@@ -818,6 +825,21 @@ extern "C" bool VR_BeginFrame(void)
 			s_lastHeadX = s_stageFromHead.position.x;
 			s_lastHeadZ = s_stageFromHead.position.z;
 			s_headLatchInit = true;
+		}
+
+		// Slowly drift the lean reference toward the current head position so the head OFFSET
+		// (VR_GetHeadOffset) represents only RECENT head motion -- i.e. leaning -- and NOT absolute room
+		// position. The reference is captured once at startup; without this drift, VR tracking drift (over
+		// minutes) plus any physical walking makes the offset accumulate without bound, so the render
+		// camera leans further and further and eventually sits in the wall clamp's unstable zone -- the
+		// walls get progressively stuttery the LONGER the session runs, persist across a level restart
+		// (session static), and only clear on a full game restart (which re-seeds the reference). A slow
+		// drift (tau ~9 s @ ~72-90 Hz) leaves real leans intact for several seconds but quietly absorbs
+		// slow drift / settled walking so nothing ever accumulates. Once per frame.
+		if (s_headRefInit && (hl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+			const float kRefDrift = 0.0015f;
+			s_headRefX += kRefDrift * (s_stageFromHead.position.x - s_headRefX);
+			s_headRefZ += kRefDrift * (s_stageFromHead.position.z - s_headRefZ);
 		}
 
 		XrViewLocateInfo vli = { XR_TYPE_VIEW_LOCATE_INFO };
@@ -1051,6 +1073,17 @@ extern "C" void VR_RecenterHead(void)
 	if (s_headPoseValid) { s_headRefX = s_stageFromHead.position.x; s_headRefZ = s_stageFromHead.position.z; s_headRefInit = true; }
 }
 
+// Continuous float render-camera position, written per render frame by the engine (apply_vr_view_offsets).
+static float s_renderCamX = 0.f, s_renderCamY = 0.f, s_renderCamZ = 0.f;
+static bool  s_renderCamValid = false;
+extern "C" void VR_SetRenderCamera(float wx, float wy, float wz) { s_renderCamX = wx; s_renderCamY = wy; s_renderCamZ = wz; s_renderCamValid = true; }
+extern "C" bool VR_GetRenderCamera(float* wx, float* wy, float* wz)
+{
+	if (!s_renderCamValid) return false;
+	if (wx) *wx = s_renderCamX; if (wy) *wy = s_renderCamY; if (wz) *wz = s_renderCamZ;
+	return true;
+}
+
 // The head's HORIZONTAL position relative to the recenter reference, mapped to Marathon world units
 // (map x,y). The engine applies this to the VIEW ORIGIN (clamped against walls) so leaning/walking
 // moves the camera + visibility origin -- render-side only, never the physics position.
@@ -1067,8 +1100,24 @@ extern "C" void VR_GetHeadOffset(float* wx, float* wy)
 	const float W  = s_settings.worldScaleWUM;
 	const float yr = s_yawOffset * (2.0f * 3.14159265358979f / 512.0f);
 	const float c  = std::cos(yr), s = std::sin(yr);
-	if (wx) *wx = W * (-c * dhx + s * dhz);
-	if (wy) *wy = W * (-s * dhx - c * dhz);
+	float ox = W * (-c * dhx + s * dhz);
+	float oy = W * (-s * dhx - c * dhz);
+
+	// Cap the lean-offset MAGNITUDE. This offset is meant to be room-scale LEANING (small, and it returns
+	// to ~0 when you straighten up). But because head-follows-body locomotion isn't wired (VR_GetHeadMove
+	// is unused), physically WALKING across the play space translates the head persistently away from the
+	// recenter reference and this offset grows without bound -- pushing the render camera a metre+ through
+	// walls and driving the wall clamp into its unstable regime. The result is jitter that appears after
+	// you've physically moved around, persists across a level restart (the reference is a session static),
+	// and only clears on a full game restart (static re-init). Capping the magnitude keeps generous leaning
+	// intact while preventing physical walking from running the offset away. ~0.75 m is well beyond any
+	// real lean; past it the camera simply stops following (use the stick to actually move).
+	const float maxLean = 0.75f * W;
+	const float mag = std::sqrt(ox * ox + oy * oy);
+	if (mag > maxLean) { const float k = maxLean / mag; ox *= k; oy *= k; }
+
+	if (wx) *wx = ox;
+	if (wy) *wy = oy;
 }
 extern "C" bool VR_GetFire(void)               { return s_fire; }
 extern "C" bool VR_GetSecondaryFire(void)
@@ -1813,6 +1862,8 @@ extern "C" void VR_LatchHeadMove(void) {}
 extern "C" void VR_GetHeadMove(float* x, float* y) { if (x) *x = 0; if (y) *y = 0; }
 extern "C" void VR_RecenterHead(void) {}
 extern "C" void VR_GetHeadOffset(float* x, float* y) { if (x) *x = 0; if (y) *y = 0; }
+extern "C" void VR_SetRenderCamera(float, float, float) {}
+extern "C" bool VR_GetRenderCamera(float*, float*, float*) { return false; }
 extern "C" float VR_GetEyeZOffset(void) { return 0.0f; }
 extern "C" bool VR_GetFire(void)               { return false; }
 extern "C" bool VR_GetSecondaryFire(void)      { return false; }

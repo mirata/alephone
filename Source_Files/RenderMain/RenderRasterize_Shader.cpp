@@ -257,7 +257,7 @@ void RenderRasterize_Shader::clip_to_window(clipping_window_data *win)
     glPushMatrix();
     glTranslatef(view->origin.x, view->origin.y, 0.);
     glRotatef(view->yaw * (360/float(FULL_CIRCLE)) + 90., 0., 0., 1.);
-    
+
     glRotatef(-0.1, 0., 0., 1.); // leave some excess to avoid artifacts at edges
 	if (win->left.i != leftmost_clip.i || win->left.j != leftmost_clip.j) {
 		clip[0] = win->left.i;

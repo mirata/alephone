@@ -34,6 +34,13 @@ void exit_interpolated_world();
 void update_interpolated_world(float heartbeat_fraction);
 void interpolate_world_view(float heartbeat_fraction);
 
+// VR: the continuous (FLOAT) interpolated body origin for this render frame. interpolate_world_view
+// stores view->origin as int16 (1-WU quantised) and bails out entirely when heartbeat_fraction > 1,
+// both of which make the camera step/snap during locomotion. This returns the same interpolation in
+// float with the fraction clamped to [0,1], so the VR render camera moves smoothly while walking.
+// Returns false if no interpolation state is available yet (caller should fall back to view->origin).
+bool get_interpolated_body_origin_float(float* x, float* y, float* z);
+
 void track_contrail_interpolation(int16_t projectile_index, int16_t effect_index);
 bool get_interpolated_weapon_display_information(short* count, weapon_display_information* data);
 
