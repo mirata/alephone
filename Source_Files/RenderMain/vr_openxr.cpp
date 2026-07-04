@@ -487,7 +487,7 @@ namespace {
 		/* mapPlayerUp     */ 0,      // overhead map rotation: 0=north-up, 1=player-facing-up
 		/* teleportDistortion */ 1,   // horizontal-stretch/vertical-compress warp on teleport (may cause nausea)
 		/* showLaserSight   */ 0,
-		/* showAimGizmos    */ 0,     // controller aim diagnostic gizmos (off by default)
+		/* showAimGizmos    */ 1,     // controller aim diagnostic gizmos (ON while debugging two-handed aim)
 		/* buttonAction     */ {      // default button map (matches the old hardcoded stopgap)
 			VR_ACT_ACTION_USE,       //   A          -> Action / Use
 			VR_ACT_NONE,             //   B          -> unbound (free for the user to assign)
@@ -945,6 +945,22 @@ extern "C" bool VR_BeginFrame(void)
 						s_handStage[h].position = s_handPosHold[h];   // freeze position while occluded
 					}
 				}
+			}
+		}
+
+		// TEMP DIAG (two-handed/overhead investigation): log dominant-hand grip vs aim pose in stage
+		// space + validity/tracking, throttled. Shows whether grip & aim diverge / freeze when raised.
+		{
+			static int dbgc = 0;
+			if ((dbgc++ % 20) == 0) {
+				const int d = s_settings.dominantHand ? 0 : 1;
+				A1VR_LOG("POSE dom=%d grip[v=%d t=%d] (%.3f,%.3f,%.3f) aim[v=%d t=%d] (%.3f,%.3f,%.3f) head(%.3f,%.3f,%.3f)",
+					d,
+					(int)s_handValid[d], (int)s_handTracked[d],
+					s_handStage[d].position.x, s_handStage[d].position.y, s_handStage[d].position.z,
+					(int)s_aimValid[d], (int)s_aimTracked[d],
+					s_aimStage[d].position.x, s_aimStage[d].position.y, s_aimStage[d].position.z,
+					s_stageFromHead.position.x, s_stageFromHead.position.y, s_stageFromHead.position.z);
 			}
 		}
 
@@ -1755,64 +1771,30 @@ extern "C" bool VR_IsTwoHandedActive()
 	return s_aimValid[domHand] && s_aimValid[offHand];
 }
 
-// Separation-weighted two-handed aim (stage space). The naive inter-hand vector (off - dominant) has
-// angular noise ~ (controller position noise) / (hand separation): at a stacked-hands pistol grip
-// (~6-9 cm apart, measured on device) a few mm of jitter swings the aim ~15-20 deg -- the reported
-// drift. Controllers ARE optically tracked (trk=1); it's pure geometry, not occlusion. So we base the
-// aim on the DOMINANT controller's own aim orientation (rock-steady, tracks the wrist, already has
-// aimPitchAdjust) and blend toward the inter-hand vector only as the hands separate, where that vector
-// becomes well-conditioned and gives true rifle-style two-handed aim. This is what makes QuestZDoom
-// stable at close range (its inter-hand override is guarded by a forward-separation test).
+// Two-handed aim = the pure inter-hand vector (off-hand grip - dominant grip), normalized. Nothing
+// else. This is exactly QuestZDoom's weaponStabilised path (VrInputDefault.cpp): the dominant hand is
+// the rear/trigger grip, the off-hand is forward on the barrel, so (off - dom) IS the barrel forward.
+// Full range of motion, no discontinuities. Deliberately NO hemisphere guard (it caused a sudden 180
+// "faces backwards" flip when the dominant controller rotated past perpendicular to the true hand line)
+// and NO separation switch/deadzone. Falls back to the dominant aim forward only when the hand
+// positions are entirely unavailable or exactly coincident.
 extern "C" bool VR_GetTwoHandedFwdStage(float fwd3[3])
 {
 	const int domHand = s_settings.dominantHand ? 0 : 1;
 	const int offHand = 1 - domHand;
 
-	// Dominant controller's own aim forward -- the stable base.
-	float domPos[3], domFwd[3];
-	if (!VR_GetAimPoseStage(domHand, domPos, domFwd)) return false;
-
-	// Inter-hand vector from a CONSISTENT pose frame (never grip on one hand, aim on the other).
-	float dm[3], of[3], sep = 0.0f;
-	if (!twoHandPositions(domHand, offHand, dm, of, &sep)) {
-		fwd3[0] = domFwd[0]; fwd3[1] = domFwd[1]; fwd3[2] = domFwd[2];
-		return true;
+	float dm[3], of[3];
+	if (twoHandPositions(domHand, offHand, dm, of, nullptr)) {
+		float ih[3] = { of[0]-dm[0], of[1]-dm[1], of[2]-dm[2] };
+		const float l = std::sqrt(ih[0]*ih[0] + ih[1]*ih[1] + ih[2]*ih[2]);
+		if (l > 1e-5f) {
+			fwd3[0] = ih[0]/l; fwd3[1] = ih[1]/l; fwd3[2] = ih[2]/l;
+			return true;
+		}
 	}
-	float ih[3] = { of[0]-dm[0], of[1]-dm[1], of[2]-dm[2] };
-	const float ihl = std::sqrt(ih[0]*ih[0] + ih[1]*ih[1] + ih[2]*ih[2]);
-
-	// Blend factor: 0 below kSepMin (pure dominant orientation), 1 above kSepFull (pure inter-hand).
-	const float kSepMin = 0.12f, kSepFull = 0.30f;
-	float t = (ihl > 1e-4f) ? (sep - kSepMin) / (kSepFull - kSepMin) : 0.0f;
-	if (t < 0.0f) t = 0.0f;
-	if (t > 1.0f) t = 1.0f;
-
-	// TRACKING GATE: the inter-hand vector needs BOTH hand POSITIONS to be optically tracked. In a
-	// two-handed grip the controllers get close enough to occlude each other from the headset cameras;
-	// the runtime then dead-reckons that hand's POSITION from its IMU, which DRIFTS (orientation stays
-	// gyro-accurate, position does not). Using a drifting position rotates the aim off-target -- the
-	// reported bug, seen as the gizmo marker going magenta. When either grip pose is not TRACKED, drop
-	// the inter-hand vector entirely and aim purely by the dominant controller's ORIENTATION, which
-	// survives the dropout. (grep the magenta marker + this gate together.)
-	if (!s_handTracked[domHand] || !s_handTracked[offHand]) t = 0.0f;
-
-	if (t <= 0.0f || ihl < 1e-4f) {
-		fwd3[0] = domFwd[0]; fwd3[1] = domFwd[1]; fwd3[2] = domFwd[2];
-		return true;
-	}
-	ih[0] /= ihl; ih[1] /= ihl; ih[2] /= ihl;
-	// Keep the inter-hand vector in the same hemisphere as the dominant aim so a reversed off-hand
-	// grip (off-hand behind the dominant) can't flip the aim 180 deg.
-	if (ih[0]*domFwd[0] + ih[1]*domFwd[1] + ih[2]*domFwd[2] < 0.0f) {
-		ih[0] = -ih[0]; ih[1] = -ih[1]; ih[2] = -ih[2];
-	}
-	fwd3[0] = domFwd[0]*(1.0f-t) + ih[0]*t;
-	fwd3[1] = domFwd[1]*(1.0f-t) + ih[1]*t;
-	fwd3[2] = domFwd[2]*(1.0f-t) + ih[2]*t;
-	const float l = std::sqrt(fwd3[0]*fwd3[0] + fwd3[1]*fwd3[1] + fwd3[2]*fwd3[2]);
-	if (l < 1e-6f) { fwd3[0] = domFwd[0]; fwd3[1] = domFwd[1]; fwd3[2] = domFwd[2]; return true; }
-	fwd3[0] /= l; fwd3[1] /= l; fwd3[2] /= l;
-	return true;
+	// No usable inter-hand vector -> dominant controller's own aim forward.
+	float domPos[3];
+	return VR_GetAimPoseStage(domHand, domPos, fwd3);
 }
 
 // Diagnostic accessor: per-hand grip tracking state + linear speed (m/s), for logging occlusion /

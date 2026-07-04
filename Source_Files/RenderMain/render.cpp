@@ -478,6 +478,52 @@ static world_point3d vr_raycast_geometry(world_point3d origin, short poly, doubl
 	return cur;
 }
 
+// Two-handed weapon-model basis. Forward = th_fwd (the inter-hand aim); ROLL comes from the DOMINANT
+// hand (the gun rolls with your dominant wrist, it is NOT forced world-vertical). Method: take the
+// dominant controller's own orientation and rotate it by the SHORTEST ARC that swings its forward onto
+// th_fwd, carrying its right/up along. This preserves the wrist roll about the barrel and has no gimbal
+// / sign-flip (unlike the old cross(dom_right,th_fwd), which flipped when th_fwd neared the dominant
+// right axis). Only the exact 180 deg reversal is degenerate -- guarded with a world-up upright basis.
+// Inputs unit; outputs unit right/up (forward stays th_fwd).
+static void vr_two_handed_model_basis(const float th_fwd[3], const float dom_right[3],
+                                      const float dom_up[3], float out_right[3], float out_up[3])
+{
+	auto dot3   = [](const float a[3], const float b[3]) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; };
+	auto cross3 = [](const float a[3], const float b[3], float o[3]) {
+		o[0]=a[1]*b[2]-a[2]*b[1]; o[1]=a[2]*b[0]-a[0]*b[2]; o[2]=a[0]*b[1]-a[1]*b[0];
+	};
+	// Dominant controller forward = aim -Z = -(right x up).
+	float fd[3]; cross3(dom_right, dom_up, fd); fd[0]=-fd[0]; fd[1]=-fd[1]; fd[2]=-fd[2];
+
+	const float c = dot3(fd, th_fwd);          // cos(angle) between dominant forward and inter-hand fwd
+	if (c > 0.99999f) {                        // already aligned -> dominant axes unchanged
+		out_right[0]=dom_right[0]; out_right[1]=dom_right[1]; out_right[2]=dom_right[2];
+		out_up[0]=dom_up[0]; out_up[1]=dom_up[1]; out_up[2]=dom_up[2];
+		return;
+	}
+	float axis[3]; cross3(fd, th_fwd, axis);
+	const float al = sqrtf(dot3(axis, axis));  // = |sin(angle)|
+	if (al < 1e-6f) {                          // ~180 deg reversal -> world-up upright fallback
+		float right[3] = { -th_fwd[2], 0.0f, th_fwd[0] };
+		float rl = sqrtf(dot3(right, right)); if (rl < 1e-5f) rl = 1.0f;
+		out_right[0]=right[0]/rl; out_right[1]=right[1]/rl; out_right[2]=right[2]/rl;
+		cross3(out_right, th_fwd, out_up);
+		return;
+	}
+	axis[0]/=al; axis[1]/=al; axis[2]/=al;
+	const float s = al;                        // sin(angle) (fd, th_fwd both unit)
+	// Rodrigues: rotate v about `axis` by the angle with cos=c, sin=s.
+	auto rot = [&](const float v[3], float o[3]) {
+		float axv[3]; cross3(axis, v, axv);
+		const float d = dot3(axis, v) * (1.0f - c);
+		o[0]=v[0]*c + axv[0]*s + axis[0]*d;
+		o[1]=v[1]*c + axv[1]*s + axis[1]*d;
+		o[2]=v[2]*c + axv[2]*s + axis[2]*d;
+	};
+	rot(dom_right, out_right);
+	rot(dom_up,    out_up);
+}
+
 static void render_vr_aim_reticle(view_data* view)
 {
 	if (!VR_IsActive()) return;
@@ -935,26 +981,11 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 		if (!weapon_is_dual && VR_IsTwoHandedActive()) {
 			float th_fwd[3];
 			if (VR_GetTwoHandedFwdStage(th_fwd)) {
-				// Gram-Schmidt: build right+up from new forward, preserving dominant hand roll
-				// new_up    = cross(stage_right, th_fwd)   — perp to both, roughly upward
-				// new_right = cross(th_fwd, new_up)        — re-orthogonalised right
-				float new_up[3] = {
-					stage_right[1]*th_fwd[2] - stage_right[2]*th_fwd[1],
-					stage_right[2]*th_fwd[0] - stage_right[0]*th_fwd[2],
-					stage_right[0]*th_fwd[1] - stage_right[1]*th_fwd[0]
-				};
-				float ul = sqrtf(new_up[0]*new_up[0] + new_up[1]*new_up[1] + new_up[2]*new_up[2]);
-				if (ul > 1e-6f) {
-					new_up[0] /= ul; new_up[1] /= ul; new_up[2] /= ul;
-					float new_right[3] = {
-						th_fwd[1]*new_up[2] - th_fwd[2]*new_up[1],
-						th_fwd[2]*new_up[0] - th_fwd[0]*new_up[2],
-						th_fwd[0]*new_up[1] - th_fwd[1]*new_up[0]
-					};
-					stage_right[0] = new_right[0]; stage_right[1] = new_right[1]; stage_right[2] = new_right[2];
-					stage_up[0]    = new_up[0];    stage_up[1]    = new_up[1];    stage_up[2]    = new_up[2];
-					stage_fwd_eff[0] = th_fwd[0];  stage_fwd_eff[1] = th_fwd[1];  stage_fwd_eff[2] = th_fwd[2];
-				}
+				float new_right[3], new_up[3];
+				vr_two_handed_model_basis(th_fwd, stage_right, stage_up, new_right, new_up);
+				stage_right[0] = new_right[0]; stage_right[1] = new_right[1]; stage_right[2] = new_right[2];
+				stage_up[0]    = new_up[0];    stage_up[1]    = new_up[1];    stage_up[2]    = new_up[2];
+				stage_fwd_eff[0] = th_fwd[0];  stage_fwd_eff[1] = th_fwd[1];  stage_fwd_eff[2] = th_fwd[2];
 			}
 		}
 
@@ -1134,23 +1165,11 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 			if (!weapon_is_dual && VR_IsTwoHandedActive()) {
 				float th_fwd[3];
 				if (VR_GetTwoHandedFwdStage(th_fwd)) {
-					float new_up[3] = {
-						stage_right[1]*th_fwd[2] - stage_right[2]*th_fwd[1],
-						stage_right[2]*th_fwd[0] - stage_right[0]*th_fwd[2],
-						stage_right[0]*th_fwd[1] - stage_right[1]*th_fwd[0]
-					};
-					float ul = sqrtf(new_up[0]*new_up[0] + new_up[1]*new_up[1] + new_up[2]*new_up[2]);
-					if (ul > 1e-6f) {
-						new_up[0]/=ul; new_up[1]/=ul; new_up[2]/=ul;
-						float new_right[3] = {
-							th_fwd[1]*new_up[2] - th_fwd[2]*new_up[1],
-							th_fwd[2]*new_up[0] - th_fwd[0]*new_up[2],
-							th_fwd[0]*new_up[1] - th_fwd[1]*new_up[0]
-						};
-						stage_right[0]=new_right[0]; stage_right[1]=new_right[1]; stage_right[2]=new_right[2];
-						stage_up[0]=new_up[0];       stage_up[1]=new_up[1];       stage_up[2]=new_up[2];
-						stage_fwd_eff[0]=th_fwd[0];  stage_fwd_eff[1]=th_fwd[1];  stage_fwd_eff[2]=th_fwd[2];
-					}
+					float new_right[3], new_up[3];
+					vr_two_handed_model_basis(th_fwd, stage_right, stage_up, new_right, new_up);
+					stage_right[0]=new_right[0]; stage_right[1]=new_right[1]; stage_right[2]=new_right[2];
+					stage_up[0]=new_up[0];       stage_up[1]=new_up[1];       stage_up[2]=new_up[2];
+					stage_fwd_eff[0]=th_fwd[0];  stage_fwd_eff[1]=th_fwd[1];  stage_fwd_eff[2]=th_fwd[2];
 				}
 			}
 			const float qx  = (ps[0] - hp[0]) * W;
