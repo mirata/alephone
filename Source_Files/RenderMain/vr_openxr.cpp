@@ -616,7 +616,17 @@ namespace {
 	// get close (two-handed hold) one can occlude the other from the headset cameras -> the runtime
 	// drops the TRACKED bit and dead-reckons -> position drifts until re-acquired.
 	bool        s_handTracked[2] = { false, false };
+	bool        s_aimTracked[2]  = { false, false };
 	float       s_handSpeed[2]   = { 0.0f, 0.0f };
+	// Position FREEZE on tracking loss: while a controller is occluded (VALID but not TRACKED) the
+	// runtime dead-reckons its POSITION from the IMU and it drifts. We hold the last optically-tracked
+	// position instead (orientation stays live -- gyro is accurate through the dropout). Kills the
+	// visual swim of anything anchored at the controller (weapon model, aim ray, reticle) and keeps the
+	// inter-hand vector stable, without the lag a low-pass filter would add.
+	XrVector3f  s_aimPosHold[2]  = {};
+	XrVector3f  s_handPosHold[2] = {};
+	bool        s_aimPosHoldValid[2]  = { false, false };
+	bool        s_handPosHoldValid[2] = { false, false };
 	// Two-handed hold is LATCHED like QuestZDoom: engaged on the off-hand grip rising edge while the
 	// hands are close, released only when the grip is let go -- NOT re-tested against the proximity
 	// threshold every frame (that flickers the aim mode near the boundary).
@@ -889,13 +899,20 @@ extern "C" bool VR_BeginFrame(void)
 		// Controller aim poses (direction/orientation) and grip poses (hand position), in stage space.
 		for (int h = 0; h < 2; ++h) {
 			s_aimValid[h] = false;
+			s_aimTracked[h] = false;
 			if (s_aimSpace[h] != XR_NULL_HANDLE) {
 				XrSpaceLocation al = { XR_TYPE_SPACE_LOCATION };
 				xrLocateSpace(s_aimSpace[h], s_stageSpace, s_frameState.predictedDisplayTime, &al);
 				if ((al.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) &&
 					(al.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
-					s_aimStage[h] = al.pose;
+					s_aimStage[h] = al.pose;   // orientation is always live (gyro-accurate)
 					s_aimValid[h] = true;
+					s_aimTracked[h] = (al.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0;
+					if (s_aimTracked[h]) {
+						s_aimPosHold[h] = al.pose.position; s_aimPosHoldValid[h] = true;
+					} else if (s_aimPosHoldValid[h]) {
+						s_aimStage[h].position = s_aimPosHold[h];   // freeze position while occluded
+					}
 				}
 			}
 			s_handValid[h] = false;
@@ -907,12 +924,17 @@ extern "C" bool VR_BeginFrame(void)
 				hl.next = &hv;
 				xrLocateSpace(s_handSpace[h], s_stageSpace, s_frameState.predictedDisplayTime, &hl);
 				if ((hl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
-					s_handStage[h] = hl.pose;
+					s_handStage[h] = hl.pose;   // orientation live
 					s_handValid[h] = true;
 					s_handTracked[h] = (hl.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0;
 					if (hv.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) {
 						const XrVector3f& v = hv.linearVelocity;
 						s_handSpeed[h] = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+					}
+					if (s_handTracked[h]) {
+						s_handPosHold[h] = hl.pose.position; s_handPosHoldValid[h] = true;
+					} else if (s_handPosHoldValid[h]) {
+						s_handStage[h].position = s_handPosHold[h];   // freeze position while occluded
 					}
 				}
 			}
@@ -1737,6 +1759,15 @@ extern "C" bool VR_GetTwoHandedFwdStage(float fwd3[3])
 	float t = (ihl > 1e-4f) ? (sep - kSepMin) / (kSepFull - kSepMin) : 0.0f;
 	if (t < 0.0f) t = 0.0f;
 	if (t > 1.0f) t = 1.0f;
+
+	// TRACKING GATE: the inter-hand vector needs BOTH hand POSITIONS to be optically tracked. In a
+	// two-handed grip the controllers get close enough to occlude each other from the headset cameras;
+	// the runtime then dead-reckons that hand's POSITION from its IMU, which DRIFTS (orientation stays
+	// gyro-accurate, position does not). Using a drifting position rotates the aim off-target -- the
+	// reported bug, seen as the gizmo marker going magenta. When either grip pose is not TRACKED, drop
+	// the inter-hand vector entirely and aim purely by the dominant controller's ORIENTATION, which
+	// survives the dropout. (grep the magenta marker + this gate together.)
+	if (!s_handTracked[domHand] || !s_handTracked[offHand]) t = 0.0f;
 
 	if (t <= 0.0f || ihl < 1e-4f) {
 		fwd3[0] = domFwd[0]; fwd3[1] = domFwd[1]; fwd3[2] = domFwd[2];

@@ -47,7 +47,9 @@ typedef struct {
 	int   teleportDistortion; // 1 = apply horizontal-stretch/vertical-compress warp during teleport fold effect
 	int   showLaserSight;   // 1 = draw the laser-sight dot at the controller aim point; default 0 (off)
 	int   showAimGizmos;    // 1 = draw controller diagnostic gizmos (grip markers + aim rays + two-handed
-	                        //     aim vector) in world space, for debugging VR aim; default 0 (off)
+	                        //     aim vector) in world space. CODE-ONLY debug flag: no preferences UI and
+	                        //     not persisted -- flip the default in vr_openxr.cpp s_settings to enable.
+	                        //     default 0 (off)
 } vr_settings_t;
 
 vr_settings_t* VR_Settings(void);

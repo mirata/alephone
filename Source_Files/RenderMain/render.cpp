@@ -690,11 +690,16 @@ static void render_vr_aim_gizmos(view_data* view)
 				bool dTrk = true, oTrk = true; float dSpd = 0, oSpd = 0;
 				VR_GetHandTracking(domHand, &dTrk, &dSpd);
 				VR_GetHandTracking(offHand, &oTrk, &oSpd);
+				// Also capture the raw dominant aim-pose stage forward + yawOffset + body pos, so a
+				// "steady hands while walking" test shows whether wdir drifts because domFwd drifts
+				// (pose), yawOffset drifts (locomotion), or neither (parallax/anchor lag, not rotation).
+				float dps[3], dfs[3]; VR_GetAimPoseStage(domHand, dps, dfs);
 				static int c = 0;
 				if ((c++ % 30) == 0)
 					__android_log_print(ANDROID_LOG_INFO, "A1VR",
-						"2hand sep=%.3fm wdir=(%.3f,%.3f,%.3f) dom[trk=%d spd=%.2f] off[trk=%d spd=%.2f]",
-						sep, w[0], w[1], w[2], (int)dTrk, dSpd, (int)oTrk, oSpd);
+						"2hand sep=%.3fm wdir=(%.3f,%.3f,%.3f) domFwdStage=(%.3f,%.3f,%.3f) yawOff=%.2f body=(%d,%d) trk=%d/%d",
+						sep, w[0], w[1], w[2], dfs[0], dfs[1], dfs[2], VR_GetYawOffset(),
+						(int)view->origin.x, (int)view->origin.y, (int)dTrk, (int)oTrk);
 			}
 		}
 	}
