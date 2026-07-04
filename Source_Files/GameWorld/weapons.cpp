@@ -2944,7 +2944,11 @@ static void calculate_weapon_position_for_idle(
 	bob_height= (player->variables.step_amplitude*definition->bob_amplitude)>>FIXED_FRACTIONAL_BITS;
 	bob_height= (bob_height*table[vertical_angle])>>TRIG_SHIFT;
 	if (graphics_preferences->screen_mode.bobbing_type == BobbingType::none || VR_IsActive()) bob_height= 0;
-	if (use_elevation) bob_height+= sine_table[player->elevation]<<3;
+	// The view-elevation term slides the 2D-HUD weapon down out of frame when you look up. In VR the
+	// weapon is anchored to the physical controller, so this must NOT move it (it dropped the model
+	// below the hand as the view pitched up). Reload/holster lowering is unaffected -- that is driven
+	// by the weapon state machine (_weapon_lowering/_raising/reload states), not this idle term.
+	if (use_elevation && !VR_IsActive()) bob_height+= sine_table[player->elevation]<<3;
 	*height+= bob_height;
 
 	bob_width= (player->variables.step_amplitude*definition->horizontal_amplitude)>>FIXED_FRACTIONAL_BITS;

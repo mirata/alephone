@@ -819,10 +819,9 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 	static int            s_cachedMd3Frame    = 0;
 	static bool           s_cachedWpnIsStatic = false;
 	static float          s_cachedHh      = 0.0f; // hh at last 3D render, for cached-weapon offset
-	// Reload raise animation: one entry per hand (0=right, 1=left) so dual-wield weapons
-	// don't bleed their slide state into each other.
+	// Reload/holster slide fraction, one entry per hand (0=right, 1=left) so dual-wield weapons
+	// don't bleed their slide state into each other. Reused by the cached-weapon path below.
 	static float          s_lowerFrac[2] = {0.0f, 0.0f};
-	static float          s_prevVpos[2]  = {-1.0f, -1.0f};
 	bool loopHadItems  = false;
 	bool any3DThisCall = false;
 
@@ -1035,34 +1034,26 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 		if (should_flip)
 			display_data.flip_horizontal = !display_data.flip_horizontal;
 
-		// Reload slide: vpos > idle_height → descend; vpos >= kHideV → hidden.
-		// After un-hiding, vpos snaps back to idle_height for one frame before the engine
-		// runs the raise animation (vpos briefly > idle_height again then decreasing).
-		// s_lowerFrac is set to 1.0 while hidden and decays one step per game tick so
-		// the weapon rises smoothly from below the hand regardless of the vpos pattern.
+		// Reload/holster slide: vpos > idle_height → descend; vpos >= kHideV → hidden. Now that the
+		// view-elevation term is excluded from vertical_position in VR (see calculate_weapon_position_for_idle),
+		// vpos only rises above idle_height during genuine reload/lower/raise weapon STATES, so this slide
+		// tracks those without the spurious view-pitch drop. After un-hiding, vpos snaps back to idle_height
+		// for one frame before the raise animation; s_lowerFrac is set to 1.0 while hidden and decays one
+		// step per game tick so the weapon rises smoothly from below the hand regardless of the vpos pattern.
 		float cwz_slid = cwz;
 		{
 			const float kIdleV = float(display_data.idle_height);
 			const float kHideV = float(3 * FIXED_ONE / 2);
 			const float vpos   = float(display_data.vertical_position);
 
-			if (vpos >= kHideV) {
-				s_lowerFrac[hand] = 1.0f;
-				s_prevVpos[hand]  = vpos;
-				vrWeaponIdx++; continue;
-			}
-			const float descentFrac = (vpos > kIdleV)
-				? (vpos - kIdleV) / (kHideV - kIdleV) : 0.0f;
-			if (descentFrac >= s_lowerFrac[hand]) {
-				s_lowerFrac[hand] = descentFrac;  // weapon descending — track directly
-			} else {
-				// Decay once per game tick (vpos changes at 30 Hz; render may run faster)
-				if (vpos != s_prevVpos[hand])
-					s_lowerFrac[hand] -= 1.0f / 12.0f;
-				s_lowerFrac[hand] = std::max(s_lowerFrac[hand], descentFrac);
-				s_lowerFrac[hand] = std::max(s_lowerFrac[hand], 0.0f);
-			}
-			s_prevVpos[hand] = vpos;
+			if (vpos >= kHideV) { s_lowerFrac[hand] = 1.0f; vrWeaponIdx++; continue; }  // fully stowed → hide
+			// Track the engine's lowering directly: vertical_position ramps from idle_height (weapon at
+			// the hand) up toward kHideV (holstered) during reload / weapon-switch, so descentFrac maps
+			// straight to how far below the hand to draw the gun. No per-tick decay smoothing (the old
+			// version stalled in VR: the idle bob is zeroed so vpos is perfectly constant at idle, and its
+			// decay gate `vpos != prev` then never fired, freezing the gun below the hand). The engine
+			// already ramps vertical_position smoothly, so direct tracking is smooth on its own.
+			s_lowerFrac[hand] = (vpos > kIdleV) ? (vpos - kIdleV) / (kHideV - kIdleV) : 0.0f;
 			cwz_slid = cwz - s_lowerFrac[hand] * hh * 4.0f;
 		}
 

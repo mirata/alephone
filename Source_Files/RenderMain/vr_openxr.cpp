@@ -626,15 +626,6 @@ namespace {
 	bool        s_handTracked[2] = { false, false };
 	bool        s_aimTracked[2]  = { false, false };
 	float       s_handSpeed[2]   = { 0.0f, 0.0f };
-	// Position FREEZE on tracking loss: while a controller is occluded (VALID but not TRACKED) the
-	// runtime dead-reckons its POSITION from the IMU and it drifts. We hold the last optically-tracked
-	// position instead (orientation stays live -- gyro is accurate through the dropout). Kills the
-	// visual swim of anything anchored at the controller (weapon model, aim ray, reticle) and keeps the
-	// inter-hand vector stable, without the lag a low-pass filter would add.
-	XrVector3f  s_aimPosHold[2]  = {};
-	XrVector3f  s_handPosHold[2] = {};
-	bool        s_aimPosHoldValid[2]  = { false, false };
-	bool        s_handPosHoldValid[2] = { false, false };
 	// Two-handed hold is LATCHED like QuestZDoom: engaged on the off-hand grip rising edge while the
 	// hands are close, released only when the grip is let go -- NOT re-tested against the proximity
 	// threshold every frame (that flickers the aim mode near the boundary).
@@ -913,14 +904,14 @@ extern "C" bool VR_BeginFrame(void)
 				xrLocateSpace(s_aimSpace[h], s_stageSpace, s_frameState.predictedDisplayTime, &al);
 				if ((al.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) &&
 					(al.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
-					s_aimStage[h] = al.pose;   // orientation is always live (gyro-accurate)
+					// Use the runtime pose AS-IS whenever it is valid -- including the dead-reckoned
+					// estimate when POSITION_TRACKED is off (brief occlusion). This follows the hand
+					// like QuestZDoom instead of freezing at the last tracked spot (which detached the
+					// weapon from the hand). When POSITION_VALID drops entirely, we skip the update and
+					// s_aimStage keeps its last value -- the runtime has no position to offer at all.
+					s_aimStage[h] = al.pose;
 					s_aimValid[h] = true;
 					s_aimTracked[h] = (al.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0;
-					if (s_aimTracked[h]) {
-						s_aimPosHold[h] = al.pose.position; s_aimPosHoldValid[h] = true;
-					} else if (s_aimPosHoldValid[h]) {
-						s_aimStage[h].position = s_aimPosHold[h];   // freeze position while occluded
-					}
 				}
 			}
 			s_handValid[h] = false;
@@ -932,35 +923,16 @@ extern "C" bool VR_BeginFrame(void)
 				hl.next = &hv;
 				xrLocateSpace(s_handSpace[h], s_stageSpace, s_frameState.predictedDisplayTime, &hl);
 				if ((hl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
-					s_handStage[h] = hl.pose;   // orientation live
+					// Runtime pose as-is while valid (incl. dead-reckoned when not TRACKED) -- follows
+					// the hand like QuestZDoom rather than freezing/detaching. See the aim block above.
+					s_handStage[h] = hl.pose;
 					s_handValid[h] = true;
 					s_handTracked[h] = (hl.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0;
 					if (hv.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) {
 						const XrVector3f& v = hv.linearVelocity;
 						s_handSpeed[h] = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
 					}
-					if (s_handTracked[h]) {
-						s_handPosHold[h] = hl.pose.position; s_handPosHoldValid[h] = true;
-					} else if (s_handPosHoldValid[h]) {
-						s_handStage[h].position = s_handPosHold[h];   // freeze position while occluded
-					}
 				}
-			}
-		}
-
-		// TEMP DIAG (two-handed/overhead investigation): log dominant-hand grip vs aim pose in stage
-		// space + validity/tracking, throttled. Shows whether grip & aim diverge / freeze when raised.
-		{
-			static int dbgc = 0;
-			if ((dbgc++ % 20) == 0) {
-				const int d = s_settings.dominantHand ? 0 : 1;
-				A1VR_LOG("POSE dom=%d grip[v=%d t=%d] (%.3f,%.3f,%.3f) aim[v=%d t=%d] (%.3f,%.3f,%.3f) head(%.3f,%.3f,%.3f)",
-					d,
-					(int)s_handValid[d], (int)s_handTracked[d],
-					s_handStage[d].position.x, s_handStage[d].position.y, s_handStage[d].position.z,
-					(int)s_aimValid[d], (int)s_aimTracked[d],
-					s_aimStage[d].position.x, s_aimStage[d].position.y, s_aimStage[d].position.z,
-					s_stageFromHead.position.x, s_stageFromHead.position.y, s_stageFromHead.position.z);
 			}
 		}
 
