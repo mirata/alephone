@@ -56,7 +56,7 @@
 #include "Console.h"
 #include "XML_LevelScript.h"
 #include "InfoTree.h"
-#include "vr_sprite_handedness.h"
+#include "vr_weapons.h"
 
 // This will reset all values changed by MML scripts which implement ResetValues() method
 // and are part of the master MarathonParser tree.
@@ -90,7 +90,7 @@ void ResetAllMMLValues()
 	reset_mml_logging();
 	reset_mml_console();
 	reset_mml_default_levels();
-	reset_mml_vr_sprites();
+	reset_mml_vr_weapons();
 }
 
 static void _ParseAllMML(const InfoTree& fileroot, bool load_menu_mml_only)
@@ -156,8 +156,8 @@ static void _ParseAllMML(const InfoTree& fileroot, bool load_menu_mml_only)
 			parse_mml_console(child);
 		for (const InfoTree &child : root.children_named("default_levels"))
 			parse_mml_default_levels(child);
-		for (const InfoTree &child : root.children_named("vr_sprites"))
-			parse_mml_vr_sprites(child);
+		for (const InfoTree &child : root.children_named("vr_weapons"))
+			parse_mml_vr_weapons(child);
 	}
 }
 

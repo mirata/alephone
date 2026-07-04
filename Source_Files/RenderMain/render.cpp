@@ -241,7 +241,7 @@ extern WindowPtr screen_window;
 #include "RenderRasterize_Shader.h"
 #include "Rasterizer_Shader.h"
 #include "vr_openxr.h"
-#include "vr_sprite_handedness.h"
+#include "vr_weapons.h"
 #endif
 #include "preferences.h"
 #include "screen.h"
@@ -421,6 +421,7 @@ void initialize_view_data(
 }
 
 #if defined(__ANDROID__)
+#include <android/log.h>
 // ---- 3D aim reticle (red dot projected onto world geometry) ---------------------------------
 // Raycasts from the dominant controller along its aim direction and draws a camera-facing red
 // filled disc at the hit point. Drawn per-eye while the world projection/modelview from SetView
@@ -570,6 +571,135 @@ static void render_vr_aim_reticle(view_data* view)
 	draw_dot(domHand);
 	if (weapon_is_dual) draw_dot(offHand);
 
+	glDisable(GL_BLEND);
+	glEnable(GL_DEPTH_TEST);
+	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	glEnable(GL_TEXTURE_2D);
+	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+}
+
+// ---- Controller aim diagnostic gizmos -------------------------------------------------------
+// Draws, in world space (depth test off so always visible):
+//   * a cross marker at each physical hand (dominant = red, off-hand = blue)
+//   * each controller's OWN aim ray (thin, hand colour) — the single-handed aim direction
+//   * when two-handed hold is active: the inter-hand line (green) and the ACTUAL fired aim
+//     direction (thick yellow, from the dominant hand along VR_GetTwoHandedFwdStage)
+// Purpose: separate an orientation problem from a hit/geometry problem and see exactly where the
+// two-handed model points vs where the player thinks the gun is aimed. Toggle: VR "Aim Debug Gizmos".
+static void render_vr_aim_gizmos(view_data* view)
+{
+	if (!VR_IsActive()) return;
+	if (!VR_Settings()->showAimGizmos) return;
+
+	const double W = VR_Settings()->worldScaleWUM;
+	const double yaw = view->virtual_yaw * (360.0 / (double(FIXED_ONE) * double(FULL_CIRCLE))) * (8.0 * atan(1.0) / 360.0);
+	const double cy = cos(yaw), sy = sin(yaw);
+	const double camx = view->origin.x, camy = view->origin.y, camz = view->origin.z;
+	const int domHand = VR_Settings()->dominantHand ? 0 : 1;
+	const int offHand = 1 - domHand;
+
+	float hp[3];
+	if (!VR_GetHeadPosStage(hp)) return;
+
+	// stage (metres, Y-up) position relative to head -> Marathon world (WU, Z-up), anchored at camera.
+	auto stagePosToWorld = [&](const float ps[3], world_point3d& out) {
+		const double qx = (ps[0]-hp[0])*W, qy = (ps[1]-hp[1])*W, qz = (ps[2]-hp[2])*W;
+		const double rx = -qx, ry = -qz, rz = qy;
+		out.x = (world_distance)(camx + rx*cy - ry*sy);
+		out.y = (world_distance)(camy + rx*sy + ry*cy);
+		out.z = (world_distance)(camz + rz);
+	};
+	// stage forward -> world unit direction (rotation only; length cancels).
+	auto stageDirToWorld = [&](const float fs[3], double w[3]) {
+		double dx = -fs[0], dy = -fs[2], dz = fs[1];
+		double wx = dx*cy - dy*sy, wy = dx*sy + dy*cy, wz = dz;
+		double l = sqrt(wx*wx + wy*wy + wz*wz); if (l < 1e-6) l = 1;
+		w[0] = wx/l; w[1] = wy/l; w[2] = wz/l;
+	};
+
+	glUseProgram(0);
+	glDisable(GL_TEXTURE_2D);
+	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	glDisableClientState(GL_COLOR_ARRAY);
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glDisable(GL_DEPTH_TEST);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glLineWidth(2.0f);
+
+	world_point3d handW[2]; bool handOk[2] = { false, false };
+
+	for (int h = 0; h < 2; ++h) {
+		float ps[3], fs[3];
+		if (!VR_GetAimPoseStage(h, ps, fs)) continue;   // ps = physical hand (grip) pos, fs = aim fwd
+		world_point3d cw; stagePosToWorld(ps, cw);
+		handW[h] = cw; handOk[h] = true;
+		double w[3]; stageDirToWorld(fs, w);
+		const double rayLen = 4.0 * WORLD_ONE;
+		world_point3d e;
+		e.x = (world_distance)(cw.x + w[0]*rayLen);
+		e.y = (world_distance)(cw.y + w[1]*rayLen);
+		e.z = (world_distance)(cw.z + w[2]*rayLen);
+		const float hm = (float)(0.04 * W);
+		GLfloat v[8*3]; int n = 0;
+		auto push = [&](double x, double y, double z){ v[n++]=(float)x; v[n++]=(float)y; v[n++]=(float)z; };
+		push(cw.x-hm,cw.y,cw.z); push(cw.x+hm,cw.y,cw.z);
+		push(cw.x,cw.y-hm,cw.z); push(cw.x,cw.y+hm,cw.z);
+		push(cw.x,cw.y,cw.z-hm); push(cw.x,cw.y,cw.z+hm);
+		push(cw.x,cw.y,cw.z);    push(e.x,e.y,e.z);
+		bool tracked = true; VR_GetHandTracking(h, &tracked, nullptr);
+		if (!tracked)          glColor4f(1.0f, 0.0f, 1.0f, 1.0f);   // MAGENTA = occluded / dead-reckoned
+		else if (h == domHand) glColor4f(1.0f, 0.2f, 0.2f, 0.9f);   // dominant = red
+		else                   glColor4f(0.2f, 0.5f, 1.0f, 0.9f);   // off-hand = blue
+		glVertexPointer(3, GL_FLOAT, 0, v);
+		glDrawArrays(GL_LINES, 0, 8);
+	}
+
+	if (VR_IsTwoHandedActive() && handOk[0] && handOk[1]) {
+		float thf[3];
+		if (VR_GetTwoHandedFwdStage(thf)) {
+			double w[3]; stageDirToWorld(thf, w);
+			const world_point3d o = handW[domHand];
+			world_point3d e;
+			e.x = (world_distance)(o.x + w[0]*8.0*WORLD_ONE);
+			e.y = (world_distance)(o.y + w[1]*8.0*WORLD_ONE);
+			e.z = (world_distance)(o.z + w[2]*8.0*WORLD_ONE);
+			GLfloat v[4*3]; int n = 0;
+			auto push = [&](double x, double y, double z){ v[n++]=(float)x; v[n++]=(float)y; v[n++]=(float)z; };
+			// inter-hand line (green): dominant -> off-hand
+			push(handW[domHand].x,handW[domHand].y,handW[domHand].z);
+			push(handW[offHand].x,handW[offHand].y,handW[offHand].z);
+			glColor4f(0.1f, 1.0f, 0.2f, 0.9f);
+			glLineWidth(2.0f);
+			glVertexPointer(3, GL_FLOAT, 0, v);
+			glDrawArrays(GL_LINES, 0, 2);
+			// actual fired aim (thick yellow) from dominant hand along the two-handed direction
+			n = 0; push(o.x,o.y,o.z); push(e.x,e.y,e.z);
+			glColor4f(1.0f, 0.9f, 0.1f, 0.95f);
+			glLineWidth(4.0f);
+			glDrawArrays(GL_LINES, 0, 2);
+
+			// throttled diagnostic: hand separation + fired direction + per-hand TRACKED state and
+			// linear speed (grep A1VR "2hand"). If a hand shows trk=0 (dead-reckoned / occluded) while
+			// the aim drifts, the cause is controller occlusion, not our math.
+			{
+				const double sep = sqrt(
+					pow((handW[domHand].x-handW[offHand].x)/W,2) +
+					pow((handW[domHand].y-handW[offHand].y)/W,2) +
+					pow((handW[domHand].z-handW[offHand].z)/W,2));
+				bool dTrk = true, oTrk = true; float dSpd = 0, oSpd = 0;
+				VR_GetHandTracking(domHand, &dTrk, &dSpd);
+				VR_GetHandTracking(offHand, &oTrk, &oSpd);
+				static int c = 0;
+				if ((c++ % 30) == 0)
+					__android_log_print(ANDROID_LOG_INFO, "A1VR",
+						"2hand sep=%.3fm wdir=(%.3f,%.3f,%.3f) dom[trk=%d spd=%.2f] off[trk=%d spd=%.2f]",
+						sep, w[0], w[1], w[2], (int)dTrk, dSpd, (int)oTrk, oSpd);
+			}
+		}
+	}
+
+	glLineWidth(1.0f);
 	glDisable(GL_BLEND);
 	glEnable(GL_DEPTH_TEST);
 	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
@@ -1212,6 +1342,7 @@ void render_view(
 						// (head-centre + OpenXR IPD) don't double-count the IPD offset.
 						view->origin = base_origin;
 						render_vr_aim_reticle(view);
+						render_vr_aim_gizmos(view);
 						render_vr_weapon_sprites_3d(view);
 
 						RasPtr->End();

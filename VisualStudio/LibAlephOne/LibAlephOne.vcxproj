@@ -588,7 +588,7 @@
     <ClCompile Include="..\..\Source_Files\RenderMain\SW_Texture_Extras.cpp" />
     <ClCompile Include="..\..\Source_Files\RenderMain\textures.cpp" />
     <ClCompile Include="..\..\Source_Files\RenderMain\vr_openxr_win.cpp" />
-    <ClCompile Include="..\..\Source_Files\RenderMain\vr_sprite_handedness.cpp" />
+    <ClCompile Include="..\..\Source_Files\RenderMain\vr_weapons.cpp" />
     <ClCompile Include="..\..\Source_Files\RenderOther\ChaseCam.cpp" />
     <ClCompile Include="..\..\Source_Files\RenderOther\computer_interface.cpp" />
     <ClCompile Include="..\..\Source_Files\RenderOther\fades.cpp" />
@@ -815,7 +815,7 @@
     <ClInclude Include="..\..\Source_Files\RenderMain\textures.h" />
     <ClInclude Include="..\..\Source_Files\RenderMain\vec3.h" />
     <ClInclude Include="..\..\Source_Files\RenderMain\vr_openxr.h" />
-    <ClInclude Include="..\..\Source_Files\RenderMain\vr_sprite_handedness.h" />
+    <ClInclude Include="..\..\Source_Files\RenderMain\vr_weapons.h" />
     <ClInclude Include="..\..\Source_Files\RenderOther\ChaseCam.h" />
     <ClInclude Include="..\..\Source_Files\RenderOther\computer_interface.h" />
     <ClInclude Include="..\..\Source_Files\RenderOther\fades.h" />

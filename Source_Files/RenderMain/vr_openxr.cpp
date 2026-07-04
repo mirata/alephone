@@ -486,6 +486,8 @@ namespace {
 		/* hudTiltDeg      */ 30.0f,  // degrees the HUD bottom-anchor is pitched down from horizontal
 		/* mapPlayerUp     */ 0,      // overhead map rotation: 0=north-up, 1=player-facing-up
 		/* teleportDistortion */ 1,   // horizontal-stretch/vertical-compress warp on teleport (may cause nausea)
+		/* showLaserSight   */ 0,
+		/* showAimGizmos    */ 0,     // controller aim diagnostic gizmos (off by default)
 	};
 
 	// Locomotion yaw offset (snap/smooth turn), in Marathon angle units (512 = full circle).
@@ -609,6 +611,17 @@ namespace {
 	XrSpace     s_handSpace[2]  = { XR_NULL_HANDLE, XR_NULL_HANDLE };
 	XrPosef     s_handStage[2]  = {};  // grip pose in stage space, this frame
 	bool        s_handValid[2]  = { false, false };
+	// Occlusion/staleness diagnostics: whether the runtime is actively TRACKING (vs dead-reckoning an
+	// estimate) the grip pose, and the reported linear velocity magnitude (m/s). When two controllers
+	// get close (two-handed hold) one can occlude the other from the headset cameras -> the runtime
+	// drops the TRACKED bit and dead-reckons -> position drifts until re-acquired.
+	bool        s_handTracked[2] = { false, false };
+	float       s_handSpeed[2]   = { 0.0f, 0.0f };
+	// Two-handed hold is LATCHED like QuestZDoom: engaged on the off-hand grip rising edge while the
+	// hands are close, released only when the grip is let go -- NOT re-tested against the proximity
+	// threshold every frame (that flickers the aim mode near the boundary).
+	bool        s_twoHandedLatched = false;
+	bool        s_offGripPrev      = false;
 	XrAction    s_vibrateAction[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE }; // haptic output, 0=left 1=right
 	float       s_vibDuration[2] = { 0.0f, 0.0f };   // pending vibration duration in ms (0=none)
 	float       s_vibIntensity[2] = { 0.0f, 0.0f };  // pending vibration amplitude [0,1]
@@ -788,6 +801,26 @@ namespace {
 	}
 }
 
+// Consistent two-hand positions in stage space (metres, Y-up): grip pose for BOTH hands when both
+// grip poses are valid, else the aim pose for BOTH. Never mixes grip-frame and aim-frame between the
+// two hands -- the grip->aim origin offset (several cm) would otherwise inject a spurious jump into
+// the inter-hand vector whenever one hand's grip pose blinked out. Returns false if either aim pose
+// is untracked. Also reports the inter-hand distance.
+static bool twoHandPositions(int domHand, int offHand, float dom[3], float off[3], float* distOut)
+{
+	if (!s_aimValid[domHand] || !s_aimValid[offHand]) return false;
+	const bool useGrip = s_handValid[domHand] && s_handValid[offHand];
+	const XrPosef& dp = useGrip ? s_handStage[domHand] : s_aimStage[domHand];
+	const XrPosef& op = useGrip ? s_handStage[offHand] : s_aimStage[offHand];
+	dom[0] = dp.position.x; dom[1] = dp.position.y; dom[2] = dp.position.z;
+	off[0] = op.position.x; off[1] = op.position.y; off[2] = op.position.z;
+	if (distOut) {
+		const float dx = dom[0]-off[0], dy = dom[1]-off[1], dz = dom[2]-off[2];
+		*distOut = std::sqrt(dx*dx + dy*dy + dz*dz);
+	}
+	return true;
+}
+
 extern "C" bool VR_BeginFrame(void)
 {
 	// Idempotent within a frame. render_screen (apply_vr_view_offsets) now calls this EARLY so the head
@@ -866,14 +899,42 @@ extern "C" bool VR_BeginFrame(void)
 				}
 			}
 			s_handValid[h] = false;
+			s_handTracked[h] = false;
+			s_handSpeed[h] = 0.0f;
 			if (s_handSpace[h] != XR_NULL_HANDLE) {
+				XrSpaceVelocity hv = { XR_TYPE_SPACE_VELOCITY };
 				XrSpaceLocation hl = { XR_TYPE_SPACE_LOCATION };
+				hl.next = &hv;
 				xrLocateSpace(s_handSpace[h], s_stageSpace, s_frameState.predictedDisplayTime, &hl);
 				if ((hl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
 					s_handStage[h] = hl.pose;
 					s_handValid[h] = true;
+					s_handTracked[h] = (hl.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0;
+					if (hv.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) {
+						const XrVector3f& v = hv.linearVelocity;
+						s_handSpeed[h] = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+					}
 				}
 			}
+		}
+
+		// Two-handed latch (QuestZDoom model): engage on the off-hand grip RISING edge while the hands
+		// are close; release only when the grip is let go. Not re-tested against the proximity threshold
+		// every frame, so a noisy/occluded distance estimate near the boundary can't flicker the aim mode.
+		{
+			const int domHand = s_settings.dominantHand ? 0 : 1;
+			const int offHand = 1 - domHand;
+			const bool offGrip = s_grip[offHand] > 0.5f;
+			if (s_isDualWield) {
+				s_twoHandedLatched = false;
+			} else if (offGrip && !s_offGripPrev) {
+				float dm[3], of[3], dist = 1e9f;
+				if (twoHandPositions(domHand, offHand, dm, of, &dist) && dist < 0.5f)
+					s_twoHandedLatched = true;
+			} else if (!offGrip) {
+				s_twoHandedLatched = false;
+			}
+			s_offGripPrev = offGrip;
 		}
 
 		s_frameShouldRender = true;
@@ -1639,33 +1700,70 @@ extern "C" void VR_SetGripAltFireEnabled(bool en) { s_gripAltFireEnabled = en; }
 extern "C" bool VR_IsTwoHandedActive()
 {
 	if (s_isDualWield) return false;   // dual-wield uses both hands independently
+	if (!s_twoHandedLatched) return false;   // latched on grip edge; see VR_BeginFrame
 	const int domHand = s_settings.dominantHand ? 0 : 1;
 	const int offHand = 1 - domHand;
-	if (!s_aimValid[domHand] || !s_aimValid[offHand]) return false;
-	if (s_grip[offHand] <= 0.5f) return false;
-	// Proximity check: hands must be within 0.5 m (use grip pose — physical hand position).
-	const XrPosef& dp = s_handValid[domHand] ? s_handStage[domHand] : s_aimStage[domHand];
-	const XrPosef& op = s_handValid[offHand] ? s_handStage[offHand] : s_aimStage[offHand];
-	float dx = dp.position.x - op.position.x;
-	float dy = dp.position.y - op.position.y;
-	float dz = dp.position.z - op.position.z;
-	return (dx*dx + dy*dy + dz*dz) < 0.5f * 0.5f;
+	return s_aimValid[domHand] && s_aimValid[offHand];
 }
 
+// Separation-weighted two-handed aim (stage space). The naive inter-hand vector (off - dominant) has
+// angular noise ~ (controller position noise) / (hand separation): at a stacked-hands pistol grip
+// (~6-9 cm apart, measured on device) a few mm of jitter swings the aim ~15-20 deg -- the reported
+// drift. Controllers ARE optically tracked (trk=1); it's pure geometry, not occlusion. So we base the
+// aim on the DOMINANT controller's own aim orientation (rock-steady, tracks the wrist, already has
+// aimPitchAdjust) and blend toward the inter-hand vector only as the hands separate, where that vector
+// becomes well-conditioned and gives true rifle-style two-handed aim. This is what makes QuestZDoom
+// stable at close range (its inter-hand override is guarded by a forward-separation test).
 extern "C" bool VR_GetTwoHandedFwdStage(float fwd3[3])
 {
 	const int domHand = s_settings.dominantHand ? 0 : 1;
 	const int offHand = 1 - domHand;
-	if (!s_aimValid[domHand] || !s_aimValid[offHand]) return false;
-	// Inter-hand vector from grip poses (physical hand positions).
-	const XrPosef& dp = s_handValid[domHand] ? s_handStage[domHand] : s_aimStage[domHand];
-	const XrPosef& op = s_handValid[offHand] ? s_handStage[offHand] : s_aimStage[offHand];
-	fwd3[0] = op.position.x - dp.position.x;
-	fwd3[1] = op.position.y - dp.position.y;
-	fwd3[2] = op.position.z - dp.position.z;
+
+	// Dominant controller's own aim forward -- the stable base.
+	float domPos[3], domFwd[3];
+	if (!VR_GetAimPoseStage(domHand, domPos, domFwd)) return false;
+
+	// Inter-hand vector from a CONSISTENT pose frame (never grip on one hand, aim on the other).
+	float dm[3], of[3], sep = 0.0f;
+	if (!twoHandPositions(domHand, offHand, dm, of, &sep)) {
+		fwd3[0] = domFwd[0]; fwd3[1] = domFwd[1]; fwd3[2] = domFwd[2];
+		return true;
+	}
+	float ih[3] = { of[0]-dm[0], of[1]-dm[1], of[2]-dm[2] };
+	const float ihl = std::sqrt(ih[0]*ih[0] + ih[1]*ih[1] + ih[2]*ih[2]);
+
+	// Blend factor: 0 below kSepMin (pure dominant orientation), 1 above kSepFull (pure inter-hand).
+	const float kSepMin = 0.12f, kSepFull = 0.30f;
+	float t = (ihl > 1e-4f) ? (sep - kSepMin) / (kSepFull - kSepMin) : 0.0f;
+	if (t < 0.0f) t = 0.0f;
+	if (t > 1.0f) t = 1.0f;
+
+	if (t <= 0.0f || ihl < 1e-4f) {
+		fwd3[0] = domFwd[0]; fwd3[1] = domFwd[1]; fwd3[2] = domFwd[2];
+		return true;
+	}
+	ih[0] /= ihl; ih[1] /= ihl; ih[2] /= ihl;
+	// Keep the inter-hand vector in the same hemisphere as the dominant aim so a reversed off-hand
+	// grip (off-hand behind the dominant) can't flip the aim 180 deg.
+	if (ih[0]*domFwd[0] + ih[1]*domFwd[1] + ih[2]*domFwd[2] < 0.0f) {
+		ih[0] = -ih[0]; ih[1] = -ih[1]; ih[2] = -ih[2];
+	}
+	fwd3[0] = domFwd[0]*(1.0f-t) + ih[0]*t;
+	fwd3[1] = domFwd[1]*(1.0f-t) + ih[1]*t;
+	fwd3[2] = domFwd[2]*(1.0f-t) + ih[2]*t;
 	const float l = std::sqrt(fwd3[0]*fwd3[0] + fwd3[1]*fwd3[1] + fwd3[2]*fwd3[2]);
-	if (l < 1e-6f) return false;
+	if (l < 1e-6f) { fwd3[0] = domFwd[0]; fwd3[1] = domFwd[1]; fwd3[2] = domFwd[2]; return true; }
 	fwd3[0] /= l; fwd3[1] /= l; fwd3[2] /= l;
+	return true;
+}
+
+// Diagnostic accessor: per-hand grip tracking state + linear speed (m/s), for logging occlusion /
+// dead-reckoning during two-handed holds. Returns false for an invalid hand index.
+extern "C" bool VR_GetHandTracking(int hand, bool* tracked, float* speed)
+{
+	if (hand < 0 || hand > 1) return false;
+	if (tracked) *tracked = s_handTracked[hand];
+	if (speed)   *speed   = s_handSpeed[hand];
 	return true;
 }
 
@@ -1841,7 +1939,7 @@ extern "C" void VR_GetEyeIPDOffsetWU(int eye, float* wx, float* wy)
 extern "C" bool VR_InitOpenXR(void)     { return false; }
 extern "C" bool VR_IsActive(void)       { return false; }
 extern "C" vr_settings_t* VR_Settings(void) {
-	static vr_settings_t s = { 1, 2.5f, 2.0f, 512.0f, 1.6f, 1, 30.0f, 1.0f, 0, 0, 0, -20.0f, 0.8f, 0.55f, 30.0f, 0 };
+	static vr_settings_t s = { 1, 2.5f, 2.0f, 512.0f, 1.6f, 1, 30.0f, 1.0f, 0, 0, 0, -20.0f, 0.8f, 0.55f, 30.0f, 0, 0, 0 };
 	return &s;
 }
 extern "C" float VR_GetYawOffset(void)   { return 0.0f; }
@@ -1903,6 +2001,7 @@ extern "C" void VR_SetOffHandHasWeapon(bool) {}
 extern "C" void VR_SetGripAltFireEnabled(bool) {}
 extern "C" bool VR_IsTwoHandedActive() { return false; }
 extern "C" bool VR_GetTwoHandedFwdStage(float*) { return false; }
+extern "C" bool VR_GetHandTracking(int, bool*, float*) { return false; }
 extern "C" bool VR_GetHeadPosStage(float*) { return false; }
 extern "C" bool VR_GetWeaponAim(float*) { return false; }
 extern "C" bool VR_GetSecondaryWeaponAim(float*) { return false; }

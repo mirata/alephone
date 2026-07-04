@@ -105,6 +105,7 @@ Apr 10, 2003 (Woody Zenfell):
 #include "preferences.h"
 #include "InfoTree.h"
 #include "vr_openxr.h"
+#include "vr_weapons.h"
 
 #include "Packing.h"
 #include "shell.h"
@@ -1891,6 +1892,18 @@ static void fire_weapon(
 			damage_modifier= FIXED_ONE;
 		}
 
+		/* VR: some weapons (e.g. the .44 Magnum) carry deliberate spread to simulate the
+		   difficulty of aiming a real handgun. In VR the controller already gives free 1:1
+		   aim, so that baked-in inaccuracy just makes them useless. Scale the per-shot
+		   theta_error down per the <vr_spread> MML config (1.0 = unchanged). */
+		angle vr_theta_error= trigger_definition->theta_error;
+		if (VR_IsActive() && player_index == current_player_index)
+		{
+			float spread_scale= VR_GetWeaponSpreadScale(weapon_data->weapon_type);
+			if (spread_scale != 1.f)
+				vr_theta_error= (angle)(vr_theta_error * spread_scale);
+		}
+
 		while(rounds_to_fire--)
 		{
 			/* Increment rounds fired count */
@@ -1936,9 +1949,9 @@ static void fire_weapon(
 					(ProjectileIsGuided(trigger_definition->projectile_type) ?
 						find_closest_appropriate_target(player->monster_index,false) :
 						NONE) : NONE;
-				new_projectile(&origin, origin_polygon, &_vector, 
-					trigger_definition->theta_error+flailing_bonus, 
-					trigger_definition->projectile_type, 
+				new_projectile(&origin, origin_polygon, &_vector,
+					vr_theta_error+flailing_bonus,
+					trigger_definition->projectile_type,
 					player->monster_index, _monster_marine, Target, damage_modifier);
 					// player->monster_index, _monster_marine, NONE, damage_modifier);
 			}

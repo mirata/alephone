@@ -1,4 +1,4 @@
-#include "vr_sprite_handedness.h"
+#include "vr_weapons.h"
 #include "weapons.h"
 #include <set>
 #include <map>
@@ -19,51 +19,61 @@ static const std::map<std::string, short> kWeaponNames = {
 
 static std::set<short> s_leftHandedWeapons;
 static std::map<short, float> s_casingFwdOffsets;
+static std::map<short, float> s_spreadScales;
 
-void reset_mml_vr_sprites()
+// Resolve a <...> child's target weapon from its "index" or "name" attribute.
+// Returns the engine weapon-type constant, or -1 if unspecified/unknown.
+static short resolve_weapon_index(const InfoTree& child)
+{
+	short index = -1;
+	child.read_attr("index", index);
+	if (index < 0)
+	{
+		std::string name;
+		if (child.read_attr("name", name))
+		{
+			auto it = kWeaponNames.find(name);
+			if (it != kWeaponNames.end())
+				index = it->second;
+		}
+	}
+	return index;
+}
+
+void reset_mml_vr_weapons()
 {
 	s_leftHandedWeapons.clear();
 	s_casingFwdOffsets.clear();
+	s_spreadScales.clear();
 }
 
-void parse_mml_vr_sprites(const InfoTree& root)
+void parse_mml_vr_weapons(const InfoTree& root)
 {
 	for (const InfoTree& child : root.children_named("left_handed_weapon"))
 	{
-		short index = -1;
-		child.read_attr("index", index);
-		if (index < 0)
-		{
-			std::string name;
-			if (child.read_attr("name", name))
-			{
-				auto it = kWeaponNames.find(name);
-				if (it != kWeaponNames.end())
-					index = it->second;
-			}
-		}
+		short index = resolve_weapon_index(child);
 		if (index >= 0)
 			s_leftHandedWeapons.insert(index);
 	}
 	for (const InfoTree& child : root.children_named("vr_casing"))
 	{
-		short index = -1;
-		child.read_attr("index", index);
-		if (index < 0)
-		{
-			std::string name;
-			if (child.read_attr("name", name))
-			{
-				auto it = kWeaponNames.find(name);
-				if (it != kWeaponNames.end())
-					index = it->second;
-			}
-		}
+		short index = resolve_weapon_index(child);
 		if (index >= 0)
 		{
 			float fwd = 0.f;
 			child.read_attr("fwd_offset", fwd);
 			s_casingFwdOffsets[index] = fwd;
+		}
+	}
+	for (const InfoTree& child : root.children_named("vr_spread"))
+	{
+		short index = resolve_weapon_index(child);
+		if (index >= 0)
+		{
+			float scale = 1.f;
+			child.read_attr("scale", scale);
+			if (scale < 0.f) scale = 0.f;
+			s_spreadScales[index] = scale;
 		}
 	}
 }
@@ -77,4 +87,10 @@ float VR_GetWeaponCasingFwdOffset(short weapon_type)
 {
 	auto it = s_casingFwdOffsets.find(weapon_type);
 	return it != s_casingFwdOffsets.end() ? it->second : 0.f;
+}
+
+float VR_GetWeaponSpreadScale(short weapon_type)
+{
+	auto it = s_spreadScales.find(weapon_type);
+	return it != s_spreadScales.end() ? it->second : 1.f;
 }

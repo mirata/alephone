@@ -75,6 +75,8 @@ list(FILTER A1_SOURCES EXCLUDE REGEX "thread_priority_sdl_(win32|macosx|dummy)")
 list(FILTER A1_SOURCES EXCLUDE REGEX "SDL_rwops_zzip")
 # network_dummy.cpp is the stub used when networking is off; we build the real network.cpp.
 list(FILTER A1_SOURCES EXCLUDE REGEX "network_dummy")
+# vr_openxr_win.cpp is the desktop (Windows) no-op VR stub; Android builds vr_openxr.cpp.
+list(FILTER A1_SOURCES EXCLUDE REGEX "vr_openxr_win")
 
 add_library(main SHARED ${A1_SOURCES})
 

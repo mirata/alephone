@@ -46,6 +46,8 @@ typedef struct {
 	int   mapPlayerUp;      // 1 = rotate the overhead map so the player's facing direction is always at the top
 	int   teleportDistortion; // 1 = apply horizontal-stretch/vertical-compress warp during teleport fold effect
 	int   showLaserSight;   // 1 = draw the laser-sight dot at the controller aim point; default 0 (off)
+	int   showAimGizmos;    // 1 = draw controller diagnostic gizmos (grip markers + aim rays + two-handed
+	                        //     aim vector) in world space, for debugging VR aim; default 0 (off)
 } vr_settings_t;
 
 vr_settings_t* VR_Settings(void);
@@ -215,6 +217,11 @@ bool VR_IsTwoHandedActive();
 // Stage-space unit vector from dominant hand toward non-dominant hand — the two-handed
 // weapon forward direction. Valid only when VR_IsTwoHandedActive() returns true.
 bool VR_GetTwoHandedFwdStage(float fwd3[3]);
+
+// Diagnostic: per-hand grip pose tracking state (true = actively optically TRACKED, false =
+// runtime is dead-reckoning an estimate, e.g. the controller is occluded) and its linear speed
+// in m/s. For logging drift during close-hand two-handed holds. Returns false for a bad index.
+bool VR_GetHandTracking(int hand, bool* tracked, float* speed);
 
 // Head position this frame in STAGE space (metres, Y-up). The aim-debug uses controller-minus-head so
 // it doesn't double-count the head offset (which the renderer applies to view.origin, not the eye matrix).
