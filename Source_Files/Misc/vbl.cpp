@@ -1278,31 +1278,45 @@ uint32 parse_keymap(void)
 			if (mx < -dead) flags |= _sidestepping_left;
 			else if (mx >  dead) flags |= _sidestepping_right;
 			VR_UpdateTurn(tx, 1.0f / 30.0f);   // ~TICKS_PER_SECOND; no continuous _turning_* flags
-			if (VR_GetFire())          flags |= _left_trigger_state;
-			if (VR_GetSecondaryFire()) flags |= _right_trigger_state;
-			if (VR_GetAction())        flags |= _action_trigger_state;
-			// Move-thumbstick click -> run. Injected as the raw _run_dont_walk flag BEFORE the
-			// run/walk-toggle post-processing below, so it honors the _inputmod_run_key_toggle pref
-			// (toggle vs hold) exactly like the keyboard run key.
-			if (VR_GetMoveStickClick()) flags |= _run_dont_walk;
-			// Turn-thumbstick click -> toggle overhead map (edge-triggered).
+			// Fire always comes from the triggers; the button map can ADD extra fire buttons on top.
+			if (VR_GetFire()          || VR_ActionHeld(VR_ACT_PRIMARY_FIRE))   flags |= _left_trigger_state;
+			if (VR_GetSecondaryFire() || VR_ActionHeld(VR_ACT_SECONDARY_FIRE)) flags |= _right_trigger_state;
+			// Held (continuous) mapped actions. Action/Use and Run come purely from the button map now
+			// (A -> Action/Use, a stick-click -> Run by default). Run is injected as the raw
+			// _run_dont_walk flag BEFORE the run/walk-toggle post-processing below, so it honors the
+			// _inputmod_run_key_toggle pref (toggle vs hold) exactly like the keyboard run key.
+			if (VR_ActionHeld(VR_ACT_ACTION_USE)) flags |= _action_trigger_state;
+			if (VR_ActionHeld(VR_ACT_RUN))        flags |= _run_dont_walk;
+			// One-shot (edge-triggered) mapped actions -- weapon cycle, map toggle, recenter. Edge is
+			// detected here (tick-aligned) off VR_ActionHeld so a press = one event regardless of which
+			// button (or how many) is bound to it. In-game only: build_terminal_action_flags overwrites
+			// `flags` when in a terminal, and recenter is a view op, not a flag.
 			{
-				static bool mapPrev = false;
-				const bool mapBtn = VR_GetTurnStickClick();
-				if (mapBtn && !mapPrev) flags |= _toggle_map;
-				mapPrev = mapBtn;
+				static bool prevNext = false, prevPrev = false, prevMap = false, prevRc = false;
+				static bool prevInvP = false, prevInvN = false;
+				const bool aNext = VR_ActionHeld(VR_ACT_NEXT_WEAPON);
+				const bool aPrev = VR_ActionHeld(VR_ACT_PREV_WEAPON);
+				const bool aMap  = VR_ActionHeld(VR_ACT_TOGGLE_MAP);
+				const bool aRc   = VR_ActionHeld(VR_ACT_RECENTER);
+				const bool aInvP = VR_ActionHeld(VR_ACT_INVENTORY_PREV);
+				const bool aInvN = VR_ActionHeld(VR_ACT_INVENTORY_NEXT);
+				if (aNext && !prevNext) flags |= _cycle_weapons_forward;
+				if (aPrev && !prevPrev) flags |= _cycle_weapons_backward;
+				if (aMap  && !prevMap)  flags |= _toggle_map;
+				if (aRc   && !prevRc) {
+					// Recenter the view: make the current head yaw the neutral forward again (keeps the
+					// player facing the same in-game direction) and re-zero the lean/position origin. The
+					// yaw request is consumed a few lines below by VR_TakeYawRecenter in the same tick.
+					VR_RequestYawRecenter(local_player->facing);
+					VR_RecenterHead();
+				}
+				// Inventory scroll is a local UI action (not an action_flag), same as the keyboard
+				// inventory-left/right keys in shell.cpp -- call it directly on the button edge.
+				if (aInvP && !prevInvP && player_controlling_game()) scroll_inventory(-1);
+				if (aInvN && !prevInvN && player_controlling_game()) scroll_inventory(1);
+				prevNext = aNext; prevPrev = aPrev; prevMap = aMap; prevRc = aRc;
+				prevInvP = aInvP; prevInvN = aInvN;
 			}
-			// X / Y -> previous / next weapon (in-game only; build_terminal_action_flags overwrites
-			// `flags` when in a terminal). Edge-triggered so a press = one switch.
-			{
-				static bool xPrev = false, yPrev = false;
-				const bool xb = VR_GetButtonX(), yb = VR_GetButtonY();
-				if (xb && !xPrev) flags |= _cycle_weapons_backward;   // X = previous weapon
-				if (yb && !yPrev) flags |= _cycle_weapons_forward;    // Y = next weapon
-				xPrev = xb; yPrev = yb;
-			}
-			// (terminal navigation is handled after build_terminal_action_flags below, since that
-			// call overwrites `flags` when in a terminal)
 		}
 #endif
 		

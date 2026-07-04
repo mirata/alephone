@@ -488,6 +488,14 @@ namespace {
 		/* teleportDistortion */ 1,   // horizontal-stretch/vertical-compress warp on teleport (may cause nausea)
 		/* showLaserSight   */ 0,
 		/* showAimGizmos    */ 0,     // controller aim diagnostic gizmos (off by default)
+		/* buttonAction     */ {      // default button map (matches the old hardcoded stopgap)
+			VR_ACT_ACTION_USE,       //   A          -> Action / Use
+			VR_ACT_NONE,             //   B          -> unbound (free for the user to assign)
+			VR_ACT_PREV_WEAPON,      //   X          -> Previous Weapon
+			VR_ACT_NEXT_WEAPON,      //   Y          -> Next Weapon
+			VR_ACT_RUN,              //   Move-click -> Run (toggle)
+			VR_ACT_TOGGLE_MAP,       //   Turn-click -> Toggle Map
+		},
 	};
 
 	// Locomotion yaw offset (snap/smooth turn), in Marathon angle units (512 = full circle).
@@ -1236,6 +1244,25 @@ extern "C" bool VR_GetTurnStickClick(void)
 	const int offIdx = 1 - domIdx;
 	const int turnIdx = s_settings.switchSticks ? domIdx : offIdx;   // opposite of moveIdx
 	return s_stickClick[turnIdx];
+}
+
+// True while any bindable button mapped to `action` is held. Buttons are indexed by VR_BTN_*; the
+// two stick-clicks are role-based (follow handedness) via the accessors above. Multiple buttons can
+// share an action -- the states are OR'd.
+extern "C" bool VR_ActionHeld(int action)
+{
+	if (action <= VR_ACT_NONE || action >= VR_ACT_COUNT) return false;
+	const bool btn[VR_BTN_COUNT] = {
+		s_action,                 // VR_BTN_A
+		s_bBtn,                   // VR_BTN_B
+		s_xBtn,                   // VR_BTN_X
+		s_yBtn,                   // VR_BTN_Y
+		VR_GetMoveStickClick(),   // VR_BTN_MOVE_CLICK
+		VR_GetTurnStickClick(),   // VR_BTN_TURN_CLICK
+	};
+	for (int i = 0; i < VR_BTN_COUNT; ++i)
+		if (s_settings.buttonAction[i] == action && btn[i]) return true;
+	return false;
 }
 
 namespace {

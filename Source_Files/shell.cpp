@@ -577,6 +577,9 @@ void initialize_application(void)
 	// Initialize everything
 	mytm_initialize();
 //	initialize_fonts();
+#if defined(__ANDROID__)
+	vr_force_optimal_sound();   // Quest audio: stereo + 3D + HRTF, before the sound engine reads prefs
+#endif
 	SoundManager::instance()->Initialize(*sound_preferences);
 	initialize_marathon_music_handler();
 	initialize_keyboard_controller();

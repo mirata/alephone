@@ -37,6 +37,7 @@ extern "C" bool VR_GetButtonX(void)            { return false; }
 extern "C" bool VR_GetButtonY(void)            { return false; }
 extern "C" bool VR_GetMoveStickClick(void)     { return false; }
 extern "C" bool VR_GetTurnStickClick(void)     { return false; }
+extern "C" bool VR_ActionHeld(int)             { return false; }
 extern "C" void VR_SetMapActive(bool, bool)    {}
 extern "C" unsigned VR_MapLayerFramebuffer(void) { return 0; }
 extern "C" int  VR_MapLayerWidth(void)         { return 0; }

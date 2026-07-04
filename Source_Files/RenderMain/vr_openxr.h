@@ -19,6 +19,37 @@ bool VR_InitOpenXR(void);
 // True once VR_InitOpenXR has succeeded (i.e. we are running as a VR app).
 bool VR_IsActive(void);
 
+// ---- Controller button remapping (VR) ----
+// The bindable physical inputs. Triggers/grips/stick-directions stay committed to fire/aim/locomotion;
+// the left menu (hamburger) button is reserved for Quit and is NOT remappable. The two stick-clicks are
+// role-based (they follow handedness / switch-sticks) rather than physical L3/R3, so a lefty's move-stick
+// click stays on their move stick. Order is stable -- persisted by index in buttonAction[].
+enum {
+	VR_BTN_A = 0,          // right controller A
+	VR_BTN_B,              // right controller B
+	VR_BTN_X,              // left controller X
+	VR_BTN_Y,              // left controller Y
+	VR_BTN_MOVE_CLICK,     // click of the thumbstick you MOVE with (follows handedness/switch-sticks)
+	VR_BTN_TURN_CLICK,     // click of the thumbstick you TURN with (the other stick)
+	VR_BTN_COUNT
+};
+// The in-game action a button can be bound to. Values are the menu order and are PERSISTED by number
+// (keep stable; append new actions at the end). VR_ACT_NONE = unbound.
+enum {
+	VR_ACT_NONE = 0,
+	VR_ACT_PRIMARY_FIRE,
+	VR_ACT_SECONDARY_FIRE,
+	VR_ACT_ACTION_USE,
+	VR_ACT_NEXT_WEAPON,
+	VR_ACT_PREV_WEAPON,
+	VR_ACT_RUN,
+	VR_ACT_TOGGLE_MAP,
+	VR_ACT_RECENTER,
+	VR_ACT_INVENTORY_PREV,   // scroll the inventory panel back one item
+	VR_ACT_INVENTORY_NEXT,   // scroll the inventory panel forward one item
+	VR_ACT_COUNT
+};
+
 // ---- Tunable VR comfort/scale settings (the VR preferences menu binds to this) ----
 // One global, sane defaults at startup. Centralises the knobs scattered across the render seam so a
 // prefs dialog can drive them without touching the renderer. Modeled on QuestZDoom's VR cvars.
@@ -50,6 +81,7 @@ typedef struct {
 	                        //     aim vector) in world space. CODE-ONLY debug flag: no preferences UI and
 	                        //     not persisted -- flip the default in vr_openxr.cpp s_settings to enable.
 	                        //     default 0 (off)
+	int   buttonAction[VR_BTN_COUNT]; // in-game action (VR_ACT_*) bound to each bindable button (VR_BTN_*)
 } vr_settings_t;
 
 vr_settings_t* VR_Settings(void);
@@ -142,6 +174,11 @@ bool VR_GetButtonX(void);              // X button alone (in-game: previous weap
 bool VR_GetButtonY(void);              // Y button alone (in-game: next weapon)
 bool VR_GetMoveStickClick(void);       // press of the move thumbstick (in-game: run, honors toggle pref)
 bool VR_GetTurnStickClick(void);       // press of the turn thumbstick -- the OPPOSITE hand from move (in-game: toggle overhead map)
+
+// True while ANY bindable button currently mapped to `action` (a VR_ACT_* value) is held down. ORs all
+// buttons bound to the same action. The in-game input builder uses this; edge detection for one-shot
+// actions (weapon cycle / map / recenter) is done tick-side by the caller.
+bool VR_ActionHeld(int action);
 
 // Increment 1: render one head-tracked stereo test frame (a colored room) to the headset and
 // submit it. Drives the OpenXR session lifecycle internally. Returns true if a VR frame was

@@ -183,7 +183,11 @@ static void plugins_dialog(void *arg);
 static void keyboard_dialog(void *arg);
 //static void texture_options_dialog(void *arg);
 #if defined(__ANDROID__)
-static void vr_dialog(void *arg);
+static void vr_dialog(void *arg);           // "VR" button: comfort / panel / HUD / world / brightness
+static void vr_controls_dialog(void *arg);  // replaces the PC CONTROLS screen in VR
+static void vr_graphics_dialog(void *arg);  // replaces the PC GRAPHICS screen in VR (HUD + rendering only)
+static void vr_sound_dialog(void *arg);     // replaces the PC SOUND screen in VR (volumes; rest forced optimal)
+void vr_force_optimal_sound(void);          // pin Quest-optimal audio (stereo + 3D + HRTF), called at load
 #endif
 
 /*
@@ -1088,6 +1092,19 @@ static const float vr_eye_height_values[] = { 1.4f, 1.5f, 1.6f, 1.7f, 1.8f };
 static const char *vr_brightness_labels[] = { "50%", "60%", "70%", "80%", "90%", "100%", NULL };
 static const float vr_brightness_values[] = { 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f };
 
+// Controller button remapping. The label at index N is the action whose VR_ACT_* value == N, so a
+// w_select's selection index IS the stored action value (no lookup needed). Order MUST match the
+// VR_ACT_* enum in vr_openxr.h.
+static const char *vr_action_labels[] = {
+	"None", "Primary Fire", "Secondary Fire", "Action / Use",
+	"Next Weapon", "Prev Weapon", "Run", "Toggle Map", "Recenter View",
+	"Prev Item", "Next Item", NULL
+};
+// The six bindable buttons, in VR_BTN_* order. The menu label per button.
+static const char *vr_button_labels[] = {
+	"A Button", "B Button", "X Button", "Y Button", "Move-Stick Click", "Turn-Stick Click"
+};
+
 // Find the array index whose value is closest to cur (the settings are stored as raw floats but the
 // menu offers discrete steps).
 static int vr_closest_index(const float* values, int count, float cur)
@@ -1310,6 +1327,9 @@ extern void ResetAllMMLValues();
 
 static void graphics_dialog(void *arg)
 {
+#if defined(__ANDROID__)
+	if (VR_IsActive()) { vr_graphics_dialog(arg); return; }
+#endif
 	dialog *parent = (dialog *)arg;
 
 	// Create dialog
@@ -1619,6 +1639,89 @@ static void graphics_dialog(void *arg)
  *  ACCEPT and persists via write_preferences() (the Quest process is killed often, so persistence
  *  matters). Reached from the top-level PREFERENCES dialog via the VR button.
  */
+// VR CONTROLS -- replaces the PC keyboard/controls screen in VR (the CONTROLS button routes here). Holds
+// handedness, thumbstick roles, turning, aim calibration, laser sight, and the controller button map.
+// Menu navigation (A/X advance, B/Y back, trigger click) stays hardwired regardless of the map, and the
+// left menu (hamburger) button is always Quit -- so you can never bind away your ability to operate menus.
+static void vr_controls_dialog(void *arg)
+{
+	(void)arg;
+	vr_settings_t *vr = VR_Settings();
+
+	dialog d;
+	vertical_placer *placer = new vertical_placer;
+	placer->dual_add(new w_title("VR CONTROLS"), d);
+	placer->add(new w_spacer(), true);
+
+	table_placer *table = new table_placer(2, get_theme_space(ITEM_WIDGET), true);
+	table->col_flags(0, placeable::kAlignRight);
+	table->col_flags(1, placeable::kAlignLeft);
+
+	w_select *hand_w = new w_select(vr->dominantHand ? 1 : 0, vr_hand_labels);
+	table->dual_add(hand_w->label("Handedness"), d);
+	table->dual_add(hand_w, d);
+
+	w_toggle *switch_sticks_w = new w_toggle(vr->switchSticks != 0);
+	table->dual_add(switch_sticks_w->label("Switch Thumbsticks"), d);
+	table->dual_add(switch_sticks_w, d);
+
+	w_select *turn_style_w = new w_select(vr->snapTurn ? 1 : 0, vr_turn_style_labels);
+	table->dual_add(turn_style_w->label("Turning"), d);
+	table->dual_add(turn_style_w, d);
+
+	w_select *turn_amount_w = new w_select(
+		vr_closest_index(vr_turn_amount_values, 5, vr->turnDegrees), vr_turn_amount_labels);
+	table->dual_add(turn_amount_w->label("Turn Amount"), d);
+	table->dual_add(turn_amount_w, d);
+
+	w_select *aim_pitch_w = new w_select(
+		vr_closest_index(vr_aim_pitch_values, 11, vr->aimPitchAdjust), vr_aim_pitch_labels);
+	table->dual_add(aim_pitch_w->label("Aim Pitch"), d);
+	table->dual_add(aim_pitch_w, d);
+
+	w_toggle *laser_sight_w = new w_toggle(vr->showLaserSight != 0);
+	table->dual_add(laser_sight_w->label("Laser Sight"), d);
+	table->dual_add(laser_sight_w, d);
+
+	table->add_row(new w_spacer(), true);
+	table->dual_add_row(new w_static_text("Button Mapping"), d);
+
+	w_select *btn_w[VR_BTN_COUNT];
+	for (int i = 0; i < VR_BTN_COUNT; ++i) {
+		int cur = vr->buttonAction[i];
+		if (cur < 0 || cur >= VR_ACT_COUNT) cur = VR_ACT_NONE;
+		btn_w[i] = new w_select(cur, vr_action_labels);
+		table->dual_add(btn_w[i]->label(vr_button_labels[i]), d);
+		table->dual_add(btn_w[i], d);
+	}
+
+	placer->add(table, true);
+	placer->add(new w_spacer(), true);
+	placer->dual_add(new w_static_text("Triggers = fire/aim, grips = two-handed, sticks = move/turn."), d);
+	placer->dual_add(new w_static_text("The left menu button always opens Quit."), d);
+	placer->add(new w_spacer(), true);
+
+	horizontal_placer *button_placer = new horizontal_placer;
+	button_placer->dual_add(new w_button("ACCEPT", dialog_ok, &d), d);
+	button_placer->dual_add(new w_button("CANCEL", dialog_cancel, &d), d);
+	placer->add(button_placer, true);
+
+	d.set_widget_placer(placer);
+	clear_screen();
+
+	if (d.run() == 0) {	// Accepted (button selection index IS the VR_ACT_* value)
+		vr->dominantHand   = hand_w->get_selection();
+		vr->switchSticks   = switch_sticks_w->get_selection() ? 1 : 0;
+		vr->snapTurn       = turn_style_w->get_selection();
+		vr->turnDegrees    = vr_turn_amount_values[turn_amount_w->get_selection()];
+		vr->aimPitchAdjust = vr_aim_pitch_values[aim_pitch_w->get_selection()];
+		vr->showLaserSight = laser_sight_w->get_selection() ? 1 : 0;
+		for (int i = 0; i < VR_BTN_COUNT; ++i)
+			vr->buttonAction[i] = btn_w[i]->get_selection();
+		write_preferences();
+	}
+}
+
 static void vr_dialog(void *arg)
 {
 	vr_settings_t *vr = VR_Settings();
@@ -1632,29 +1735,7 @@ static void vr_dialog(void *arg)
 	table->col_flags(0, placeable::kAlignRight);
 	table->col_flags(1, placeable::kAlignLeft);
 
-	// Controls
-	table->dual_add_row(new w_static_text("Controls"), d);
-
-	w_select *hand_w = new w_select(vr->dominantHand ? 1 : 0, vr_hand_labels);
-	table->dual_add(hand_w->label("Handedness"), d);
-	table->dual_add(hand_w, d);
-
-	w_toggle *switch_sticks_w = new w_toggle(vr->switchSticks != 0);
-	table->dual_add(switch_sticks_w->label("Switch Thumbsticks"), d);
-	table->dual_add(switch_sticks_w, d);
-
-	w_select *aim_pitch_w = new w_select(
-		vr_closest_index(vr_aim_pitch_values, 11, vr->aimPitchAdjust), vr_aim_pitch_labels);
-	table->dual_add(aim_pitch_w->label("Aim Pitch"), d);
-	table->dual_add(aim_pitch_w, d);
-
-	w_toggle *laser_sight_w = new w_toggle(vr->showLaserSight != 0);
-	table->dual_add(laser_sight_w->label("Laser Sight"), d);
-	table->dual_add(laser_sight_w, d);
-
-	table->add_row(new w_spacer(), true);
-
-	// Comfort
+	// Comfort  (input / turning / aim now live under CONTROLS -> VR CONTROLS)
 	table->dual_add_row(new w_static_text("Comfort"), d);
 
 	w_toggle *bob_w = new w_toggle(vr->disableBob != 0);
@@ -1664,15 +1745,6 @@ static void vr_dialog(void *arg)
 	w_toggle *teleport_distortion_w = new w_toggle(vr->teleportDistortion != 0);
 	table->dual_add(teleport_distortion_w->label("Teleport Distortion"), d);
 	table->dual_add(teleport_distortion_w, d);
-
-	w_select *turn_style_w = new w_select(vr->snapTurn ? 1 : 0, vr_turn_style_labels);
-	table->dual_add(turn_style_w->label("Turning"), d);
-	table->dual_add(turn_style_w, d);
-
-	w_select *turn_amount_w = new w_select(
-		vr_closest_index(vr_turn_amount_values, 5, vr->turnDegrees), vr_turn_amount_labels);
-	table->dual_add(turn_amount_w->label("Turn Amount"), d);
-	table->dual_add(turn_amount_w, d);
 
 	table->add_row(new w_spacer(), true);
 
@@ -1746,14 +1818,8 @@ static void vr_dialog(void *arg)
 	clear_screen();
 
 	if (d.run() == 0) {	// Accepted
-		vr->dominantHand    = hand_w->get_selection();
-		vr->switchSticks    = switch_sticks_w->get_selection() ? 1 : 0;
-		vr->aimPitchAdjust  = vr_aim_pitch_values[aim_pitch_w->get_selection()];
-		vr->showLaserSight  = laser_sight_w->get_selection() ? 1 : 0;
 		vr->disableBob           = bob_w->get_selection() ? 1 : 0;
 		vr->teleportDistortion   = teleport_distortion_w->get_selection() ? 1 : 0;
-		vr->snapTurn             = turn_style_w->get_selection();
-		vr->turnDegrees     = vr_turn_amount_values[turn_amount_w->get_selection()];
 		vr->screenDistanceM = vr_screen_distance_values[screen_dist_w->get_selection()];
 		vr->screenHeightM   = vr_screen_height_values[screen_height_w->get_selection()];
 		vr->hudDistanceM    = vr_hud_distance_values[hud_dist_w->get_selection()];
@@ -1764,6 +1830,122 @@ static void vr_dialog(void *arg)
 		vr->brightness      = vr_brightness_values[brightness_w->get_selection()];
 
 		write_preferences();
+	}
+}
+
+// The stock rendering-options demux reads the renderer from a widget tagged iRENDERING_SYSTEM, which the
+// VR graphics dialog doesn't have (renderer is always OpenGL in VR) -> it would assert/crash. Go straight
+// to the OpenGL options dialog instead.
+static void vr_rendering_options(void* arg)
+{
+	(void)arg;
+	OpenGLDialog::Create(_opengl_acceleration)->OpenGLPrefsByRunning();
+}
+
+// VR GRAPHICS -- replaces the PC graphics screen in VR (the GRAPHICS button routes here). Only the
+// settings that mean something in a headset: the HUD (which plugin, size, terminal size, overlay map)
+// and the rendering-quality sub-dialog. Display mode, screen size, FOV, framerate target, vertical-view
+// limit, gamma and view-bobbing are all fixed by the VR pipeline, so they're intentionally omitted.
+static void vr_graphics_dialog(void *arg)
+{
+	dialog *parent = (dialog *)arg;
+	dialog d;
+	vertical_placer *placer = new vertical_placer;
+	placer->dual_add(new w_title("VR GRAPHICS"), d);
+	placer->add(new w_spacer(), true);
+
+	table_placer *table = new table_placer(2, get_theme_space(ITEM_WIDGET), true);
+	table->col_flags(0, placeable::kAlignRight);
+	table->col_flags(1, placeable::kAlignLeft);
+
+	table->dual_add_row(new w_static_text("Heads-Up Display"), d);
+
+	w_enabling_toggle *hud_w = new w_enabling_toggle(graphics_preferences->screen_mode.hud);
+	table->dual_add(hud_w->label("Show HUD"), d);
+	table->dual_add(hud_w, d);
+
+	// HUD plugin discovery + accept mirror graphics_dialog exactly (kept in sync intentionally).
+	std::vector<Plugin*> hud_plugins;
+	auto hud_plugin_index = -1;
+	for (auto& plugin : *Plugins::instance()) {
+		if (plugin.hud_lua.size() && plugin.compatible() && plugin.allowed()) {
+			hud_plugins.push_back(&plugin);
+			if (plugin.enabled) hud_plugin_index = hud_plugins.size() - 1;
+		}
+	}
+	std::vector<std::string> hud_plugin_labels;
+	if (!shapes_file_is_m1()) {
+		++hud_plugin_index;
+		hud_plugin_labels.push_back("Classic (Built-in)");
+	}
+	for (auto hud_plugin : hud_plugins) hud_plugin_labels.push_back(hud_plugin->name);
+
+	w_select_popup *hud_plugin_w = new w_select_popup();
+	hud_plugin_w->set_labels(hud_plugin_labels);
+	hud_plugin_w->set_selection(hud_plugin_index >= 0 ? hud_plugin_index : 0);
+	table->dual_add(hud_plugin_w->label("HUD Plugin"), d);
+	table->dual_add(hud_plugin_w, d);
+
+	w_select_popup *hud_scale_w = new w_select_popup();
+	hud_scale_w->set_labels(build_stringvector_from_cstring_array(hud_scale_labels));
+	hud_scale_w->set_selection(graphics_preferences->screen_mode.hud_scale_level);
+	table->dual_add(hud_scale_w->label("HUD Size"), d);
+	table->dual_add(hud_scale_w, d);
+	hud_w->add_dependent_widget(hud_scale_w);
+
+	w_select_popup *term_scale_w = new w_select_popup();
+	term_scale_w->set_labels(build_stringvector_from_cstring_array(term_scale_labels));
+	term_scale_w->set_selection(graphics_preferences->screen_mode.term_scale_level);
+	table->dual_add(term_scale_w->label("Terminal Size"), d);
+	table->dual_add(term_scale_w, d);
+
+	w_toggle *map_w = new w_toggle(graphics_preferences->screen_mode.translucent_map);
+	table->dual_add(map_w->label("Overlay Map"), d);
+	table->dual_add(map_w, d);
+
+	placer->add(table, true);
+	placer->add(new w_spacer(), true);
+	placer->dual_add(new w_button("RENDERING OPTIONS", vr_rendering_options, &d), d);
+	placer->add(new w_spacer(), true);
+	placer->dual_add(new w_static_text("Display mode, size, FOV, framerate and bobbing are fixed for VR."), d);
+	placer->add(new w_spacer(), true);
+
+	horizontal_placer *button_placer = new horizontal_placer;
+	button_placer->dual_add(new w_button("ACCEPT", dialog_ok, &d), d);
+	button_placer->dual_add(new w_button("CANCEL", dialog_cancel, &d), d);
+	placer->add(button_placer, true);
+
+	d.set_widget_placer(placer);
+	clear_screen();
+
+	if (d.run() == 0) {
+		bool changed = false;
+		bool hud = hud_w->get_selection() != 0;
+		if (hud != graphics_preferences->screen_mode.hud) { graphics_preferences->screen_mode.hud = hud; changed = true; }
+
+		auto hud_plugin = static_cast<int>(hud_plugin_w->get_selection());
+		if (hud_plugin != hud_plugin_index) {
+			if (!shapes_file_is_m1()) --hud_plugin;
+			for (auto i = 0; i < hud_plugins.size(); ++i) hud_plugins[i]->enabled = (i == hud_plugin);
+			changed = true;
+		}
+		short hud_scale = static_cast<short>(hud_scale_w->get_selection());
+		if (hud_scale != graphics_preferences->screen_mode.hud_scale_level) { graphics_preferences->screen_mode.hud_scale_level = hud_scale; changed = true; }
+		short term_scale = static_cast<short>(term_scale_w->get_selection());
+		if (term_scale != graphics_preferences->screen_mode.term_scale_level) { graphics_preferences->screen_mode.term_scale_level = term_scale; changed = true; }
+		bool translucent_map = map_w->get_selection() != 0;
+		if (translucent_map != graphics_preferences->screen_mode.translucent_map) { graphics_preferences->screen_mode.translucent_map = translucent_map; changed = true; }
+
+		if (changed) {
+			Plugins::instance()->invalidate();
+			write_preferences();
+			ResetAllMMLValues();
+			LoadBaseMMLScripts(true);
+			Plugins::instance()->load_mml(true);
+			change_screen_mode(&graphics_preferences->screen_mode, true);
+			clear_screen(true);
+			if (parent) { parent->layout(); parent->draw(); }
+		}
 	}
 }
 #endif // __ANDROID__
@@ -1808,8 +1990,78 @@ public:
 	}
 };
 
+#if defined(__ANDROID__)
+// Pin the Quest-optimal audio configuration: stereo output with 3D sound + HRTF (Meta's headset/eyewear
+// speakers are stereo and HRTF gives proper spatialisation), plus ambient/more/16-bit for full quality.
+// Called once at startup (before SoundManager::Initialize) and on ACCEPT of the VR sound screen, so the
+// spatial-audio knobs are correct without exposing them. Volume/music are left to the user.
+void vr_force_optimal_sound(void)
+{
+	if (!sound_preferences) return;
+	sound_preferences->channel_type = ChannelType::_stereo;
+	uint16 f = sound_preferences->flags;
+	f |= _3d_sounds_flag | _hrtf_flag | _dynamic_tracking_flag | _ambient_sound_flag | _more_sounds_flag | _16bit_sound_flag;
+	f &= ~_mute_dialogs;
+	sound_preferences->flags = f;
+}
+
+// VR SOUND -- replaces the PC sound screen in VR (the SOUND button routes here). Just the volumes; the
+// channel layout and spatialisation are forced to the Quest optimum by vr_force_optimal_sound().
+static void vr_sound_dialog(void *arg)
+{
+	(void)arg;
+	vr_force_optimal_sound();
+
+	dialog d;
+	vertical_placer *placer = new vertical_placer;
+	placer->dual_add(new w_title("VR SOUND"), d);
+	placer->add(new w_spacer(), true);
+
+	table_placer *table = new table_placer(2, get_theme_space(ITEM_WIDGET), true);
+	table->col_flags(0, placeable::kAlignRight);
+	table->col_flags(1, placeable::kAlignLeft);
+
+	w_volume_slider *volume_w = new w_volume_slider(static_cast<int>(sound_preferences->volume_db / 2 + 20));
+	table->dual_add(volume_w->label("Master Volume"), d);
+	table->dual_add(volume_w, d);
+
+	w_slider *music_volume_w = new w_music_slider(sound_preferences->music_db + 20);
+	table->dual_add(music_volume_w->label("Music Volume"), d);
+	table->dual_add(music_volume_w, d);
+
+	placer->add(table, true);
+	placer->add(new w_spacer(), true);
+	placer->dual_add(new w_static_text("Spatial audio (stereo + 3D + HRTF) is tuned for Quest."), d);
+	placer->add(new w_spacer(), true);
+
+	horizontal_placer *button_placer = new horizontal_placer;
+	button_placer->dual_add(new w_button("ACCEPT", dialog_ok, &d), d);
+	button_placer->dual_add(new w_button("CANCEL", dialog_cancel, &d), d);
+	placer->add(button_placer, true);
+
+	d.set_widget_placer(placer);
+	clear_screen();
+
+	if (d.run() == 0) {
+		float volume_db = (volume_w->get_selection() - 20) * 2;
+		if (volume_db != sound_preferences->volume_db) sound_preferences->volume_db = volume_db;
+		float music_db = music_volume_w->get_selection() - 20;
+		if (music_db != sound_preferences->music_db) sound_preferences->music_db = music_db;
+		vr_force_optimal_sound();  // re-pin in case anything else changed the flags
+		auto slot = Music::instance()->GetSlot(Music::MusicSlot::Intro);
+		bool is_music_playing = slot && slot->Playing();
+		SoundManager::instance()->SetParameters(*sound_preferences);
+		write_preferences();
+		if (is_music_playing) Music::instance()->RestartIntroMusic();
+	}
+}
+#endif // __ANDROID__
+
 static void sound_dialog(void *arg)
 {
+#if defined(__ANDROID__)
+	if (VR_IsActive()) { vr_sound_dialog(arg); return; }
+#endif
 	// Create dialog
 	dialog d;
 	vertical_placer *placer = new vertical_placer;
@@ -2754,6 +3006,9 @@ static void controller_details_dialog(void *arg)
 
 static void controls_dialog(void *arg)
 {
+#if defined(__ANDROID__)
+	if (VR_IsActive()) { vr_controls_dialog(arg); return; }
+#endif
 	// Clear array of key widgets (because w_prefs_key::set_key() scans it)
 	key_w.clear();
 	shell_key_w.clear();
@@ -4333,6 +4588,12 @@ InfoTree vr_preferences_tree()
 	root.put_attr("map_player_up", vr->mapPlayerUp);
 	root.put_attr("teleport_distortion", vr->teleportDistortion);
 	root.put_attr("laser_sight", vr->showLaserSight);
+	root.put_attr("button_a", vr->buttonAction[VR_BTN_A]);
+	root.put_attr("button_b", vr->buttonAction[VR_BTN_B]);
+	root.put_attr("button_x", vr->buttonAction[VR_BTN_X]);
+	root.put_attr("button_y", vr->buttonAction[VR_BTN_Y]);
+	root.put_attr("button_move_click", vr->buttonAction[VR_BTN_MOVE_CLICK]);
+	root.put_attr("button_turn_click", vr->buttonAction[VR_BTN_TURN_CLICK]);
 	return root;
 }
 #endif
@@ -5409,6 +5670,12 @@ void parse_vr_preferences(InfoTree root, std::string version)
 	root.read_attr("map_player_up", vr->mapPlayerUp);
 	root.read_attr("teleport_distortion", vr->teleportDistortion);
 	root.read_attr("laser_sight", vr->showLaserSight);
+	root.read_attr("button_a", vr->buttonAction[VR_BTN_A]);
+	root.read_attr("button_b", vr->buttonAction[VR_BTN_B]);
+	root.read_attr("button_x", vr->buttonAction[VR_BTN_X]);
+	root.read_attr("button_y", vr->buttonAction[VR_BTN_Y]);
+	root.read_attr("button_move_click", vr->buttonAction[VR_BTN_MOVE_CLICK]);
+	root.read_attr("button_turn_click", vr->buttonAction[VR_BTN_TURN_CLICK]);
 }
 #endif
 
