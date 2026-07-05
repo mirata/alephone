@@ -300,7 +300,7 @@ void write_preferences(void);
 
 #if defined(__ANDROID__)
 extern "C" bool VR_IsActive(void);
-void vr_force_optimal_sound(void);   // pin Quest-optimal audio (stereo + 3D + HRTF); call before sound init
+void vr_force_optimal_sound(void);   // pin Quest-optimal audio (stereo + 3D, no HRTF); call before sound init
 #endif
 static inline int16 get_fps_target() {
 #if defined(__ANDROID__)

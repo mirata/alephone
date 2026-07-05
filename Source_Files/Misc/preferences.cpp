@@ -187,7 +187,7 @@ static void vr_dialog(void *arg);           // "VR" button: comfort / panel / HU
 static void vr_controls_dialog(void *arg);  // replaces the PC CONTROLS screen in VR
 static void vr_graphics_dialog(void *arg);  // replaces the PC GRAPHICS screen in VR (HUD + rendering only)
 static void vr_sound_dialog(void *arg);     // replaces the PC SOUND screen in VR (volumes; rest forced optimal)
-void vr_force_optimal_sound(void);          // pin Quest-optimal audio (stereo + 3D + HRTF), called at load
+void vr_force_optimal_sound(void);          // pin Quest-optimal audio (stereo + 3D, no HRTF), called at load
 #endif
 
 /*
@@ -1991,8 +1991,9 @@ public:
 };
 
 #if defined(__ANDROID__)
-// Pin the Quest-optimal audio configuration: stereo output with 3D sound + HRTF (Meta's headset/eyewear
-// speakers are stereo and HRTF gives proper spatialisation), plus ambient/more/16-bit for full quality.
+// Pin the Quest-optimal audio configuration: stereo output with 3D positional sound (Meta's headset/
+// eyewear speakers are stereo), plus ambient/more/16-bit for full quality. HRTF is deliberately OFF --
+// the Quest OpenAL backend does not honour ALC_HRTF_SOFT well and it degraded the mix.
 // Called once at startup (before SoundManager::Initialize) and on ACCEPT of the VR sound screen, so the
 // spatial-audio knobs are correct without exposing them. Volume/music are left to the user.
 void vr_force_optimal_sound(void)
@@ -2000,7 +2001,10 @@ void vr_force_optimal_sound(void)
 	if (!sound_preferences) return;
 	sound_preferences->channel_type = ChannelType::_stereo;
 	uint16 f = sound_preferences->flags;
-	f |= _3d_sounds_flag | _hrtf_flag | _dynamic_tracking_flag | _ambient_sound_flag | _more_sounds_flag | _16bit_sound_flag;
+	// HRTF is intentionally left OFF: the Quest OpenAL backend does not spatialise correctly with
+	// ALC_HRTF_SOFT and it made the mix sound wrong. Stereo + 3D positional audio is the good config.
+	f |= _3d_sounds_flag | _dynamic_tracking_flag | _ambient_sound_flag | _more_sounds_flag | _16bit_sound_flag;
+	f &= ~_hrtf_flag;
 	f &= ~_mute_dialogs;
 	sound_preferences->flags = f;
 }
@@ -2031,7 +2035,7 @@ static void vr_sound_dialog(void *arg)
 
 	placer->add(table, true);
 	placer->add(new w_spacer(), true);
-	placer->dual_add(new w_static_text("Spatial audio (stereo + 3D + HRTF) is tuned for Quest."), d);
+	placer->dual_add(new w_static_text("Spatial audio (stereo + 3D) is tuned for Quest."), d);
 	placer->add(new w_spacer(), true);
 
 	horizontal_placer *button_placer = new horizontal_placer;
