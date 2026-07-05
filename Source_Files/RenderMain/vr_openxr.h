@@ -178,6 +178,10 @@ bool VR_GetSecondaryFire(void);        // left trigger
 // confirm fists are equipped before routing these into the fire flags. Off Android: always false.
 bool VR_GetPrimaryPunch(void);
 bool VR_GetSecondaryPunch(void);
+// True if a velocity punch occurred on that hand within the last ~200 ms (provenance window). Lets the
+// weapon code tell a thrust-started fist shot (suppress the swing animation) from a trigger-started one.
+bool VR_PrimaryPunchRecent(void);
+bool VR_SecondaryPunchRecent(void);
 bool VR_GetAction(void);               // A button (use terminals/switches)
 bool VR_GetAdvance(void);              // A or X: advance terminal / skip cutscene
 bool VR_GetBack(void);                 // Y or B: terminal page back

@@ -637,6 +637,11 @@ namespace {
 	// release so one thrust = one punch.
 	bool        s_punchActive[2] = { false, false };
 	int         s_punchHold[2]   = { 0, 0 };
+	// Provenance window: frames-remaining since a velocity punch was last detected on each hand. Used
+	// to tell whether a fist SHOT was started by a physical thrust (suppress the swing animation) vs the
+	// trigger (keep it). Longer than the fire pulse so it still reads true when the shot's firing state
+	// becomes visible a couple of ticks after the thrust.
+	int         s_punchRecent[2] = { 0, 0 };
 	// Two-handed hold is LATCHED like QuestZDoom: engaged on the off-hand grip rising edge while the
 	// hands are close, released only when the grip is let go -- NOT re-tested against the proximity
 	// threshold every frame (that flickers the aim mode near the boundary).
@@ -982,11 +987,13 @@ extern "C" bool VR_BeginFrame(void)
 				if (VR_GetAimPoseStage(h, ap, af))
 					vf = s_handVel[h][0]*af[0] + s_handVel[h][1]*af[1] + s_handVel[h][2]*af[2];
 				if (!s_punchActive[h]) {
-					if (vf > on) { s_punchActive[h] = true; s_punchHold[h] = 6; }  // ~80ms: spans a 30Hz tick
+					if (vf > on) { s_punchActive[h] = true; s_punchHold[h] = 6; s_punchRecent[h] = 18; }
 				} else {
+					s_punchRecent[h] = 18;   // keep the provenance window fresh for the whole thrust
 					if (s_punchHold[h] > 0) --s_punchHold[h];
 					if (vf < off && s_punchHold[h] == 0) s_punchActive[h] = false;
 				}
+				if (s_punchRecent[h] > 0) --s_punchRecent[h];   // ~200ms window (18 frames)
 			}
 		}
 
@@ -1258,6 +1265,20 @@ extern "C" bool VR_GetSecondaryPunch(void)
 	if (!s_settings.punchWithFists) return false;
 	const int offIdx = s_settings.dominantHand ? 1 : 0;   // off-hand = secondary trigger / second fist
 	return s_punchActive[offIdx];
+}
+// Whether a velocity punch happened on the primary/off hand within the last ~200 ms. Used to tag a
+// fist shot's provenance (thrust vs trigger) at the moment its firing animation begins.
+extern "C" bool VR_PrimaryPunchRecent(void)
+{
+	if (!s_settings.punchWithFists) return false;
+	const int domIdx = s_settings.dominantHand ? 0 : 1;
+	return s_punchRecent[domIdx] > 0;
+}
+extern "C" bool VR_SecondaryPunchRecent(void)
+{
+	if (!s_settings.punchWithFists) return false;
+	const int offIdx = s_settings.dominantHand ? 1 : 0;
+	return s_punchRecent[offIdx] > 0;
 }
 extern "C" bool VR_GetAction(void)             { return s_action; }
 extern "C" bool VR_GetAdvance(void)            { return s_action || s_xBtn; }   // A or X
@@ -2026,6 +2047,8 @@ extern "C" bool VR_GetFire(void)               { return false; }
 extern "C" bool VR_GetSecondaryFire(void)      { return false; }
 extern "C" bool VR_GetPrimaryPunch(void)       { return false; }
 extern "C" bool VR_GetSecondaryPunch(void)     { return false; }
+extern "C" bool VR_PrimaryPunchRecent(void)    { return false; }
+extern "C" bool VR_SecondaryPunchRecent(void)  { return false; }
 extern "C" bool VR_GetAction(void)             { return false; }
 extern "C" bool VR_GetAdvance(void)            { return false; }
 extern "C" bool VR_GetBack(void)               { return false; }

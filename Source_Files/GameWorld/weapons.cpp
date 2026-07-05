@@ -1459,20 +1459,37 @@ bool get_weapon_display_information(
 				}
 
 #if defined(__ANDROID__)
-				// VR velocity-punch: while punching with the fist, keep the drawn model in its IDLE frame.
-				// The player's real forward hand thrust IS the punch animation, so the engine's on-screen
-				// swing (firing_shape + animated frame) would be a redundant double motion. The firing
-				// state machine still runs (spawns the melee hit + haptics); only the displayed frame is
-				// pinned to idle. Applies to the fist's firing/recovering states, not raise/lower (weapon
-				// switch) so switching to/from fists still animates normally.
+				// VR velocity-punch: keep the drawn fist in its IDLE frame ONLY for shots STARTED by a
+				// physical hand thrust -- the real forward motion IS the punch animation, so the engine's
+				// swing (firing_shape + animated frame) would double it. A TRIGGER-fired punch keeps the
+				// normal swing. Provenance is latched per trigger at the firing rising edge (was a velocity
+				// punch recent on that hand?) and held through firing+recovering. Excludes raise/lower so
+				// switching to/from fists still animates. The firing state machine is untouched either way
+				// (the melee hit + haptics still fire); only the displayed frame is pinned.
 				if (type==_weapon_type && VR_IsActive() && VR_Settings()->punchWithFists &&
-					weapon->weapon_type == _weapon_fist &&
-					(weapon->triggers[which_trigger].state == _weapon_firing ||
-					 weapon->triggers[which_trigger].state == _weapon_recovering))
+					weapon->weapon_type == _weapon_fist)
 				{
-					shape_index = definition->idle_shape;
-					frame       = 0;                       // a valid idle frame (idle shape always has >=1)
-					height      = definition->idle_height; // undo the firing kick so it doesn't bob
+					static short s_prevFistState[NUMBER_OF_TRIGGERS] = {};
+					static bool  s_fistPunchShot[NUMBER_OF_TRIGGERS] = {};
+					const short cur = weapon->triggers[which_trigger].state;
+					const bool firingNow = (cur == _weapon_firing || cur == _weapon_recovering);
+					const bool wasFiring = (s_prevFistState[which_trigger] == _weapon_firing ||
+					                        s_prevFistState[which_trigger] == _weapon_recovering);
+					if (!firingNow) {
+						s_fistPunchShot[which_trigger] = false;
+					} else if (!wasFiring) {
+						// Rising edge into firing: tag this shot as thrust-started iff a velocity punch
+						// happened on the matching hand (primary trigger = dominant hand) just now.
+						s_fistPunchShot[which_trigger] = (which_trigger == _primary_weapon)
+							? VR_PrimaryPunchRecent() : VR_SecondaryPunchRecent();
+					}
+					s_prevFistState[which_trigger] = cur;
+
+					if (firingNow && s_fistPunchShot[which_trigger]) {
+						shape_index = definition->idle_shape;
+						frame       = 0;                       // valid idle frame (idle shape has >=1)
+						height      = definition->idle_height; // undo the firing kick so it doesn't bob
+					}
 				}
 #endif
 
