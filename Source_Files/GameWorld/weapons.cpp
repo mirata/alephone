@@ -995,8 +995,18 @@ short get_player_desired_weapon(
 	short player_index)
 {
 	struct player_weapon_data *player_weapons= get_player_weapon_data(player_index);
-	
+
 	return player_weapons->desired_weapon;
+}
+
+// Is the player currently holding the fist? Used by the VR input code to gate velocity-driven
+// punching (a hand thrust only fires when fists are actually equipped, not for other weapons).
+bool player_weapon_is_fist(
+	short player_index)
+{
+	struct player_weapon_data *player_weapons= get_player_weapon_data(player_index);
+	if (!player_weapons) return false;
+	return player_weapons->current_weapon == _weapon_fist;
 }
 
 short get_player_weapon_ammo_count(
@@ -1443,13 +1453,31 @@ bool get_weapon_display_information(
 				{
 					/* Go to the next frame for automatics.. */
 					update_automatic_sequence(current_player_index, which_trigger);
-				
+
 					// Also for idle weapons
 					UpdateIdleAnimation(current_player_index, which_trigger);
 				}
-				
+
+#if defined(__ANDROID__)
+				// VR velocity-punch: while punching with the fist, keep the drawn model in its IDLE frame.
+				// The player's real forward hand thrust IS the punch animation, so the engine's on-screen
+				// swing (firing_shape + animated frame) would be a redundant double motion. The firing
+				// state machine still runs (spawns the melee hit + haptics); only the displayed frame is
+				// pinned to idle. Applies to the fist's firing/recovering states, not raise/lower (weapon
+				// switch) so switching to/from fists still animates normally.
+				if (type==_weapon_type && VR_IsActive() && VR_Settings()->punchWithFists &&
+					weapon->weapon_type == _weapon_fist &&
+					(weapon->triggers[which_trigger].state == _weapon_firing ||
+					 weapon->triggers[which_trigger].state == _weapon_recovering))
+				{
+					shape_index = definition->idle_shape;
+					frame       = 0;                       // a valid idle frame (idle shape always has >=1)
+					height      = definition->idle_height; // undo the firing kick so it doesn't bob
+				}
+#endif
+
 				/* setup the positioning information */
-				high_level_data= get_shape_animation_data(BUILD_DESCRIPTOR(definition->collection, 
+				high_level_data= get_shape_animation_data(BUILD_DESCRIPTOR(definition->collection,
 					shape_index));
 				
 				// LP: bug out if there is no weapon sequence to render
@@ -2050,8 +2078,11 @@ static void calculate_weapon_origin_and_vector(
 	if (VR_IsActive() && player_index == local_player_index)
 	{
 		float dir[3];
+		// Off-hand aim for the second trigger of a dual-wield: pistols (_twofisted_pistol_class) AND
+		// fists (_melee_class, both triggers = the two hands) so each fist punches along its own hand.
 		const bool got = (which_trigger == _secondary_weapon
-				&& definition->weapon_class == _twofisted_pistol_class)
+				&& (definition->weapon_class == _twofisted_pistol_class
+				 || definition->weapon_class == _melee_class))
 			? VR_GetSecondaryWeaponAim(dir)
 			: VR_GetWeaponAim(dir);
 		if (got)

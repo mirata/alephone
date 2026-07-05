@@ -1071,6 +1071,11 @@ static const char *vr_aim_pitch_labels[] = {
 };
 static const float vr_aim_pitch_values[] = { 40.f, 30.f, 20.f, 10.f, 0.f, -10.f, -20.f, -25.f, -30.f, -40.f, -50.f };
 
+// Fist punch strength: forward controller speed (m/s) needed to trigger a velocity-driven punch.
+// Lower = a lighter jab fires; higher = needs a committed thrust. Labels read as how hard you must punch.
+static const char *vr_punch_strength_labels[] = { "Low", "Medium", "High", NULL };
+static const float vr_punch_strength_values[] = { 1.1f, 1.6f, 2.4f };
+
 static const char *vr_screen_distance_labels[] = { "1.5 m", "2.0 m", "2.5 m", "3.0 m", "4.0 m", NULL };
 static const float vr_screen_distance_values[] = { 1.5f, 2.0f, 2.5f, 3.0f, 4.0f };
 
@@ -1683,6 +1688,11 @@ static void vr_controls_dialog(void *arg)
 	table->dual_add(laser_sight_w->label("Laser Sight"), d);
 	table->dual_add(laser_sight_w, d);
 
+	w_select *punch_strength_w = new w_select(
+		vr_closest_index(vr_punch_strength_values, 3, vr->punchSpeed), vr_punch_strength_labels);
+	table->dual_add(punch_strength_w->label("Punch Strength"), d);
+	table->dual_add(punch_strength_w, d);
+
 	table->add_row(new w_spacer(), true);
 	table->dual_add_row(new w_static_text("Button Mapping"), d);
 
@@ -1716,6 +1726,7 @@ static void vr_controls_dialog(void *arg)
 		vr->turnDegrees    = vr_turn_amount_values[turn_amount_w->get_selection()];
 		vr->aimPitchAdjust = vr_aim_pitch_values[aim_pitch_w->get_selection()];
 		vr->showLaserSight = laser_sight_w->get_selection() ? 1 : 0;
+		vr->punchSpeed     = vr_punch_strength_values[punch_strength_w->get_selection()];
 		for (int i = 0; i < VR_BTN_COUNT; ++i)
 			vr->buttonAction[i] = btn_w[i]->get_selection();
 		write_preferences();
@@ -4592,6 +4603,7 @@ InfoTree vr_preferences_tree()
 	root.put_attr("map_player_up", vr->mapPlayerUp);
 	root.put_attr("teleport_distortion", vr->teleportDistortion);
 	root.put_attr("laser_sight", vr->showLaserSight);
+	root.put_attr("punch_speed", vr->punchSpeed);
 	root.put_attr("button_a", vr->buttonAction[VR_BTN_A]);
 	root.put_attr("button_b", vr->buttonAction[VR_BTN_B]);
 	root.put_attr("button_x", vr->buttonAction[VR_BTN_X]);
@@ -5674,6 +5686,7 @@ void parse_vr_preferences(InfoTree root, std::string version)
 	root.read_attr("map_player_up", vr->mapPlayerUp);
 	root.read_attr("teleport_distortion", vr->teleportDistortion);
 	root.read_attr("laser_sight", vr->showLaserSight);
+	root.read_attr("punch_speed", vr->punchSpeed);
 	root.read_attr("button_a", vr->buttonAction[VR_BTN_A]);
 	root.read_attr("button_b", vr->buttonAction[VR_BTN_B]);
 	root.read_attr("button_x", vr->buttonAction[VR_BTN_X]);

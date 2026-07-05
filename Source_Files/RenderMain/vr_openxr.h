@@ -82,6 +82,10 @@ typedef struct {
 	                        //     not persisted -- flip the default in vr_openxr.cpp s_settings to enable.
 	                        //     default 0 (off)
 	int   buttonAction[VR_BTN_COUNT]; // in-game action (VR_ACT_*) bound to each bindable button (VR_BTN_*)
+	int   punchWithFists;   // 1 = thrust a fist forward fast to punch (velocity-driven), in addition to the
+	                        //     trigger; each hand punches independently along where it points. default 1
+	float punchSpeed;       // forward controller speed (m/s, measured along the aim direction) that triggers
+	                        //     a fist punch. lower = easier/twitchier; higher = needs a committed thrust
 } vr_settings_t;
 
 vr_settings_t* VR_Settings(void);
@@ -167,6 +171,13 @@ void VR_GetTurn(float* x);             // non-dominant thumbstick X: snap/smooth
 void VR_GetTurnY(float* y);            // non-dominant thumbstick Y: used for map zoom in-game
 bool VR_GetFire(void);                 // right trigger
 bool VR_GetSecondaryFire(void);        // left trigger
+
+// Fist punch (velocity-driven melee): true for the frame(s) a hand is thrust forward faster than
+// VR_Settings()->punchSpeed along where it points. Primary = dominant hand, Secondary = off-hand,
+// so dual fists punch independently. Gated by VR_Settings()->punchWithFists; the caller must also
+// confirm fists are equipped before routing these into the fire flags. Off Android: always false.
+bool VR_GetPrimaryPunch(void);
+bool VR_GetSecondaryPunch(void);
 bool VR_GetAction(void);               // A button (use terminals/switches)
 bool VR_GetAdvance(void);              // A or X: advance terminal / skip cutscene
 bool VR_GetBack(void);                 // Y or B: terminal page back

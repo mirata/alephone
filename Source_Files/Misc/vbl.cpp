@@ -89,6 +89,7 @@ Feb 20, 2002 (Woody Zenfell):
 #include "Logging.h"
 #include "mouse.h"
 #include "player.h"
+#include "weapons.h"
 #include "vr_openxr.h"
 #include "key_definitions.h"
 #include "tags.h"
@@ -1281,6 +1282,14 @@ uint32 parse_keymap(void)
 			// Fire always comes from the triggers; the button map can ADD extra fire buttons on top.
 			if (VR_GetFire()          || VR_ActionHeld(VR_ACT_PRIMARY_FIRE))   flags |= _left_trigger_state;
 			if (VR_GetSecondaryFire() || VR_ActionHeld(VR_ACT_SECONDARY_FIRE)) flags |= _right_trigger_state;
+			// Fist punch: when fists are equipped, thrusting a hand forward fast punches with that hand
+			// (in addition to the trigger). Dominant hand -> primary trigger, off-hand -> secondary, so
+			// dual fists punch independently along where each hand points. Gated to fists so a thrust
+			// while holding another weapon doesn't fire it.
+			if (player_weapon_is_fist(local_player_index)) {
+				if (VR_GetPrimaryPunch())   flags |= _left_trigger_state;
+				if (VR_GetSecondaryPunch()) flags |= _right_trigger_state;
+			}
 			// Held (continuous) mapped actions. Action/Use and Run come purely from the button map now
 			// (A -> Action/Use, a stick-click -> Run by default). Run is injected as the raw
 			// _run_dont_walk flag BEFORE the run/walk-toggle post-processing below, so it honors the

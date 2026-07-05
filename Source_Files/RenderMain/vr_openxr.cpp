@@ -487,7 +487,7 @@ namespace {
 		/* mapPlayerUp     */ 0,      // overhead map rotation: 0=north-up, 1=player-facing-up
 		/* teleportDistortion */ 1,   // horizontal-stretch/vertical-compress warp on teleport (may cause nausea)
 		/* showLaserSight   */ 0,
-		/* showAimGizmos    */ 1,     // controller aim diagnostic gizmos (ON while debugging two-handed aim)
+		/* showAimGizmos    */ 0,     // controller aim diagnostic gizmos (OFF; debug-only, flip to 1 to show)
 		/* buttonAction     */ {      // default button map (matches the old hardcoded stopgap)
 			VR_ACT_ACTION_USE,       //   A          -> Action / Use
 			VR_ACT_NONE,             //   B          -> unbound (free for the user to assign)
@@ -496,6 +496,9 @@ namespace {
 			VR_ACT_RUN,              //   Move-click -> Run (toggle)
 			VR_ACT_TOGGLE_MAP,       //   Turn-click -> Toggle Map
 		},
+		/* punchWithFists   */ 1,      // thrust a fist to punch (in addition to the trigger)
+		/* punchSpeed       */ 1.6f,   // m/s forward controller speed that triggers a punch = "Medium"
+		                            //   punch strength in VR CONTROLS (Low 1.1 / Medium 1.6 / High 2.4)
 	};
 
 	// Locomotion yaw offset (snap/smooth turn), in Marathon angle units (512 = full circle).
@@ -626,6 +629,14 @@ namespace {
 	bool        s_handTracked[2] = { false, false };
 	bool        s_aimTracked[2]  = { false, false };
 	float       s_handSpeed[2]   = { 0.0f, 0.0f };
+	// Per-hand linear velocity VECTOR in stage space (m/s), from XrSpaceVelocity. Feeds the fist-punch
+	// detector, which measures the component along where the controller points (the aim forward).
+	float       s_handVel[2][3]  = { {0,0,0}, {0,0,0} };
+	// Fist-punch latch: active while a thrust is in progress (rising above punchSpeed, held for a few
+	// frames so a 30 Hz action tick catches it, released once the forward speed decays). Re-arms on
+	// release so one thrust = one punch.
+	bool        s_punchActive[2] = { false, false };
+	int         s_punchHold[2]   = { 0, 0 };
 	// Two-handed hold is LATCHED like QuestZDoom: engaged on the off-hand grip rising edge while the
 	// hands are close, released only when the grip is let go -- NOT re-tested against the proximity
 	// threshold every frame (that flickers the aim mode near the boundary).
@@ -917,6 +928,7 @@ extern "C" bool VR_BeginFrame(void)
 			s_handValid[h] = false;
 			s_handTracked[h] = false;
 			s_handSpeed[h] = 0.0f;
+			s_handVel[h][0] = s_handVel[h][1] = s_handVel[h][2] = 0.0f;
 			if (s_handSpace[h] != XR_NULL_HANDLE) {
 				XrSpaceVelocity hv = { XR_TYPE_SPACE_VELOCITY };
 				XrSpaceLocation hl = { XR_TYPE_SPACE_LOCATION };
@@ -931,6 +943,7 @@ extern "C" bool VR_BeginFrame(void)
 					if (hv.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) {
 						const XrVector3f& v = hv.linearVelocity;
 						s_handSpeed[h] = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+						s_handVel[h][0] = v.x; s_handVel[h][1] = v.y; s_handVel[h][2] = v.z;
 					}
 				}
 			}
@@ -953,6 +966,28 @@ extern "C" bool VR_BeginFrame(void)
 				s_twoHandedLatched = false;
 			}
 			s_offGripPrev = offGrip;
+		}
+
+		// Fist-punch detection (velocity-driven melee). For each hand, measure the forward speed =
+		// component of the controller's linear velocity along where it points (the aim forward, which
+		// already includes aimPitchAdjust so a punch fires exactly along the aim ray). A thrust past
+		// punchSpeed latches a punch; hysteresis + a short hold means one thrust = one punch and a slow
+		// wave of the hand doesn't fire. The actual gating on "fists equipped" happens in the input code.
+		{
+			const float on  = s_settings.punchSpeed > 0.1f ? s_settings.punchSpeed : 2.0f;
+			const float off = on * 0.35f;   // release threshold (hysteresis) so decel re-arms the punch
+			for (int h = 0; h < 2; ++h) {
+				float ap[3], af[3];
+				float vf = 0.0f;
+				if (VR_GetAimPoseStage(h, ap, af))
+					vf = s_handVel[h][0]*af[0] + s_handVel[h][1]*af[1] + s_handVel[h][2]*af[2];
+				if (!s_punchActive[h]) {
+					if (vf > on) { s_punchActive[h] = true; s_punchHold[h] = 6; }  // ~80ms: spans a 30Hz tick
+				} else {
+					if (s_punchHold[h] > 0) --s_punchHold[h];
+					if (vf < off && s_punchHold[h] == 0) s_punchActive[h] = false;
+				}
+			}
 		}
 
 		s_frameShouldRender = true;
@@ -1211,6 +1246,18 @@ extern "C" bool VR_GetSecondaryFire(void)
 	// grenades, shotgun double-barrel). Suppressed for pistol/fist where secondary == primary.
 	if (!s_gripAltFireEnabled) return false;
 	return s_grip[domIdx] > 0.5f;
+}
+extern "C" bool VR_GetPrimaryPunch(void)
+{
+	if (!s_settings.punchWithFists) return false;
+	const int domIdx = s_settings.dominantHand ? 0 : 1;   // dominant hand = primary weapon / first fist
+	return s_punchActive[domIdx];
+}
+extern "C" bool VR_GetSecondaryPunch(void)
+{
+	if (!s_settings.punchWithFists) return false;
+	const int offIdx = s_settings.dominantHand ? 1 : 0;   // off-hand = secondary trigger / second fist
+	return s_punchActive[offIdx];
 }
 extern "C" bool VR_GetAction(void)             { return s_action; }
 extern "C" bool VR_GetAdvance(void)            { return s_action || s_xBtn; }   // A or X
@@ -1977,6 +2024,8 @@ extern "C" bool VR_GetRenderCamera(float*, float*, float*) { return false; }
 extern "C" float VR_GetEyeZOffset(void) { return 0.0f; }
 extern "C" bool VR_GetFire(void)               { return false; }
 extern "C" bool VR_GetSecondaryFire(void)      { return false; }
+extern "C" bool VR_GetPrimaryPunch(void)       { return false; }
+extern "C" bool VR_GetSecondaryPunch(void)     { return false; }
 extern "C" bool VR_GetAction(void)             { return false; }
 extern "C" bool VR_GetAdvance(void)            { return false; }
 extern "C" bool VR_GetBack(void)               { return false; }

@@ -197,6 +197,7 @@ void get_player_weapon_mode_and_type(short player_index, short *shape_weapon_typ
 
 /* For the game window to update properly */
 short get_player_desired_weapon(short player_index);
+bool player_weapon_is_fist(short player_index);
 
 /* This is pinned to the maximum I think I can hold.. */
 short get_player_weapon_ammo_count(short player_index, short which_weapon, short which_trigger);
