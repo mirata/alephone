@@ -1112,6 +1112,18 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 				next = -1;
 			}
 		};
+		// TEMP DIAGNOSTIC: draw a procedural long blue box instead of the weapon model/sprite,
+		// using the identical anchor+basis. If the box glitches on the pistol but not the assault
+		// rifle, the fault is in the transform inputs, not the .md3 asset. Flip to false to restore
+		// normal weapon rendering.
+		static const bool s_vrDebugWeaponBox = false;
+		if (s_vrDebugWeaponBox) {
+			OGL_RenderVRDebugBox(cwx, cwy, cwz_slid, wrx, wup_mdl, wfwd_mdl);
+			if (weapon_is_dual && hand == offHand) offHandRendered = true;
+			vrWeaponIdx++;
+			continue;
+		}
+
 		int pFrame = 0; float pMix = 0.f; int pNext = -1;
 		if (weaponMdl) md3Params(weaponMdl, pFrame, pMix, pNext);
 		bool renderedAs3D = weaponMdl &&

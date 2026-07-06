@@ -3459,6 +3459,73 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
     return true;
 }
 
+// VR DIAGNOSTIC: solid long blue box at the weapon anchor+basis, no model/skin. See header.
+void OGL_RenderVRDebugBox(float cwx, float cwy, float cwz,
+    const float wrx[3], const float wup[3], const float wfwd[3])
+{
+    if (!OGL_IsActive()) return;
+
+    // Local box extents (Marathon world units). Long along forward (barrel); non-square cross
+    // section (narrow in right, taller in up) so orientation — including roll — is unambiguous.
+    const float rHalf = 8.0f;    // right  (±)
+    const float uHalf = 18.0f;   // up     (±)
+    const float fBack = -20.0f;  // forward start (slightly behind the hand)
+    const float fFwd  = 190.0f;  // forward end   (out the "barrel")
+
+    // 8 corners: worldVert = anchor + r*wrx + u*wup + f*wfwd
+    auto corner = [&](float r, float u, float f, float* o) {
+        o[0] = cwx + r*wrx[0] + u*wup[0] + f*wfwd[0];
+        o[1] = cwy + r*wrx[1] + u*wup[1] + f*wfwd[1];
+        o[2] = cwz + r*wrx[2] + u*wup[2] + f*wfwd[2];
+    };
+    float c[8][3];
+    corner(-rHalf, -uHalf, fBack, c[0]); corner( rHalf, -uHalf, fBack, c[1]);
+    corner( rHalf,  uHalf, fBack, c[2]); corner(-rHalf,  uHalf, fBack, c[3]);
+    corner(-rHalf, -uHalf, fFwd,  c[4]); corner( rHalf, -uHalf, fFwd,  c[5]);
+    corner( rHalf,  uHalf, fFwd,  c[6]); corner(-rHalf,  uHalf, fFwd,  c[7]);
+
+    static const int faces[6][4] = {
+        {0,1,2,3}, {4,5,6,7}, // back, front
+        {0,1,5,4}, {2,3,7,6}, // bottom, top
+        {1,2,6,5}, {0,3,7,4}, // right, left
+    };
+    // Two triangles per face → 36 verts. Per-face brightness so faces are distinguishable.
+    static const float faceShade[6] = { 0.55f, 1.0f, 0.65f, 0.85f, 0.75f, 0.70f };
+    float verts[36][3];
+    float cols [36][4];
+    int vi = 0;
+    for (int fI = 0; fI < 6; ++fI) {
+        const int* q = faces[fI];
+        const int tri[6] = { q[0], q[1], q[2], q[0], q[2], q[3] };
+        const float sh = faceShade[fI];
+        for (int k = 0; k < 6; ++k) {
+            verts[vi][0] = c[tri[k]][0]; verts[vi][1] = c[tri[k]][1]; verts[vi][2] = c[tri[k]][2];
+            cols[vi][0] = 0.10f*sh; cols[vi][1] = 0.35f*sh; cols[vi][2] = 1.0f*sh; cols[vi][3] = 1.0f;
+            ++vi;
+        }
+    }
+
+    glUseProgram(0);
+    glDisable(GL_TEXTURE_2D);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisable(GL_DEPTH_TEST);   // always visible, like the weapon sprite
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+
+    glVertexPointer(3, GL_FLOAT, sizeof(verts[0]), verts[0]);
+    glColorPointer(4, GL_FLOAT, sizeof(cols[0]), cols[0]);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+
+    glDisableClientState(GL_COLOR_ARRAY);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glEnable(GL_TEXTURE_2D);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+}
+
 // VR: render a textured quad in Marathon world space (world units, Z-up) using the GL
 // projection + modelview that Rasterizer_Shader::SetView() loaded for the current VR eye.
 // Called after render_tree() / render_vr_aim_debug() while those matrices are still active.

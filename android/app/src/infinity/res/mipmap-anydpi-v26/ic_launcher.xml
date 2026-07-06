@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Placeholder: full-bleed raster launcher icon (overrides the shared adaptive vector
+     for this flavor). Repaint mipmap-*/ic_launcher_img.png in Photoshop; xxxhdpi=192px. -->
+<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
+    android:src="@mipmap/ic_launcher_img" />

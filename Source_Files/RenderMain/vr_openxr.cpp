@@ -826,17 +826,17 @@ namespace {
 	}
 }
 
-// Consistent two-hand positions in stage space (metres, Y-up): grip pose for BOTH hands when both
-// grip poses are valid, else the aim pose for BOTH. Never mixes grip-frame and aim-frame between the
-// two hands -- the grip->aim origin offset (several cm) would otherwise inject a spurious jump into
-// the inter-hand vector whenever one hand's grip pose blinked out. Returns false if either aim pose
-// is untracked. Also reports the inter-hand distance.
+// Two-hand positions in stage space (metres, Y-up): the AIM-pose origins for both hands. This matches
+// QuestZDoom's weaponStabilised input exactly -- QZD locates aimSpace[] and feeds those positions into
+// (off - dom) (OpenXrInput.cpp TBXR_UpdateControllers + VrInputDefault.cpp). We previously used the
+// GRIP pose here, which diverged from the reference and made the inter-hand vector sweep at short
+// separation; the aim pose is what QZD proved stable. Returns false if either aim pose is untracked.
+// Also reports the inter-hand distance.
 static bool twoHandPositions(int domHand, int offHand, float dom[3], float off[3], float* distOut)
 {
 	if (!s_aimValid[domHand] || !s_aimValid[offHand]) return false;
-	const bool useGrip = s_handValid[domHand] && s_handValid[offHand];
-	const XrPosef& dp = useGrip ? s_handStage[domHand] : s_aimStage[domHand];
-	const XrPosef& op = useGrip ? s_handStage[offHand] : s_aimStage[offHand];
+	const XrPosef& dp = s_aimStage[domHand];
+	const XrPosef& op = s_aimStage[offHand];
 	dom[0] = dp.position.x; dom[1] = dp.position.y; dom[2] = dp.position.z;
 	off[0] = op.position.x; off[1] = op.position.y; off[2] = op.position.z;
 	if (distOut) {
@@ -1811,13 +1811,12 @@ extern "C" bool VR_IsTwoHandedActive()
 	return s_aimValid[domHand] && s_aimValid[offHand];
 }
 
-// Two-handed aim = the pure inter-hand vector (off-hand grip - dominant grip), normalized. Nothing
-// else. This is exactly QuestZDoom's weaponStabilised path (VrInputDefault.cpp): the dominant hand is
-// the rear/trigger grip, the off-hand is forward on the barrel, so (off - dom) IS the barrel forward.
-// Full range of motion, no discontinuities. Deliberately NO hemisphere guard (it caused a sudden 180
-// "faces backwards" flip when the dominant controller rotated past perpendicular to the true hand line)
-// and NO separation switch/deadzone. Falls back to the dominant aim forward only when the hand
-// positions are entirely unavailable or exactly coincident.
+// Two-handed aim = the pure inter-hand vector (off-hand - dominant), normalized -- QuestZDoom's
+// weaponStabilised path (VrInputDefault.cpp): dominant hand is the rear/trigger grip, off-hand is
+// forward on the barrel, so (off - dom) IS the barrel forward. Full range, no hemisphere guard (that
+// caused a 180 "faces backwards" flip when the dominant controller rotated past perpendicular) and no
+// separation switch. Positions come from twoHandPositions, which (matching QZD) uses the AIM-pose
+// origins. Falls back to the dominant aim forward only when the hand positions are unavailable.
 extern "C" bool VR_GetTwoHandedFwdStage(float fwd3[3])
 {
 	const int domHand = s_settings.dominantHand ? 0 : 1;

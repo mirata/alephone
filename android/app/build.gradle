@@ -3,6 +3,16 @@ plugins {
     id 'com.android.application'
 }
 
+// Release signing (for Meta Horizon Store / release-channel uploads). Credentials live in the
+// gitignored android/keystore.properties (copy keystore.properties.template and fill it in, and
+// generate the keystore — see that file). When the properties file is absent, release builds are
+// simply left unsigned instead of failing, so debug workflows and fresh checkouts still build.
+def keystorePropsFile = rootProject.file('keystore.properties')
+def keystoreProps = new Properties()
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+
 android {
     namespace 'org.alephone'
     compileSdk 35                          // gradle auto-downloads android-35 if missing
@@ -11,9 +21,13 @@ android {
     defaultConfig {
         applicationId 'org.alephone'
         minSdk 29                // Quest 2/3 (Android 10 / 12L)
-        targetSdk 35
+        targetSdk 34                // Meta Horizon Store caps targetSdkVersion at 34 (compileSdk stays 35)
         versionCode 1
         versionName '0.1-phase0'
+
+        // app_name is provided per-flavor via resValue (below), so every variant has a name.
+        // (It used to live in res/values/strings.xml; moved here to avoid a duplicate-resource
+        //  clash with the flavor resValues.)
 
         ndk {
             abiFilters 'arm64-v8a'   // Quest is arm64 only
@@ -46,8 +60,55 @@ android {
         }
     }
 
+    // ── Product flavors ───────────────────────────────────────────────────────
+    // One engine, multiple shipped apps. `dev` is the generic multi-scenario build
+    // used by deploy.ps1 (unchanged behavior: applicationId org.alephone, no bundled
+    // data — you push a scenario over adb). The three game flavors are separately
+    // branded, store-installable apps that BUNDLE their own base data + scenario
+    // (assembled at build time below) so they run with nothing pushed over adb.
+    flavorDimensions += 'product'
+    productFlavors {
+        dev {
+            dimension 'product'
+            applicationId 'org.alephone'
+            resValue 'string', 'app_name', 'Aleph One'
+        }
+        marathon {
+            dimension 'product'
+            applicationId 'org.alephone.marathon'
+            resValue 'string', 'app_name', 'Marathon'
+        }
+        marathon2 {
+            dimension 'product'
+            applicationId 'org.alephone.marathon2'
+            resValue 'string', 'app_name', 'Marathon 2'
+        }
+        infinity {
+            dimension 'product'
+            applicationId 'org.alephone.infinity'
+            resValue 'string', 'app_name', 'Marathon Infinity'
+        }
+    }
+
+    signingConfigs {
+        release {
+            if (keystorePropsFile.exists()) {
+                storeFile rootProject.file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
     buildTypes {
-        release { minifyEnabled false }
+        release {
+            minifyEnabled false
+            // Sign with the release key when configured; otherwise leave unsigned.
+            if (keystorePropsFile.exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -70,4 +131,50 @@ dependencies {
     // Official Khronos OpenXR loader for Android (current; supports the Horizon OS runtime broker).
     // Replaces the stale bundled libopenxr_loader.so. Provides the loader .so + headers via Prefab.
     implementation 'org.khronos.openxr:openxr_loader_for_android:1.1.60'
+}
+
+// ── Bundle base data + scenario into each game flavor's assets (build time) ──────
+// The branded apps ship their data INSIDE the APK so they run with nothing pushed
+// over adb. We assemble it from the repo's ./data at build time (instead of checking
+// ~50 MB of duplicated data into src/<flavor>/assets) into a generated assets dir.
+// At runtime AlephOneActivity extracts assets/game/** on first launch and points the
+// engine at it via ALEPHONE_DEFAULT_DATA (see AlephOneActivity.java). The `dev` flavor
+// gets NO bundled data, so it behaves exactly as before (adb-pushed external data).
+def repoDataDir = new File(rootDir.parentFile, 'data')   // android/ is under the repo root
+def scenarioForFlavor = [
+        marathon : 'Marathon',
+        marathon2: 'Marathon 2',
+        infinity : 'Marathon Infinity',
+]
+
+scenarioForFlavor.each { flavorName, scenarioName ->
+    def genDir = layout.buildDirectory.dir("generated-assets/${flavorName}")
+
+    def bundleTask = tasks.register("bundle${flavorName.capitalize()}Data", Copy) {
+        into genDir.map { it.dir('game') }
+        duplicatesStrategy = DuplicatesStrategy.INCLUDE   // later 'from' wins (defaults overlay last)
+        // 1. Base Aleph One data (MML, fonts, themes, icons, alephone.xml). Skip the
+        //    Scenarios tree and non-runtime files, mirroring deploy.ps1 -Base's filter.
+        from(repoDataDir) {
+            exclude 'Scenarios'
+            exclude '**/*.txt', '**/*.svg', '**/*.am', 'README'
+        }
+        // 2. The scenario folder's contents, verbatim (Map.*/Shapes.*/Sounds.*/Images.*,
+        //    Plugins/, Scripts/, Music, Physics Models/, Demos, ...). Same as deploy.ps1's
+        //    "copy the folder as-is" rule.
+        from(new File(repoDataDir, "Scenarios/${scenarioName}")) {
+            exclude '.git', '.gitignore', 'Readme.md', 'README.txt'
+        }
+        doFirst {
+            if (!new File(repoDataDir, "Scenarios/${scenarioName}").isDirectory())
+                throw new GradleException("Scenario data not found: data/Scenarios/${scenarioName}")
+        }
+    }
+
+    // Register the generated dir as this flavor's assets root (so game/ -> assets/game/).
+    // Wrapping it in files(...).builtBy(bundleTask) attaches the task as the producer of this
+    // directory, so EVERY consumer (mergeAssets, lintVital, bundle/AAB) auto-depends on it.
+    // Without this, release builds fail Gradle's implicit-dependency validation because
+    // lintVital reads the generated assets but debug never ran lint to expose it.
+    android.sourceSets.getByName(flavorName).assets.srcDir(files(genDir).builtBy(bundleTask))
 }

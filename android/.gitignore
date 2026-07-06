@@ -12,3 +12,8 @@ jni/vcpkg_installed/
 
 # Machine-specific local SDK/NDK paths
 local.properties
+
+# Release signing secrets — NEVER commit these
+keystore.properties
+*.keystore
+*.jks

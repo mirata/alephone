@@ -35,6 +35,9 @@
             android:screenOrientation="landscape"
             android:configChanges="density|keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|uiMode"
             android:exported="true">
+            <!-- Required by Meta VRC (Quest.Input.4): the app handles system overlays / focus loss
+                 itself instead of being paused. Matches our immersive focus handling. -->
+            <meta-data android:name="com.oculus.vr.focusaware" android:value="true" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

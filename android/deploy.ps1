@@ -26,7 +26,10 @@ $ErrorActionPreference = "Stop"
 
 $repo  = Split-Path -Parent $PSScriptRoot          # android/ is directly under the repo root
 $adb   = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
-$apk   = Join-Path $repo "android\app\build\outputs\apk\debug\app-debug.apk"
+# The 'dev' product flavor is the generic multi-scenario build (applicationId org.alephone,
+# no bundled data — you push a scenario over adb below). The marathon/marathon2/infinity flavors
+# are separately branded, self-contained store apps; build those with e.g. :app:assembleMarathon2Debug.
+$apk   = Join-Path $repo "android\app\build\outputs\apk\dev\debug\app-dev-debug.apk"
 $files = "/sdcard/Android/data/org.alephone/files"
 $scenRoot = Join-Path $repo "data\Scenarios"
 
@@ -35,7 +38,7 @@ function Adb { & $adb @args }
 if (-not $SkipBuild) {
     $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
     Push-Location (Join-Path $repo "android")
-    try { .\gradlew.bat :app:assembleDebug } finally { Pop-Location }
+    try { .\gradlew.bat :app:assembleDevDebug } finally { Pop-Location }
 }
 
 Write-Host "Installing $apk"

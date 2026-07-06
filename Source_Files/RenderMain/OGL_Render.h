@@ -105,6 +105,13 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
     bool isStatic = false,
     int md3Frame = 0, float md3Mix = 0.f, int md3NextFrame = -1);
 
+// VR DIAGNOSTIC: draw a solid long blue box at the same anchor+basis a weapon model would use,
+// with NO model/skin loading. Long along wfwd (barrel), narrow×tall cross-section so roll/yaw/pitch
+// are all readable. Used to test whether a per-weapon glitch comes from the model asset or the
+// controller transform inputs. Android-only.
+void OGL_RenderVRDebugBox(float cwx, float cwy, float cwz,
+    const float wrx[3], const float wup[3], const float wfwd[3]);
+
 // Rendering crosshairs
 bool OGL_RenderCrosshairs();
 
