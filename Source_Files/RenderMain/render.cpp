@@ -1316,13 +1316,45 @@ void render_view(
 			// already encodes the per-eye IPD, so the origin must not be pre-shifted.
 			if (VR_IsActive())
 			{
+				// First render_view after a level load: prewarm the texture cache OUTSIDE an OpenXR
+				// frame. The first world render otherwise lazy-uploads every visible sprite/landscape/
+				// model texture (~2 s) INSIDE a begun frame with the eye swapchain acquired, so the
+				// compositor shows the torn "one eye is a flat plane" image for that whole time. Here we
+				// render the scene once into the scratch (screen-layer) FBO with no swapchain/no frame
+				// begun, so a clean loading frame stays up during the (unavoidable, blocking) upload; the
+				// next tick then renders both eyes fast. Skips the normal per-eye submit this tick.
+				if (VR_ConsumeLevelWarmup())
+				{
+					VR_RenderLoadingFrame();   // clean both-eyes frame, held on screen during the warmup
+					objlist_clear(render_flags, RENDER_FLAGS_BUFFER_SIZE);
+					RenderVisTree.view = view;   RenderVisTree.build_render_tree();
+					RenderSortPoly.view = view;  RenderSortPoly.sort_render_tree();
+					RenderPlaceObjs.view = view; RenderPlaceObjs.build_render_object_list();
+					VR_BeginWarmupEye(0);
+					RasPtr->SetView(*view);
+					RasPtr->Begin();
+					RenPtr->render_tree();               // forces all visible world/sprite/landscape uploads
+					render_vr_weapon_sprites_3d(view);   // warm the weapon model textures too
+					RasPtr->End();
+					VR_EndWarmup();
+					VR_RenderLoadingFrame();   // textures warm; next tick draws both eyes fast
+					__android_log_print(ANDROID_LOG_INFO, "A1VR", "loaddiag warmup done");
+				}
+				else {
 				const bool render = VR_BeginFrame();
+				// DIAG (level-load one-eye): log frame render flag + per-eye render ms. Only logs slow
+				// frames (>60 ms) so it's silent during normal play and lights up during the load.
+				static int s_vrDiagFrame = 0;
+				const int  vrDiagFrame = s_vrDiagFrame++;
+				uint64_t   vrFrameT0 = machine_tick_count();
 				if (render)
 				{
 					const world_point3d  base_origin = view->origin;
 					const short          base_poly   = view->origin_polygon_index;
+					uint64_t eyeMs[2] = {0,0};
 					for (int eye = 0; eye < 2; ++eye)
 					{
+						uint64_t eyeT0 = machine_tick_count();
 						// render_flags is a global flat array; the outer build_render_tree call
 						// (above) already set every endpoint/line flag. Without this clear the
 						// per-eye traversal skips all of them and the vis-tree sees nothing.
@@ -1376,10 +1408,23 @@ void render_view(
 						VR_PresentHudEye(eye);
 						VR_PresentMapEye(eye);
 						VR_FinishEye(eye);
+						eyeMs[eye] = machine_tick_count() - eyeT0;
 					}
+					const uint64_t vrFrameMs = machine_tick_count() - vrFrameT0;
+					if (vrFrameMs > 60)
+						__android_log_print(ANDROID_LOG_INFO, "A1VR",
+							"loaddiag frame=%d render=1 eyeL=%llums eyeR=%llums total=%llums",
+							vrDiagFrame, (unsigned long long)eyeMs[0], (unsigned long long)eyeMs[1],
+							(unsigned long long)vrFrameMs);
+				}
+				else
+				{
+					__android_log_print(ANDROID_LOG_INFO, "A1VR",
+						"loaddiag frame=%d render=0 (VR_BeginFrame shouldRender=false)", vrDiagFrame);
 				}
 				VR_SubmitFrame();
 				VR_MarkWorldFramePresented();
+				}
 			}
 			else
 #endif

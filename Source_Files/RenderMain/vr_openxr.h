@@ -201,6 +201,21 @@ bool VR_ActionHeld(int action);
 // Used as the per-frame fallback for non-3D frames (menus/loading) in Increment 2+.
 bool VR_RenderTestFrame(void);
 
+// Submit a clean both-eyes (black, head-tracked) frame during a blocking load so the compositor keeps
+// getting stereo frames and doesn't freeze on a stale/torn image (which Meta degrades to one eye).
+// Call at level-load checkpoints -- see goto_level in game_wad.cpp. No-op on desktop / when VR inactive.
+void VR_RenderLoadingFrame(void);
+
+// Level-load texture prewarm. VR_RequestLevelWarmup() is called on level entry (enter_screen); the first
+// render_view consumes it (VR_ConsumeLevelWarmup) and renders the scene once into the scratch screen-layer
+// FBO (VR_BeginWarmupEye/VR_EndWarmup) with NO OpenXR frame begun -- forcing all lazy sprite/landscape/model
+// texture uploads while a clean loading frame stays on screen, so the following real frame is fast in BOTH
+// eyes. Without this the first frame's left eye stalls ~2 s inside a held frame -> the one-eye artifact.
+void VR_RequestLevelWarmup(void);
+bool VR_ConsumeLevelWarmup(void);
+void VR_BeginWarmupEye(int eye);
+void VR_EndWarmup(void);
+
 // ---- Increment 2: per-eye frame loop the engine's render_view drives for the real world ----
 // Begin a VR frame: advance the session, wait/begin the OpenXR frame, and locate the head pose +
 // per-eye views. Returns true if the world should be rendered this frame (the engine then loops

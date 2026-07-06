@@ -101,6 +101,7 @@ Feb 15, 2002 (Br'fin (Jeremy Parsons)):
 #include "shell.h"
 #include "preferences.h"
 #include "FileHandler.h"
+#include "vr_openxr.h"
 
 #include "editor.h"
 #include "tags.h"
@@ -799,6 +800,12 @@ bool goto_level(
 		RunLevelScript(entry->level_number);
 	}
 
+	// VR: single-player level load pumps no frames of its own, so the OpenXR compositor would freeze on
+	// a stale frame (and degrade it to one eye) for the whole load. Feed it a clean stereo frame at each
+	// heavy checkpoint. Each call throttles to the display rate (xrWaitFrame), keeping the loading image
+	// clean in both eyes and head-tracked. No-op on desktop / when VR is inactive.
+	VR_RenderLoadingFrame();
+
 #if !defined(DISABLE_NETWORKING)
 	/* If the game is networked, then I must call the network code to do the right */
 	/* thing with the map.. */
@@ -816,6 +823,8 @@ bool goto_level(
 		load_level_from_map(entry->level_number);
 		if(error_pending()) success= false;
 	}
+
+	VR_RenderLoadingFrame();   // checkpoint: map geometry loaded, before scripts/collections/objects
 	
 	if (success)
 	{
@@ -872,9 +881,11 @@ bool goto_level(
 		}
 		
 	}
-	
+
+	VR_RenderLoadingFrame();   // checkpoint: objects placed; last clean frame before start_game renders
+
 //	if(!success) alert_user(fatalError, strERRORS, badReadMap, -1);
-	
+
 	/* We be done.. */
 	return success;
 }

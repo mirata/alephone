@@ -699,6 +699,10 @@ void enter_screen(void)
 	{
 		VR_RequestYawRecenter(current_player->facing);
 		VR_RecenterHead();
+		// Prewarm the texture cache on the first frame of this level (see VR_RequestLevelWarmup): the
+		// first world render otherwise lazy-uploads every visible texture (~2 s) inside a held OpenXR
+		// frame, producing the "one eye is a flat plane" load artifact.
+		VR_RequestLevelWarmup();
 	}
 #endif
 

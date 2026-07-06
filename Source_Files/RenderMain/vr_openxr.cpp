@@ -602,6 +602,7 @@ namespace {
 	bool     s_frameShouldRender = false;
 	uint32_t s_curEyeImageIdx   = 0;
 	int      s_curEye           = 0;
+	bool     s_needWarmup       = false;   // set on level entry; consumed by the first render_view (texture prewarm)
 
 	// ---- input (OpenXR action set, Touch controllers) ----
 	XrActionSet s_actionSet  = XR_NULL_HANDLE;
@@ -1073,6 +1074,17 @@ extern "C" void VR_FinishEye(int eye)
 	s_layerViews[eye].subImage.imageArrayIndex = 0;
 }
 
+// ---- Level-load texture prewarm ----------------------------------------------------------------
+// The FIRST render_view after a level load lazy-uploads EVERY visible sprite/landscape/model texture
+// during that frame's first eye render (~2 s), and it does so INSIDE a begun OpenXR frame with the eye
+// swapchain image acquired -- so the compositor sees a frame held open for ~2 s and shows the torn
+// "one eye is a flat plane, the other is missing" image. Fix: on that first frame, do the upload as a
+// throwaway render into the (non-swapchain) screen-layer FBO with NO OpenXR frame begun, so a clean
+// loading frame stays on screen the whole time; the next frame then renders both eyes fast (cache warm).
+extern "C" void VR_RequestLevelWarmup(void) { s_needWarmup = true; }
+extern "C" bool VR_ConsumeLevelWarmup(void) { bool v = s_needWarmup; s_needWarmup = false; return v; }
+// VR_BeginWarmupEye / VR_EndWarmup are defined below, after the screen-layer FBO (their scratch target).
+
 extern "C" void VR_SubmitFrame(void)
 {
 	if (!s_frameBegun) return;
@@ -1087,6 +1099,18 @@ extern "C" void VR_SubmitFrame(void)
 	fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
 	fei.layerCount = s_frameShouldRender ? 1 : 0;
 	fei.layers     = s_frameShouldRender ? layers : nullptr;
+	// DIAG (level-load one-eye): confirm BOTH eye layer views are submitted with a valid swapchain.
+	// Throttled (~every 30th submit) so normal play is quiet. viewCount should always be 2.
+	{
+		static int s_submitLogCtr = 0;
+		if (s_frameShouldRender && (s_submitLogCtr++ % 30) == 0) {
+			A1VR_LOG("loaddiag submit: layerCount=%d viewCount=%u scL=%p scR=%p poseL=(%.2f,%.2f,%.2f) poseR=(%.2f,%.2f,%.2f)",
+				(int)fei.layerCount, layer.viewCount,
+				(void*)s_layerViews[0].subImage.swapchain, (void*)s_layerViews[1].subImage.swapchain,
+				s_layerViews[0].pose.position.x, s_layerViews[0].pose.position.y, s_layerViews[0].pose.position.z,
+				s_layerViews[1].pose.position.x, s_layerViews[1].pose.position.y, s_layerViews[1].pose.position.z);
+		}
+	}
 	XR_CHECK(xrEndFrame(s_session, &fei));
 	s_frameBegun = false;
 }
@@ -1719,6 +1743,26 @@ extern "C" unsigned VR_ScreenLayerFramebuffer(void) { ensureScreenLayer(); retur
 extern "C" int VR_ScreenLayerWidth(void)  { return kScreenW; }
 extern "C" int VR_ScreenLayerHeight(void) { return kScreenH; }
 
+// Bind the scratch (screen-layer) FBO as the render target for a level-load warmup pass. Sets the
+// current eye so Rasterizer SetView picks up eye 0's (stale but valid) projection/view. No swapchain is
+// acquired and no OpenXR frame is begun, so nothing is held against the compositor while the ~2 s of
+// lazy texture uploads runs. The rendered result is discarded -- only the texture uploads matter.
+extern "C" void VR_BeginWarmupEye(int eye)
+{
+	s_curEye = eye;
+	ensureScreenLayer();
+	glBindFramebuffer(GL_FRAMEBUFFER, s_screenFBO);
+	glDisable(GL_SCISSOR_TEST);
+	glViewport(0, 0, kScreenW, kScreenH);
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+}
+
+extern "C" void VR_EndWarmup(void)
+{
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
 namespace {
 	void vsub(const float* a, const float* b, float* o){ o[0]=a[0]-b[0]; o[1]=a[1]-b[1]; o[2]=a[2]-b[2]; }
 	float vdot(const float* a, const float* b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
@@ -1981,6 +2025,27 @@ extern "C" void VR_PresentScreenLayer(void)
 	VR_SubmitFrame();
 }
 
+// Submit a clean BOTH-EYES frame during a blocking operation (single-player level load, which pumps
+// no frames of its own -- no progress dialog in solo play). Without this the compositor stops getting
+// xrWaitFrame/xrEndFrame for the whole load and freezes on the last submitted frame; worse, an extended
+// stall makes Meta's compositor degrade the frozen image to a single eye (the reported "only the right
+// eye is visible"). Each VR_BeginEye clears its eye FBO to black and VR_FinishEye records that eye's
+// layer view, so this always submits a symmetric stereo pair -> the frozen loading image stays clean
+// in BOTH eyes and head-tracks. Call it at load checkpoints (see goto_level) to keep the compositor fed.
+extern "C" void VR_RenderLoadingFrame(void)
+{
+	if (!s_active) { A1VR_LOG("loaddiag VR_RenderLoadingFrame: s_active=0 (no-op)"); return; }
+	const bool render = VR_BeginFrame();
+	A1VR_LOG("loaddiag VR_RenderLoadingFrame: render=%d sessionRunning=%d", render?1:0, s_sessionRunning?1:0);
+	if (render) {
+		for (int e = 0; e < kEyes; ++e) {
+			VR_BeginEye(e);    // acquires the swapchain image, binds the eye FBO, clears it to black
+			VR_FinishEye(e);   // sets s_layerViews[e] from this frame's head pose + releases the image
+		}
+	}
+	VR_SubmitFrame();   // no-ops if no frame was begun (session not running yet)
+}
+
 // Per-frame fallback for non-3D frames (menus/loading): render the test room to both eyes.
 extern "C" bool VR_RenderTestFrame(void)
 {
@@ -2028,6 +2093,11 @@ extern "C" void  VR_RequestYawRecenter(int) {}
 extern "C" bool  VR_TakeYawRecenter(int*) { return false; }
 extern "C" void  VR_DimCurrentEye(void)  {}
 extern "C" bool VR_RenderTestFrame(void){ return false; }
+extern "C" void VR_RenderLoadingFrame(void) {}
+extern "C" void VR_RequestLevelWarmup(void) {}
+extern "C" bool VR_ConsumeLevelWarmup(void) { return false; }
+extern "C" void VR_BeginWarmupEye(int)  {}
+extern "C" void VR_EndWarmup(void)      {}
 extern "C" bool VR_InitEGL(void)        { return false; }
 extern "C" bool VR_GetEyeResolution(int* w, int* h) { (void)w; (void)h; return false; }
 extern "C" bool VR_GetHmdYawPitch(float* y, float* p) { if (y) *y = 0; if (p) *p = 0; return false; }

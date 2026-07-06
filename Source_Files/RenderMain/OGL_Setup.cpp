@@ -86,6 +86,7 @@ Feb 5, 2002 (Br'fin (Jeremy Parsons)):
 #include "OGL_LoadScreen.h"
 #include "progress.h"
 #include "InfoTree.h"
+#include "vr_openxr.h"
 
 // Whether or not OpenGL is present and usable
 static bool _OGL_IsPresent = false;
@@ -156,6 +157,12 @@ void OGL_StartProgress(int total_progress)
 	}
 	show_ogl_progress = true;
 	last_update_tick = machine_tick_count();
+	// VR: this whole OGL run (per-level texture free+reload, PreloadTextures) is a long blocking main-
+	// thread step in enter_screen that pumps no frames of its own -- so the OpenXR compositor freezes on
+	// the last frame and degrades it to a single eye for the duration. Feed it a clean stereo frame at
+	// each progress tick (below) plus the bookends so the loading image stays clean in BOTH eyes and
+	// head-tracks. No-op on desktop / when VR is inactive.
+	VR_RenderLoadingFrame();
 }
 
 void OGL_ProgressCallback(int delta_progress)
@@ -170,6 +177,7 @@ void OGL_ProgressCallback(int delta_progress)
 				OGL_LoadScreen::instance()->Progress(100 * ogl_progress / total_ogl_progress);
 			else
 				draw_progress_bar(ogl_progress, total_ogl_progress);
+			VR_RenderLoadingFrame();   // keep the compositor fed with a clean both-eyes frame during the load
 			last_update_tick = current_ticks;
 		}
 	}
@@ -182,6 +190,7 @@ void OGL_StopProgress()
 		OGL_LoadScreen::instance()->Stop();
 	else
 		close_progress_dialog();
+	VR_RenderLoadingFrame();   // final clean stereo frame as the load finishes, before the game renders
 }
 #endif
 
