@@ -786,10 +786,25 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 	                 * (360.0 / (double(FIXED_ONE) * double(FULL_CIRCLE)))
 	                 * (8.0 * atan(1.0) / 360.0);
 	const double cy = cos(yaw), sy = sin(yaw);
-	const float camx = (float)view->origin.x;
-	const float camy = (float)view->origin.y;
+	// view->origin is int16-quantized (~1 WU steps) -- anchoring the continuously-tracked
+	// controller offset on it reintroduces the same precision loss the wall/lean render-camera
+	// fix (VR_GetRenderCamera, see Rasterizer_Shader::SetView) eliminated for world geometry.
+	// Use that same continuous float camera here so the weapon doesn't step relative to the
+	// (now-smooth) walls and hands as the body/head moves. Z needs the eye-height offset added
+	// back (VR_SetRenderCamera publishes body Z only); VR_GetEyeZOffset() is the same latched
+	// per-frame value apply_vr_view_offsets folds (as an int16) into origin.z.
+	float camx = (float)view->origin.x;
+	float camy = (float)view->origin.y;
 	// Keep the true eye Z (including VR eye-height offset) so crouch/seated motion lowers hands.
-	const float camz = (float)view->origin.z;
+	float camz = (float)view->origin.z;
+	{
+		float rcx, rcy, rcz;
+		if (VR_GetRenderCamera(&rcx, &rcy, &rcz)) {
+			camx = rcx;
+			camy = rcy;
+			camz = rcz + VR_GetEyeZOffset();
+		}
+	}
 
 	const int domHand = VR_Settings()->dominantHand ? 0 : 1;
 	const int offHand = 1 - domHand;
