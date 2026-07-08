@@ -95,6 +95,11 @@ public:
 	void Clear()
 		{Width = Height = Size = 0; delete []Pixels; Pixels = NULL;}
 
+	// Deep-copy from another descriptor into this one (frees any existing pixels first).
+	// ImageDescriptor has no operator= and owns a raw Pixels buffer, so use this instead of
+	// assignment to avoid a shallow copy / double free.
+	void CopyImageFrom(const ImageDescriptor& other);
+
 	ImageDescriptor(const ImageDescriptor &CopyFrom);
 	
 ImageDescriptor(): Width(0), Height(0), VScale(1.0), UScale(1.0), Pixels(NULL), Size(0), PremultipliedAlpha(false) {}

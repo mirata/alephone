@@ -1027,6 +1027,21 @@ bool is_network_pregame = false;
 
 bool idle_game_state(uint64_t time)
 {
+#if defined(__ANDROID__)
+	// VR: one-time weapon-skin cache warm while sitting at the main menu (GL context is live here, so
+	// the decode uses the same caps the per-level load does and the first level's skins become cache
+	// hits). Geometry is already boot-warmed. Placed before the demo-timer gate so it fires promptly.
+	{
+		extern bool OGL_IsActive();
+		extern void OGL_PreloadModelSkins();
+		static bool s_vrSkinsWarmed = false;
+		if (!s_vrSkinsWarmed && get_game_state() == _display_main_menu && OGL_IsActive())
+		{
+			s_vrSkinsWarmed = true;
+			OGL_PreloadModelSkins();
+		}
+	}
+#endif
 	auto machine_ticks_elapsed = time - game_state.last_ticks_on_idle;
 
 	if(machine_ticks_elapsed || game_state.phase==0)

@@ -150,8 +150,10 @@ public:
 	void VR_FreeBuffers();
 #endif
 
-	// For convenience
-	void Load();
+	// For convenience.
+	// geometryOnly: parse + transform the mesh and populate the persistent geometry cache, but skip
+	// all GL work (skins, VR VBOs). Used to warm the cache at app startup before the GL run is up.
+	void Load(bool geometryOnly = false);
 	void Unload();
 
 	OGL_ModelData():
@@ -180,6 +182,15 @@ void OGL_ResetModelSkins(bool Clear_OGL_Txtrs);
 int OGL_CountModels(short Collection);
 void OGL_LoadModels(short Collection);
 void OGL_UnloadModels(short Collection);
+
+// Warm the persistent geometry cache for every model currently in MdlList without any GL work.
+// Call once at startup (after the model MML is parsed) so the expensive .md3 parse happens behind
+// the boot splash instead of on the first level. Safe before the GL run is active.
+void OGL_PreloadModelGeometry();
+
+// Warm the decoded-skin cache for every model in MdlList. Decodes PNGs, so needs a live GL context;
+// call once at the main menu (not boot). Makes the first level's skin load a cache hit too.
+void OGL_PreloadModelSkins();
 
 // for managing the sprite depth-buffer override (see ForceSpriteDepth above)
 void OGL_ResetForceSpriteDepth();  // to clear before calling OGL_LoadModels

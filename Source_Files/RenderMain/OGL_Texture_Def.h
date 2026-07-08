@@ -141,8 +141,11 @@ struct OGL_TextureOptionsBase
 	// Glow modulated using max of normal lighting intensity and this value
 	float MinGlowIntensity;
 	
-	// For convenience
-	void Load();
+	// For convenience.
+	// cacheable: keep the decoded images in a persistent session cache keyed by source+caps, so the
+	// same skin isn't re-decoded on every level. Only model skins opt in (wall/sprite substitutions
+	// don't, to bound memory on texture-pack scenarios).
+	void Load(bool cacheable = false);
 	void Unload();
 
 	virtual int GetMaxSize();

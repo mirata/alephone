@@ -1353,23 +1353,15 @@ void render_view(
 					RasPtr->End();
 					VR_EndWarmup();
 					VR_RenderLoadingFrame();   // textures warm; next tick draws both eyes fast
-					__android_log_print(ANDROID_LOG_INFO, "A1VR", "loaddiag warmup done");
 				}
 				else {
 				const bool render = VR_BeginFrame();
-				// DIAG (level-load one-eye): log frame render flag + per-eye render ms. Only logs slow
-				// frames (>60 ms) so it's silent during normal play and lights up during the load.
-				static int s_vrDiagFrame = 0;
-				const int  vrDiagFrame = s_vrDiagFrame++;
-				uint64_t   vrFrameT0 = machine_tick_count();
 				if (render)
 				{
 					const world_point3d  base_origin = view->origin;
 					const short          base_poly   = view->origin_polygon_index;
-					uint64_t eyeMs[2] = {0,0};
 					for (int eye = 0; eye < 2; ++eye)
 					{
-						uint64_t eyeT0 = machine_tick_count();
 						// render_flags is a global flat array; the outer build_render_tree call
 						// (above) already set every endpoint/line flag. Without this clear the
 						// per-eye traversal skips all of them and the vis-tree sees nothing.
@@ -1423,19 +1415,7 @@ void render_view(
 						VR_PresentHudEye(eye);
 						VR_PresentMapEye(eye);
 						VR_FinishEye(eye);
-						eyeMs[eye] = machine_tick_count() - eyeT0;
 					}
-					const uint64_t vrFrameMs = machine_tick_count() - vrFrameT0;
-					if (vrFrameMs > 60)
-						__android_log_print(ANDROID_LOG_INFO, "A1VR",
-							"loaddiag frame=%d render=1 eyeL=%llums eyeR=%llums total=%llums",
-							vrDiagFrame, (unsigned long long)eyeMs[0], (unsigned long long)eyeMs[1],
-							(unsigned long long)vrFrameMs);
-				}
-				else
-				{
-					__android_log_print(ANDROID_LOG_INFO, "A1VR",
-						"loaddiag frame=%d render=0 (VR_BeginFrame shouldRender=false)", vrDiagFrame);
 				}
 				VR_SubmitFrame();
 				VR_MarkWorldFramePresented();

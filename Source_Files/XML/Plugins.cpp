@@ -33,6 +33,9 @@
 #include "InfoTree.h"
 #include "XML_ParseTreeRoot.h"
 #include "Scenario.h"
+#ifdef HAVE_OPENGL
+#include "OGL_Setup.h"   // parse_mml_opengl
+#endif
 #ifdef HAVE_STEAM
 #include "steamshim_child.h"
 #endif
@@ -202,6 +205,29 @@ void Plugins::load_mml(bool load_menu_mml_only) {
 			load_mmls(*it, load_menu_mml_only);
 		}
 	}
+}
+
+void Plugins::load_opengl_mml()
+{
+#ifdef HAVE_OPENGL
+	validate();
+	for (std::vector<Plugin>::iterator it = m_plugins.begin(); it != m_plugins.end(); ++it)
+	{
+		if (!it->valid()) continue;
+		ScopedSearchPath ssp(it->directory);
+		for (std::vector<std::string>::const_iterator mml = it->mmls.begin(); mml != it->mmls.end(); ++mml)
+		{
+			FileSpecifier file;
+			if (!file.SetNameWithPath(mml->c_str())) continue;
+			try {
+				InfoTree root = InfoTree::load_xml(file);
+				for (const InfoTree& mara : root.children_named("marathon"))
+					for (const InfoTree& gl : mara.children_named("opengl"))
+						parse_mml_opengl(gl);
+			} catch (...) {}
+		}
+	}
+#endif
 }
 
 void load_shapes_patch(SDL_RWops* p, bool override_replacements);

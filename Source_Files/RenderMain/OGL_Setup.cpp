@@ -88,6 +88,11 @@ Feb 5, 2002 (Br'fin (Jeremy Parsons)):
 #include "InfoTree.h"
 #include "vr_openxr.h"
 
+#include <map>
+#include <memory>
+#include <sstream>
+#include <string>
+
 // Whether or not OpenGL is present and usable
 static bool _OGL_IsPresent = false;
 
@@ -277,7 +282,46 @@ inline bool StringPresent(vector<char>& String)
 GLint glMaxTextureSize = 0;
 bool hasS3TC = false;
 
-void OGL_TextureOptionsBase::Load()
+// Establish the texture caps that OGL_TextureOptionsBase::Load() reads, matching what the per-level
+// OGL_LoadModelsImages/OGL_StartRun set. Lets an early (menu-time) skin warm decode identically to the
+// per-level load so the decoded-skin cache actually hits. Needs a current GL context.
+void OGL_EstablishTextureCaps()
+{
+	glGetIntegerv(GL_MAX_TEXTURE_SIZE, &glMaxTextureSize);
+	hasS3TC = OGL_CheckExtension("GL_ARB_texture_compression") && OGL_CheckExtension("GL_EXT_texture_compression_s3tc");
+#if defined(__ANDROID__)
+	npotTextures = true;   // GLES3 core; matches OGL_StartRun's unconditional Android setting
+#endif
+}
+
+// ---- Persistent decoded-skin cache ---------------------------------------------------------------
+// Decoding a skin PNG (LoadFromFile + mipmaps + DXTC compress + resize) costs ~tens of ms and is
+// redone on EVERY level for EVERY model entry -- and the many per-sequence model entries all point at
+// the same handful of weapon skins, so the same PNG is decoded dozens of times per level. This cache
+// keeps the fully-decoded ImageDescriptors in RAM keyed by (source files + the decode-affecting caps),
+// so each distinct skin is decoded once per session. It dedupes within a level and hits across levels.
+// (ImageDescriptor owns a raw Pixels buffer and has no operator=, so copies go through CopyImageFrom.)
+struct CachedSkinImages
+{
+	ImageDescriptor Normal, Glow, Offset;
+	short aw = 0, ah = 0;
+	CachedSkinImages() = default;
+	CachedSkinImages(const CachedSkinImages&) = default;   // deep via ImageDescriptor copy ctor
+};
+static std::map<std::string, std::shared_ptr<const CachedSkinImages>> s_skinImageCache;
+
+static std::string skin_cache_key(const OGL_TextureOptionsBase& s, int flags, int maxTextureSize)
+{
+	std::ostringstream k;
+	k << s.NormalColors.GetPath() << '|' << s.NormalMask.GetPath() << '|'
+	  << s.GlowColors.GetPath()   << '|' << s.GlowMask.GetPath()   << '|'
+	  << s.OffsetMap.GetPath()    << '|'
+	  << flags << ',' << maxTextureSize << ',' << hasS3TC << ','
+	  << (int)s.NormalIsPremultiplied << (int)s.GlowIsPremultiplied;
+	return k.str();
+}
+
+void OGL_TextureOptionsBase::Load(bool cacheable)
 {
 	FileSpecifier File;
 
@@ -304,6 +348,25 @@ void OGL_TextureOptionsBase::Load()
 	// Check to see if loading needs to be done;
 	// it does not need to be if an image is present.
 	if (NormalImg.IsPresent()) return;
+
+	// Persistent decoded-skin cache: reuse the already-decoded images for this exact source+caps
+	// instead of re-decoding the PNG (see s_skinImageCache). Only meaningful if there's a normal
+	// image to load; skins with no normal_image fall through to the (early-returning) code below.
+	const std::string skinKey = (cacheable && NormalColors != FileSpecifier())
+		? skin_cache_key(*this, flags, maxTextureSize) : std::string();
+	if (!skinKey.empty())
+	{
+		auto it = s_skinImageCache.find(skinKey);
+		if (it != s_skinImageCache.end())
+		{
+			NormalImg.CopyImageFrom(it->second->Normal);
+			GlowImg.CopyImageFrom(it->second->Glow);
+			OffsetImg.CopyImageFrom(it->second->Offset);
+			actual_width  = it->second->aw;
+			actual_height = it->second->ah;
+			return;
+		}
+	}
 
 	NormalImg.Clear();
 	
@@ -395,6 +458,18 @@ void OGL_TextureOptionsBase::Load()
 		GlowImg.Clear();
 	}
 
+	// Store the decoded images so later models/levels skip the PNG decode (see s_skinImageCache).
+	if (!skinKey.empty() && NormalImg.IsPresent() &&
+	    s_skinImageCache.find(skinKey) == s_skinImageCache.end())
+	{
+		auto cs = std::make_shared<CachedSkinImages>();
+		cs->Normal.CopyImageFrom(NormalImg);
+		cs->Glow.CopyImageFrom(GlowImg);
+		cs->Offset.CopyImageFrom(OffsetImg);
+		cs->aw = actual_width;
+		cs->ah = actual_height;
+		s_skinImageCache[skinKey] = cs;
+	}
 }
 
 void OGL_TextureOptionsBase::Unload()

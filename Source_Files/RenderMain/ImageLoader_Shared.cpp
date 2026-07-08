@@ -177,6 +177,26 @@ bool ImageDescriptor::Minify()
 }
 	
 
+void ImageDescriptor::CopyImageFrom(const ImageDescriptor& other)
+{
+	if (this == &other) return;
+	Clear();   // frees any existing Pixels
+	Width = other.Width;
+	Height = other.Height;
+	VScale = other.VScale;
+	UScale = other.UScale;
+	Size = other.Size;
+	MipMapCount = other.MipMapCount;
+	Format = other.Format;
+	PremultipliedAlpha = other.PremultipliedAlpha;
+	if (other.Pixels) {
+		Pixels = new uint32[other.Size];
+		memcpy(Pixels, other.Pixels, other.Size);
+	} else {
+		Pixels = NULL;
+	}
+}
+
 ImageDescriptor::ImageDescriptor(const ImageDescriptor &copyFrom) :
 	Width(copyFrom.Width),
 	Height(copyFrom.Height),

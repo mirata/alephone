@@ -39,6 +39,34 @@
 #include "WavefrontLoader.h"
 #include "InfoTree.h"
 
+#include <map>
+#include <memory>
+#include <sstream>
+#include <string>
+
+// ---- Persistent model-geometry cache -------------------------------------------------------------
+// Every level transition rebuilds MdlList from scratch (ResetAllMMLValues -> MdlDeleteAll re-parses
+// the plugin MML) AND reloads every shape collection, so without a cache the expensive .md3 disk
+// parse + per-keyframe vertex transform in OGL_ModelData::Load() runs on EVERY level. This cache
+// stores the fully-processed Model3D geometry (post parse + transform + normals/tangents) keyed by a
+// signature of everything in Load() that affects that geometry. It lives for the whole app session,
+// independent of MdlList, so each distinct model is parsed at most once per run. Skins and the
+// Android VR GPU buffers are per-GL-context and are still rebuilt on every Load() (they're cheap).
+static std::map<std::string, std::shared_ptr<const Model3D>> s_modelGeometryCache;
+
+static std::string model_cache_key(const OGL_ModelData& m)
+{
+	std::ostringstream k;
+	k << m.ModelFile.GetPath()  << '|'
+	  << m.ModelFile1.GetPath() << '|'
+	  << m.ModelFile2.GetPath() << '|'
+	  << std::string(m.ModelType.begin(), m.ModelType.end()) << '|'
+	  << m.Scale  << ',' << m.XRot   << ',' << m.YRot   << ',' << m.ZRot << ','
+	  << m.XShift << ',' << m.YShift << ',' << m.ZShift << '|'
+	  << m.NormalType << ',' << m.NormalSplit;
+	return k.str();
+}
+
 
 // Model-data stuff;
 // defaults for whatever might need them
@@ -209,7 +237,7 @@ int OGL_SkinData::GetMaxSize()
 void OGL_SkinManager::Load()
 {
 	for (vector<OGL_SkinData>::iterator SkinIter = SkinData.begin(); SkinIter < SkinData.end(); SkinIter++)
-		SkinIter->Load();
+		SkinIter->Load(/*cacheable=*/true);
 }
 
 
@@ -379,17 +407,39 @@ static bool StringsEqual(const char *String1, const char *String2, int MaxStrLen
 }
 
 
-void OGL_ModelData::Load()
+void OGL_ModelData::Load(bool geometryOnly)
 {
 	// Already loaded or already tried (and failed)?
-	if (ModelPresent() || mLoadAttempted) return;
-	mLoadAttempted = true;
+	// geometryOnly warms only s_modelGeometryCache; don't let it set mLoadAttempted/mark the model
+	// present, so a later real Load() on this same object still runs the GL work (skins/VBOs).
+	if (!geometryOnly && (ModelPresent() || mLoadAttempted)) return;
+	if (!geometryOnly) mLoadAttempted = true;
 	
 	// Load the model
 	Model.Clear();
 
 	if (ModelFile == FileSpecifier()) return;
 	if (!ModelFile.Exists()) return;
+
+	// Persistent geometry cache: if this exact model (same file + transform params) was already
+	// parsed this session, copy the processed geometry instead of re-reading/transforming the .md3.
+	// Skins and the Android VR GPU buffers are per-context and are (re)built below regardless.
+	const std::string cacheKey = model_cache_key(*this);
+	{
+		auto it = s_modelGeometryCache.find(cacheKey);
+		if (it != s_modelGeometryCache.end())
+		{
+			Model = *it->second;   // deep copy of the fully-processed geometry
+			if (!geometryOnly)
+			{
+				OGL_SkinManager::Load();
+#if defined(__ANDROID__)
+				VR_UploadBuffers();
+#endif
+			}
+			return;
+		}
+	}
 
 	bool Success = false;
 	
@@ -625,6 +675,12 @@ void OGL_ModelData::Load()
 	Model.AdjustNormals(NormalType,NormalSplit);
 	Model.CalculateTangents();
 
+	// Store the fully-processed geometry so later levels skip the parse+transform above.
+	if (ModelPresent())
+		s_modelGeometryCache[cacheKey] = std::make_shared<const Model3D>(Model);
+
+	if (geometryOnly) return;   // cache warmed; skins/VBOs are built by the real per-level Load()
+
 	// Don't forget the skins
 	OGL_SkinManager::Load();
 
@@ -632,6 +688,27 @@ void OGL_ModelData::Load()
 	// Upload MD3 keyframes to persistent vram for the VR GPU keyframe-lerp path.
 	VR_UploadBuffers();
 #endif
+}
+
+// See header. Warm every model in MdlList into s_modelGeometryCache with no GL work.
+void OGL_PreloadModelGeometry()
+{
+	for (int c = 0; c < MAXIMUM_COLLECTIONS; ++c)
+		for (auto& entry : MdlList[c])
+			for (auto& mdl : entry.Models)
+				mdl.Load(/*geometryOnly=*/true);
+}
+
+// See header. Warm the decoded-skin cache for every model in MdlList. Unlike geometry this decodes
+// PNGs (which depends on the GL texture caps), so it must run with a live GL context AFTER
+// OGL_EstablishTextureCaps() -- i.e. at the menu, not at boot. First level then hits the skin cache.
+void OGL_PreloadModelSkins()
+{
+	OGL_EstablishTextureCaps();
+	for (int c = 0; c < MAXIMUM_COLLECTIONS; ++c)
+		for (auto& entry : MdlList[c])
+			for (auto& mdl : entry.Models)
+				mdl.OGL_SkinManager::Load();   // decodes + populates the cacheable skin cache
 }
 
 

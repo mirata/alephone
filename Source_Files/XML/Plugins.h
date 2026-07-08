@@ -125,6 +125,11 @@ public:
 	GameMode mode() { return m_mode; }
 	void load_mml(bool load_menu_mml_only);
 
+	// Parse ONLY the <opengl> blocks (e.g. 3D <model> defs) from enabled plugins' MML, without
+	// touching any other MML section. Populates MdlList at startup so the model-geometry cache can
+	// be warmed behind the boot splash (see OGL_PreloadModelGeometry). No-op without OpenGL.
+	void load_opengl_mml();
+
 	void load_shapes_patches(bool opengl);
 	void load_sounds_patches();
 

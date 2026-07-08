@@ -3645,6 +3645,22 @@ static void plugins_dialog(void* arg)
 			LoadBaseMMLScripts(true);
 			Plugins::instance()->load_mml(true);
 
+#if defined(__ANDROID__)
+			// VR: toggling plugins may have added/removed 3D weapon models, but the menu-only MML above
+			// doesn't parse <opengl> model defs -- so the boot/menu cache warm never sees them and the
+			// first level after a runtime enable would pay the full model-load cost. Re-parse just the
+			// enabled plugins' model defs and re-warm the geometry+skin caches now (we're at the menu with
+			// a live GL context). MdlList is empty here (ResetAllMMLValues cleared it; menu-only MML didn't
+			// repopulate it), so load_opengl_mml doesn't create duplicate entries.
+			{
+				extern void OGL_PreloadModelGeometry();
+				extern void OGL_PreloadModelSkins();
+				Plugins::instance()->load_opengl_mml();
+				OGL_PreloadModelGeometry();
+				OGL_PreloadModelSkins();
+			}
+#endif
+
 			Plugins::instance()->set_map_checksum(get_current_map_checksum());
 			LoadLevelScripts(get_map_file());
 

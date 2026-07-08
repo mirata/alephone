@@ -273,6 +273,10 @@ int OGL_CountModelsImages(short Collection);
 void OGL_LoadModelsImages(short Collection);
 void OGL_UnloadModelsImages(short Collection);
 
+// Establish glMaxTextureSize/hasS3TC/npotTextures from the live GL context (see impl). Needed before
+// an early skin-cache warm so its decode matches the per-level decode.
+void OGL_EstablishTextureCaps();
+
 // Reset the textures (walls, sprites, and model skins) (good if they start to crap out)
 // Implemented in OGL_Textures.cpp
 void OGL_ResetTextures();

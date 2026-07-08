@@ -594,6 +594,16 @@ void initialize_application(void)
 	initialize_images_manager();
 	load_environment_from_preferences();
 	initialize_game_state();
+
+#if defined(__ANDROID__)
+	// Quest VR: warm the 3D weapon-model geometry cache during boot, behind the launch splash, so
+	// the first level doesn't pay the multi-second .md3 parse. Parse only the plugins' <opengl>
+	// model defs (no other MML, hence no gameplay side effects), then fill the persistent geometry
+	// cache with a GL-free load. Subsequent per-level loads are cache hits. See OGL_Model_Def.cpp.
+	extern void OGL_PreloadModelGeometry();
+	Plugins::instance()->load_opengl_mml();
+	OGL_PreloadModelGeometry();
+#endif
 }
 
 void shutdown_application(void)

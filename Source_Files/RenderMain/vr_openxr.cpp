@@ -1099,18 +1099,6 @@ extern "C" void VR_SubmitFrame(void)
 	fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
 	fei.layerCount = s_frameShouldRender ? 1 : 0;
 	fei.layers     = s_frameShouldRender ? layers : nullptr;
-	// DIAG (level-load one-eye): confirm BOTH eye layer views are submitted with a valid swapchain.
-	// Throttled (~every 30th submit) so normal play is quiet. viewCount should always be 2.
-	{
-		static int s_submitLogCtr = 0;
-		if (s_frameShouldRender && (s_submitLogCtr++ % 30) == 0) {
-			A1VR_LOG("loaddiag submit: layerCount=%d viewCount=%u scL=%p scR=%p poseL=(%.2f,%.2f,%.2f) poseR=(%.2f,%.2f,%.2f)",
-				(int)fei.layerCount, layer.viewCount,
-				(void*)s_layerViews[0].subImage.swapchain, (void*)s_layerViews[1].subImage.swapchain,
-				s_layerViews[0].pose.position.x, s_layerViews[0].pose.position.y, s_layerViews[0].pose.position.z,
-				s_layerViews[1].pose.position.x, s_layerViews[1].pose.position.y, s_layerViews[1].pose.position.z);
-		}
-	}
 	XR_CHECK(xrEndFrame(s_session, &fei));
 	s_frameBegun = false;
 }
@@ -2034,9 +2022,8 @@ extern "C" void VR_PresentScreenLayer(void)
 // in BOTH eyes and head-tracks. Call it at load checkpoints (see goto_level) to keep the compositor fed.
 extern "C" void VR_RenderLoadingFrame(void)
 {
-	if (!s_active) { A1VR_LOG("loaddiag VR_RenderLoadingFrame: s_active=0 (no-op)"); return; }
+	if (!s_active) return;
 	const bool render = VR_BeginFrame();
-	A1VR_LOG("loaddiag VR_RenderLoadingFrame: render=%d sessionRunning=%d", render?1:0, s_sessionRunning?1:0);
 	if (render) {
 		for (int e = 0; e < kEyes; ++e) {
 			VR_BeginEye(e);    // acquires the swapchain image, binds the eye FBO, clears it to black
