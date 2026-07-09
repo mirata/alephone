@@ -64,9 +64,12 @@ typedef struct {
 	float brightness;       // world brightness multiply (1=unchanged; <1 dims the over-bright world)
 	int   roomScale;        // 1 = body follows the head's physical movement (room-scale); 0 = head is
 	                        //     a free 6DOF camera over a static body (no positional locomotion)
-	int   dominantHand;     // 0 = right-handed, 1 = left-handed. The dominant hand MOVES (stick) + fires
-	                        //     the primary weapon (trigger); the off-hand TURNS (stick) + secondary-fires.
-	int   switchSticks;     // 1 = swap the move/turn thumbsticks (turn on the dominant hand instead)
+	int   dominantHand;     // 0 = right-handed, 1 = left-handed. The dominant hand FIRES the primary weapon
+	                        //     (trigger); the off-hand secondary-fires. By default the off-hand MOVES
+	                        //     (stick) and the dominant hand TURNS (stick) -> conventional left-move/
+	                        //     right-turn for a right-hander (see switchSticks to swap move/turn).
+	int   switchSticks;     // 0 (default) = off-hand moves / dominant turns (conventional for right-handers).
+	                        //     1 = swap so the DOMINANT hand moves and the off-hand turns.
 	float aimPitchAdjust;   // degrees added to the controller aim pitch (the OpenXR aim pose sits higher
 	                        //   than a held-gun barrel; negative tilts the ray DOWN). QZD's vr_weaponRotate.
 	float hudDistanceM;     // distance of the head-locked HUD plane in metres (bigger = HUD further out)

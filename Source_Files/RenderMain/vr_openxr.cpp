@@ -786,15 +786,16 @@ namespace {
 			s_stickClick[h] = bs.currentState;
 		}
 
-		// Route the raw per-hand sticks/triggers into the logical move/turn/fire actions. The DOMINANT
-		// hand MOVES (stick) + FIRES the primary weapon (trigger); the OFF hand TURNS (stick) +
-		// secondary-fires (trigger). So a left-handed player moves+fires with the left controller.
-		// (QuestZDoom's default is the reverse -- dominant turns/aims, off-hand moves -- and its
-		// vr_switch_sticks flips that; switchSticks here is the same move/turn swap.) (index 0=left, 1=right)
+		// Route the raw per-hand sticks/triggers into the logical move/turn/fire actions. By DEFAULT the
+		// OFF hand MOVES (stick) and the DOMINANT hand TURNS (stick) -- for the default right-handed
+		// profile that is the conventional left-stick-move / right-stick-turn layout most players expect.
+		// FIRING still follows the dominant hand (primary trigger); the off hand secondary-fires.
+		// "Switch Thumbsticks" (switchSticks) swaps move<->turn so the DOMINANT hand moves instead (which
+		// some left-handed players prefer). (index 0=left, 1=right)
 		const int domIdx = VR_Settings()->dominantHand ? 0 : 1;   // left-handed -> dominant is the left hand
 		const int offIdx = 1 - domIdx;
-		const int moveIdx = VR_Settings()->switchSticks ? offIdx : domIdx;
-		const int turnIdx = VR_Settings()->switchSticks ? domIdx : offIdx;
+		const int moveIdx = VR_Settings()->switchSticks ? domIdx : offIdx;
+		const int turnIdx = VR_Settings()->switchSticks ? offIdx : domIdx;
 		s_moveX = s_stickX[moveIdx]; s_moveY = s_stickY[moveIdx];
 		s_turnX = s_stickX[turnIdx]; s_turnY = s_stickY[turnIdx];
 		s_fire    = s_trigger[domIdx] > 0.5f;
@@ -1302,7 +1303,7 @@ extern "C" bool VR_GetMoveStickClick(void)
 {
 	const int domIdx = s_settings.dominantHand ? 0 : 1;
 	const int offIdx = 1 - domIdx;
-	const int moveIdx = s_settings.switchSticks ? offIdx : domIdx;
+	const int moveIdx = s_settings.switchSticks ? domIdx : offIdx;
 	return s_stickClick[moveIdx];
 }
 // Press of the thumbstick you TURN with (the opposite hand from the move stick).
@@ -1310,7 +1311,7 @@ extern "C" bool VR_GetTurnStickClick(void)
 {
 	const int domIdx = s_settings.dominantHand ? 0 : 1;
 	const int offIdx = 1 - domIdx;
-	const int turnIdx = s_settings.switchSticks ? domIdx : offIdx;   // opposite of moveIdx
+	const int turnIdx = s_settings.switchSticks ? offIdx : domIdx;   // opposite of moveIdx
 	return s_stickClick[turnIdx];
 }
 
