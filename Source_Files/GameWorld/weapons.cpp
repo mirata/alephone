@@ -1940,9 +1940,18 @@ static void fire_weapon(
 		/* VR: some weapons (e.g. the .44 Magnum) carry deliberate spread to simulate the
 		   difficulty of aiming a real handgun. In VR the controller already gives free 1:1
 		   aim, so that baked-in inaccuracy just makes them useless. Scale the per-shot
-		   theta_error down per the <vr_spread> MML config (1.0 = unchanged). */
+		   theta_error down per the <vr_spread> MML config (1.0 = unchanged).
+		   Single-player only: this value is passed as new_projectile()'s delta_theta, which
+		   controls not just the bullet's angular deviation but whether global_random() gets
+		   called at all (projectiles.cpp only rolls if delta_theta is nonzero). If this scale
+		   ever reaches exactly 0 -- an explicitly supported config, see the comment above -- a
+		   netgame client applying it locally would skip a global_random() call that every other
+		   client still makes, desyncing the shared RNG stream for the rest of the game, not just
+		   this shot. Also matches the aim-direction override above being single-player-only: once
+		   the authoritative shot no longer uses free controller aim in netgames, there's no reason
+		   for a VR shooter's spread to differ from everyone else's either. */
 		angle vr_theta_error= trigger_definition->theta_error;
-		if (VR_IsActive() && player_index == current_player_index)
+		if (VR_IsActive() && player_index == current_player_index && !game_is_networked)
 		{
 			float spread_scale= VR_GetWeaponSpreadScale(weapon_data->weapon_type);
 			if (spread_scale != 1.f)
@@ -2088,11 +2097,16 @@ static void calculate_weapon_origin_and_vector(
 
 	// VR: fire along the controller aim (where the aim-debug ray points) instead of the player's
 	// facing/elevation (screen centre). Primary weapon uses the dominant hand; secondary uses the
-	// off-hand so each gun in a dual-wield aims independently. Local player only.
+	// off-hand so each gun in a dual-wield aims independently. Local player only, AND single-player
+	// only: this reads live controller state that only exists on the shooter's own machine, so any
+	// other client simulating this player (a netgame is simulated identically on every machine, see
+	// the netcode's action_flags-only lockstep model) would compute a different origin/vector for
+	// the exact same shot -- a guaranteed desync. In a netgame every client must derive the shot
+	// from nothing but the already-synced player->facing/elevation/camera_location, same as PC.
 	angle fire_facing= player->facing;
 	angle fire_elevation= player->elevation;
 #if defined(__ANDROID__)
-	if (VR_IsActive() && player_index == local_player_index)
+	if (VR_IsActive() && player_index == local_player_index && !game_is_networked)
 	{
 		float dir[3];
 		// Off-hand aim for the second trigger of a dual-wield: pistols (_twofisted_pistol_class) AND
@@ -2115,7 +2129,10 @@ static void calculate_weapon_origin_and_vector(
 	*origin= player->camera_location;
 	source_location= *origin;
 #if defined(__ANDROID__)
-	if (VR_IsActive() && player_index == local_player_index)
+	// Same netgame-desync reasoning as the aim override above: head lean is a local-only view
+	// offset (VR_GetHeadOffset), so this can only feed the AUTHORITATIVE shot origin when there's
+	// no other machine that needs to agree on where it came from.
+	if (VR_IsActive() && player_index == local_player_index && !game_is_networked)
 	{
 		float ox = 0.0f, oy = 0.0f;
 		VR_GetHeadOffset(&ox, &oy);
@@ -2160,7 +2177,10 @@ static void calculate_weapon_origin_and_vector(
 		// In VR, each pistol fires along its controller's aim; the classic screen-space barrel
 		// offset shifts the origin away from the controller position and causes bullets to land
 		// left/right of the aim cursor. Zero it so each hand shoots exactly where it aims.
-		if (VR_IsActive() && player_index == local_player_index
+		// Single-player only -- this correction only makes sense alongside the controller-aim
+		// override above, which is itself disabled in netgames for sync reasons; keeping the
+		// classic dx offset in netgames matches what every other client (VR or PC) computes.
+		if (VR_IsActive() && player_index == local_player_index && !game_is_networked
 			&& definition->weapon_class == _twofisted_pistol_class)
 			dx_translation_amount = 0;
 #endif

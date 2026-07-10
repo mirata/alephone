@@ -89,8 +89,6 @@ running backwards shouldn’t mean doom in a fistfight
 #include "ChaseCam.h"
 #include "Packing.h"
 
-#include "vr_openxr.h"   // VR analog movement
-
 #include <string.h>
 #include <cstdlib>
 #include <algorithm>
@@ -839,23 +837,13 @@ static void physics_update(
 	new_position= variables->position;
 	cosine= cosine_table[FIXED_INTEGERAL_PART(variables->direction)], sine= sine_table[FIXED_INTEGERAL_PART(variables->direction)];
 
+	// NOTE: analog stick magnitude for VR forward/back movement is NOT applied here as a local
+	// per-tick displacement scale -- it used to be, reading live controller state gated to
+	// "player == local_player", which desynced net games (every OTHER client simulating this
+	// player never saw that scale, so they replayed at full velocity). It's now encoded into
+	// action_flags' ABSOLUTE_POSITION field at input-gather time (see SET_ABSOLUTE_POSITION in
+	// vbl.cpp), so variables->velocity above is already the correct, synced value for every client.
 	_fixed move_velocity = variables->velocity, move_perp_velocity = variables->perpendicular_velocity;
-#if defined(__ANDROID__)
-	// VR analog speed: scale only the per-tick DISPLACEMENT by the analog stick (partial deflection =
-	// proportionally slower), leaving the STORED velocity untouched. The engine's acceleration model
-	// and all its gates (dead, on the ground, in a terminal, on a platform...) run exactly as
-	// original -- so no moving while dead, and no feedback. (Scaling the stored velocity fed back into
-	// the accel loop each tick and compounded into a snail's pace.)
-	if (VR_IsActive() && player == local_player)
-	{
-		float strafe = 0, forward = 0;
-		VR_GetAnalogMove(&strafe, &forward);
-		const float fmag = forward < 0 ? -forward : forward;
-		const float smag = strafe  < 0 ? -strafe  : strafe;
-		move_velocity      = (_fixed)(move_velocity * fmag);
-		move_perp_velocity = (_fixed)(move_perp_velocity * smag);
-	}
-#endif
 	new_position.x+= (move_velocity*cosine-move_perp_velocity*sine)>>TRIG_SHIFT;
 	new_position.y+= (move_velocity*sine+move_perp_velocity*cosine)>>TRIG_SHIFT;
 	

@@ -1267,17 +1267,14 @@ uint32 parse_keymap(void)
 		// left trigger = secondary, A = action/use.
 		flags &= ~(_left_trigger_state | _right_trigger_state);
 		{
-			float mx = 0, my = 0, tx = 0;
-			VR_GetMove(&mx, &my);
+			float tx = 0;
+			// Deadzoned + curved stick reading (shared with the ABSOLUTE_POSITION encoding below,
+			// so both use the exact same curve -- no separately-duplicated deadzone constant).
+			float analogStrafe = 0, analogForward = 0;
+			VR_GetAnalogMove(&analogStrafe, &analogForward);
 			VR_GetTurn(&tx);
-			// Flags drive the engine's "moving" state (footsteps/animation); the actual analog SPEED
-			// comes from VR_GetAnalogMove applied to the player velocity in physics.cpp. Match the
-			// analog deadzone so the two agree.
-			const float dead = 0.15f;
-			if (my >  dead) flags |= _moving_forward;
-			else if (my < -dead) flags |= _moving_backward;
-			if (mx < -dead) flags |= _sidestepping_left;
-			else if (mx >  dead) flags |= _sidestepping_right;
+			if (analogStrafe < 0) flags |= _sidestepping_left;
+			else if (analogStrafe > 0) flags |= _sidestepping_right;
 			VR_UpdateTurn(tx, 1.0f / 30.0f);   // ~TICKS_PER_SECOND; no continuous _turning_* flags
 			// Fire always comes from the triggers; the button map can ADD extra fire buttons on top.
 			if (VR_GetFire()          || VR_ActionHeld(VR_ACT_PRIMARY_FIRE))   flags |= _left_trigger_state;
@@ -1296,6 +1293,32 @@ uint32 parse_keymap(void)
 			// _inputmod_run_key_toggle pref (toggle vs hold) exactly like the keyboard run key.
 			if (VR_ActionHeld(VR_ACT_ACTION_USE)) flags |= _action_trigger_state;
 			if (VR_ActionHeld(VR_ACT_RUN))        flags |= _run_dont_walk;
+			// Forward/back analog magnitude used to be applied as a LOCAL per-tick velocity scale in
+			// physics.cpp, read live off the controller and gated to "this is my own local player" --
+			// invisible to every other client simulating this player, so remote machines always
+			// replayed at full velocity: a guaranteed net desync. Encode it instead into action_flags'
+			// (pre-existing, previously-unused) ABSOLUTE_POSITION field, exactly like mouselook already
+			// encodes yaw/pitch -- so the analog speed travels over the wire and every client computes
+			// the same velocity for this player. Zero flags/emitted-message format change: this field
+			// (SET_ABSOLUTE_POSITION/_absolute_position_mode) has existed since before the VR port and
+			// physics.cpp already knows how to decode it.
+			//
+			// Sidestep intentionally stays a discrete on/off flag (_sidestepping_left/right, set above)
+			// rather than getting the same absolute-magnitude treatment: there's no analogous unused
+			// wire field for it, and inventing one would be exactly the schema change we're avoiding.
+			if (analogForward != 0.0f)
+			{
+				int encoded = (int)(analogForward * (float)(MAXIMUM_ABSOLUTE_POSITION / 2))
+					+ MAXIMUM_ABSOLUTE_POSITION / 2;
+				encoded = PIN(encoded, 0, MAXIMUM_ABSOLUTE_POSITION - 1);
+				// _run_dont_walk's bit sits INSIDE this same packed 7-bit field (a preexisting quirk of
+				// the field layout, not something introduced here), and SET_ABSOLUTE_POSITION clears the
+				// whole field before writing -- fold the run state we just decided back into the payload
+				// so it survives, at the cost of +/-1 part in 32 (~3%) of quantizing noise on the encoded
+				// speed while running.
+				if (flags & _run_dont_walk) encoded |= 0x4; else encoded &= ~0x4;
+				flags = SET_ABSOLUTE_POSITION(flags, encoded) | _absolute_position_mode;
+			}
 			// One-shot (edge-triggered) mapped actions -- weapon cycle, map toggle, recenter. Edge is
 			// detected here (tick-aligned) off VR_ActionHeld so a press = one event regardless of which
 			// button (or how many) is bound to it. In-game only: build_terminal_action_flags overwrites
