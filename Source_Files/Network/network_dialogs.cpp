@@ -75,7 +75,8 @@ Apr 10, 2003 (Woody Zenfell):
 #include	"network.h"
 #include	"network_games.h"
 #include	"metaserver_dialogs.h" // GameAvailableMetaserverAnnouncer
-#include	"wad.h" // jkvw: for read_wad_file_checksum 
+#include	"vr_openxr.h" // VR_KB_* on-screen keyboard hints
+#include	"wad.h" // jkvw: for read_wad_file_checksum
 #include "game_wad.h" // get_map_file
 #include <map>
 #include <functional>
@@ -2543,6 +2544,7 @@ public:
 		prejoin_table->dual_add(hint_w, m_dialog);
 
 		w_text_entry* hint_address_w = new w_text_entry(kJoinHintingAddressLength, "");
+		hint_address_w->set_input_hint(VR_KB_IP);   // digits + '.' VR keyboard for the join address
 		prejoin_table->dual_add(hint_address_w->label("Join address"), m_dialog);
 		prejoin_table->dual_add(hint_address_w, m_dialog);
 

@@ -60,6 +60,8 @@ extern "C" void VR_PresentScreenLayer(void) {}
 extern "C" bool VR_GetPointerScreen(int* x, int* y) { (void)x; (void)y; return false; }
 extern "C" bool VR_GetPointerClick(void) { return false; }
 extern "C" bool VR_GetPointerGrip(void) { return false; }
+extern "C" void VR_SetKeyboardInputHint(int) {}
+extern "C" void VR_KeyboardDismiss(void) {}
 extern "C" bool VR_GetAimPoseStage(int, float*, float*) { return false; }
 extern "C" bool VR_GetAimOrientStage(int, float*, float*) { return false; }
 extern "C" void VR_SetIsDualWield(bool) {}

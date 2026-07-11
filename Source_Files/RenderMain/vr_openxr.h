@@ -265,6 +265,15 @@ bool VR_GetPointerGrip(void);   // true when the pointing hand's grip/squeeze is
 int      VR_ScreenLayerWidth(void);
 int      VR_ScreenLayerHeight(void);
 
+// ---- On-screen keyboard (menus/preferences only) ----
+// A second world-locked, reclined quad shown below the menu panel whenever an SDL text field is
+// focused, so the controller laser can type into dialog text entries (there is no physical keyboard
+// on Quest). Keys synthesize the SDL_TEXTINPUT/SDL_KEYDOWN events the entry widgets already consume.
+// The input hint selects the layout for the focused field. Reported by the text-entry widget on focus.
+enum { VR_KB_ALPHA = 0, VR_KB_NUMERIC = 1, VR_KB_IP = 2 };
+void VR_SetKeyboardInputHint(int hint);   // a text field gained focus: show the keyboard with this layout
+void VR_KeyboardDismiss(void);            // a text field lost focus / dialog closed: hide the keyboard
+
 // Controller aim pose this frame, in STAGE space (metres, Y-up): origin (pos3) + unit forward (fwd3,
 // the controller's -Z). hand 0=left, 1=right. Returns false if the pose isn't tracked. Used to draw
 // the 3D-gun aim debug (controller marker + ray + hit dot) and, later, to aim weapons. The engine

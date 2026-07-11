@@ -48,6 +48,7 @@
 
 #include "shape_descriptors.h"
 #include "screen_drawing.h"
+#include "vr_openxr.h"
 #include "images.h"
 #include "shell.h"
 #include "world.h"
@@ -1225,8 +1226,10 @@ void w_text_entry::set_active(bool new_active) {
 	if (new_active && !active) {
 		cursor_position = num_chars;
 		SDL_StartTextInput();
+		VR_SetKeyboardInputHint(input_hint);   // show the VR on-screen keyboard with this field's layout
 	} else if (!new_active && active) {
 		SDL_StopTextInput();
+		VR_KeyboardDismiss();                   // hide the VR on-screen keyboard
 	}
 	widget::set_active(new_active);
 }
@@ -1449,6 +1452,7 @@ w_number_entry::w_number_entry(int initial_number) : w_text_entry(/*16*/4, NULL)
 {
 	set_number(initial_number);
 	saved_min_width = MAX_TEXT_WIDTH / 2;
+	input_hint = VR_KB_NUMERIC;   // digits-only VR keyboard
 }
 
 void w_number_entry::event(SDL_Event &e)

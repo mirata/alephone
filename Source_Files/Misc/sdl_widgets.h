@@ -492,10 +492,14 @@ public:
 	void enable_mac_roman_input(bool enable = true) { enable_mac_roman = enable; }
 	void place(const SDL_Rect& r, placement_flags flags);
 
-       
+	// VR on-screen-keyboard layout hint for this field (VR_KB_ALPHA/NUMERIC/IP). Reported to the VR
+	// layer on focus so the floating keyboard shows the right layout. Ignored off Quest.
+	void set_input_hint(int hint) { input_hint = hint; }
+
 protected:
 	char *buf;		// Text entry buffer
 	void set_active(bool new_active);
+	int input_hint = 0;	// VR_KB_ALPHA
 
         Callback	enter_pressed_callback;
         Callback	value_changed_callback;

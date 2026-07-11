@@ -25,9 +25,13 @@
 #include <android/log.h>
 #include <SDL2/SDL.h>
 #include <cstring>
+#include <cstdlib>
 #include <cmath>
 
 #include "vr_openxr.h"
+#include "sdl_fonts.h"       // font_info (on-screen keyboard label rendering)
+#include "screen_drawing.h"  // draw_text / text_width
+#include "sdl_dialogs.h"     // get_theme_font / DEFAULT_WIDGET
 
 #define A1VR_LOG(...) __android_log_print(ANDROID_LOG_INFO, "A1VR", __VA_ARGS__)
 #define XR_CHECK(call) do { XrResult _r = (call); if (XR_FAILED(_r)) A1VR_LOG("%s -> %d", #call, _r); } while (0)
@@ -1944,6 +1948,336 @@ extern "C" bool VR_TakeMenuButton(void) { bool v = s_menuLatch; s_menuLatch = fa
 // user presses the Meta/home button and goes to the system overlay -> the engine pauses on that.
 extern "C" bool VR_HasFocus(void) { return s_sessionState == XR_SESSION_STATE_FOCUSED; }
 
+// ----------------------------------------------------- on-screen keyboard ----
+// A second world-locked quad, placed below the menu panel and reclined ~30 degrees ("almost
+// billboarded"), that lets the controller laser type into dialog text fields (menus/preferences).
+// Keys are clickable regions; a press synthesizes the same SDL_TEXTINPUT / SDL_KEYDOWN events a
+// physical keyboard would, which the dialog text-entry widgets already consume. Shown whenever SDL
+// text input is active (i.e. a w_text_entry is focused) during a 2D menu frame. Not drawn in-game
+// (VR_PresentScreenLayer only runs for menu/loading frames), so this is strictly menu-time input.
+namespace {
+	enum { KB_ALPHA = 0, KB_NUMERIC = 1, KB_IP = 2 };
+	enum KbAct { KA_CHAR, KA_BKSP, KA_ENTER, KA_SHIFT, KA_SYMBOLS, KA_LEFT, KA_RIGHT, KA_SPACE };
+	struct KbKey { float x, y, w, h; KbAct act; char lo, hi; const char* label; };
+
+	constexpr int kKbW = 1024, kKbH = 512;   // keyboard texture size (px)
+	// --- placement tunables (code-only for v1; tweak + rebuild) ---
+	constexpr float kKbReclineDeg = 30.0f;   // lay-back from the menu's vertical plane
+	constexpr float kKbGapM       = 0.12f;   // gap below the menu panel's bottom edge (metres)
+	constexpr float kKbForwardM   = 0.30f;   // brought toward the user from the menu plane (metres)
+	constexpr float kKbWidthScale = 1.0f;    // keyboard width relative to the menu panel width
+
+	int    s_kbMode = KB_ALPHA;
+	bool   s_kbShift = false, s_kbSymbols = false;
+	KbKey  s_kbKeys[64];
+	int    s_kbKeyCount = 0;
+	int    s_kbLayoutMode = -1; bool s_kbLayoutShift = false, s_kbLayoutSymbols = false;
+	int    s_kbHover = -1;
+	bool   s_kbDirty = true;
+	bool   s_kbTrigPrev = false;
+
+	GLuint       s_kbTex  = 0;
+	SDL_Surface* s_kbSurf = nullptr;
+
+	float s_kbC[3], s_kbR[3], s_kbU[3], s_kbN[3];
+	float s_kbHalfW = 0.5f, s_kbHalfH = 0.25f;
+	bool  s_kbPlaced = false;
+
+	struct KbPtr { bool active; float u, v; int key; };
+	KbPtr s_kbPtr[2] = {};
+
+	// Visibility follows SDL's text-input state, which the dialog layer manages authoritatively across
+	// every transition: focus a text field -> SDL_StartTextInput; switch/leave a field or close the
+	// dialog (dialog::finish) -> SDL_StopTextInput. So the keyboard shows/hides in lockstep with focus
+	// without us tracking teardown ourselves. VR_SetKeyboardInputHint only picks the layout.
+	bool kbVisible() { return SDL_IsTextInputActive() == SDL_TRUE; }
+
+	void kbAddKey(float x, float y, float w, float h, KbAct act, char lo, char hi, const char* label) {
+		if (s_kbKeyCount < (int)(sizeof s_kbKeys / sizeof s_kbKeys[0]))
+			s_kbKeys[s_kbKeyCount++] = KbKey{ x, y, w, h, act, lo, hi, label };
+	}
+	void kbAddCharRow(const char* chars, float y, float rh, float startX, float cw) {
+		for (int i = 0; chars[i]; ++i) {
+			char c = chars[i];
+			char up = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+			kbAddKey(startX + i * cw, y, cw, rh, KA_CHAR, c, up, nullptr);
+		}
+	}
+	void kbBuildLayout() {
+		s_kbKeyCount = 0;
+		if (s_kbMode == KB_ALPHA) {
+			const float rh = 1.0f / 5.0f;
+			kbAddCharRow("1234567890", 0*rh, rh, 0.0f, 0.1f);
+			if (!s_kbSymbols) {
+				kbAddCharRow("qwertyuiop", 1*rh, rh, 0.0f,  0.1f);
+				kbAddCharRow("asdfghjkl",  2*rh, rh, 0.05f, 0.1f);
+				kbAddKey(0.0f,  3*rh, 0.15f, rh, KA_SHIFT, 0, 0, s_kbShift ? "SHFT" : "shft");
+				kbAddCharRow("zxcvbnm", 3*rh, rh, 0.15f, 0.1f);
+				kbAddKey(0.85f, 3*rh, 0.15f, rh, KA_BKSP, 0, 0, "<-");
+			} else {
+				kbAddCharRow("@#$_&-+()/", 1*rh, rh, 0.0f,  0.1f);
+				kbAddCharRow("*\"':;!?\\|", 2*rh, rh, 0.05f, 0.1f);
+				kbAddKey(0.0f, 3*rh, 0.15f, rh, KA_CHAR, '=', '=', nullptr);
+				kbAddCharRow("<>[]{}~", 3*rh, rh, 0.15f, 0.1f);
+				kbAddKey(0.85f, 3*rh, 0.15f, rh, KA_BKSP, 0, 0, "<-");
+			}
+			const float y4 = 4*rh;
+			kbAddKey(0.00f, y4, 0.15f, rh, KA_SYMBOLS, 0, 0, s_kbSymbols ? "ABC" : "?123");
+			kbAddKey(0.15f, y4, 0.45f, rh, KA_SPACE, ' ', ' ', "space");
+			kbAddKey(0.60f, y4, 0.10f, rh, KA_CHAR, '.', '.', nullptr);
+			kbAddKey(0.70f, y4, 0.10f, rh, KA_LEFT,  0, 0, "<");
+			kbAddKey(0.80f, y4, 0.10f, rh, KA_RIGHT, 0, 0, ">");
+			kbAddKey(0.90f, y4, 0.10f, rh, KA_ENTER, 0, 0, "OK");
+		} else {
+			const float rh = 1.0f / 4.0f, cw = 0.25f;
+			kbAddCharRow("123", 0*rh, rh, 0.0f, cw); kbAddKey(0.75f, 0*rh, cw, rh, KA_BKSP,  0, 0, "<-");
+			kbAddCharRow("456", 1*rh, rh, 0.0f, cw); kbAddKey(0.75f, 1*rh, cw, rh, KA_LEFT,  0, 0, "<");
+			kbAddCharRow("789", 2*rh, rh, 0.0f, cw); kbAddKey(0.75f, 2*rh, cw, rh, KA_RIGHT, 0, 0, ">");
+			if (s_kbMode == KB_IP) {
+				kbAddKey(0.00f, 3*rh, cw, rh, KA_CHAR, '.', '.', nullptr);
+				kbAddKey(0.25f, 3*rh, cw, rh, KA_CHAR, '0', '0', nullptr);
+				kbAddKey(0.50f, 3*rh, cw, rh, KA_CHAR, ':', ':', nullptr);
+				kbAddKey(0.75f, 3*rh, cw, rh, KA_ENTER, 0, 0, "OK");
+			} else {
+				kbAddKey(0.00f, 3*rh, 0.75f, rh, KA_CHAR, '0', '0', nullptr);
+				kbAddKey(0.75f, 3*rh, 0.25f, rh, KA_ENTER, 0, 0, "OK");
+			}
+		}
+	}
+	void kbEnsureLayout() {
+		if (s_kbLayoutMode == s_kbMode && s_kbLayoutShift == s_kbShift && s_kbLayoutSymbols == s_kbSymbols)
+			return;
+		kbBuildLayout();
+		s_kbLayoutMode = s_kbMode; s_kbLayoutShift = s_kbShift; s_kbLayoutSymbols = s_kbSymbols;
+		s_kbDirty = true;
+	}
+	void kbEnsureTex() {
+		if (s_kbTex) return;
+		glGenTextures(1, &s_kbTex);
+		glBindTexture(GL_TEXTURE_2D, s_kbTex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kKbW, kKbH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	}
+	// Redraw the key faces into s_kbSurf and upload to s_kbTex. Called only when the layout, shift/
+	// symbol state, or the hovered key changes -- not per frame.
+	void kbRebuild() {
+		if (!s_kbSurf)
+			s_kbSurf = SDL_CreateRGBSurfaceWithFormat(0, kKbW, kKbH, 32, SDL_PIXELFORMAT_ABGR8888);
+		if (!s_kbSurf) return;
+		SDL_PixelFormat* fmt = s_kbSurf->format;
+		uint16 style = 0;
+		font_info* font = get_theme_font(DEFAULT_WIDGET, style);
+		SDL_FillRect(s_kbSurf, nullptr, SDL_MapRGBA(fmt, 18, 20, 26, 235));
+		for (int i = 0; i < s_kbKeyCount; ++i) {
+			const KbKey& k = s_kbKeys[i];
+			SDL_Rect r{ (int)(k.x*kKbW) + 3, (int)(k.y*kKbH) + 3, (int)(k.w*kKbW) - 6, (int)(k.h*kKbH) - 6 };
+			const bool hot = (i == s_kbHover);
+			const bool special = (k.act != KA_CHAR);
+			Uint32 fill = hot     ? SDL_MapRGBA(fmt, 95, 130, 190, 255)
+			            : special ? SDL_MapRGBA(fmt, 48, 52, 62, 255)
+			                      : SDL_MapRGBA(fmt, 70, 74, 88, 255);
+			SDL_FillRect(s_kbSurf, &r, fill);
+			char cbuf[2];
+			const char* text;
+			if (k.act == KA_CHAR) { cbuf[0] = s_kbShift ? k.hi : k.lo; cbuf[1] = 0; text = cbuf; }
+			else                    text = k.label ? k.label : "";
+			if (font && text[0]) {
+				uint16 tw = text_width(text, font, style);
+				int tx = r.x + (r.w - tw) / 2;
+				int ty = r.y + (r.h + font->get_ascent() - font->get_descent()) / 2;
+				draw_text(s_kbSurf, text, tx, ty, SDL_MapRGB(fmt, 235, 236, 242), font, style);
+			}
+		}
+		kbEnsureTex();
+		glBindTexture(GL_TEXTURE_2D, s_kbTex);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+		// GL texel row 0 is the BOTTOM; our SDL surface has row 0 at the TOP, and the quad samples it
+		// with the same UVs as the (OGL_Blitter-flipped) menu -- so upload the rows reversed, otherwise
+		// the whole keyboard renders vertically flipped (numbers at the bottom, glyphs upside down).
+		const int pitch = s_kbSurf->pitch;
+		static unsigned char* flip = nullptr;
+		if (!flip) flip = (unsigned char*)malloc((size_t)pitch * kKbH);
+		if (flip) {
+			const unsigned char* src = (const unsigned char*)s_kbSurf->pixels;
+			for (int y = 0; y < kKbH; ++y)
+				memcpy(flip + (size_t)y * pitch, src + (size_t)(kKbH - 1 - y) * pitch, pitch);
+			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kKbW, kKbH, GL_RGBA, GL_UNSIGNED_BYTE, flip);
+		} else {
+			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kKbW, kKbH, GL_RGBA, GL_UNSIGNED_BYTE, s_kbSurf->pixels);
+		}
+		s_kbDirty = false;
+	}
+	// Place the keyboard below the menu panel, reclined about the menu's right axis so it faces up
+	// toward the head. Anchored to the menu bottom edge, brought toward the user; the top edge stays
+	// put as recline changes. Done once per dialog (persists across field focus changes).
+	void kbPlace() {
+		if (!s_panelPlaced) return;
+		const float th = kKbReclineDeg * (3.14159265358979f / 180.0f);
+		const float ct = std::cos(th), st = std::sin(th);
+		s_kbHalfW = s_panelHalfW * kKbWidthScale;
+		s_kbHalfH = s_kbHalfW * (float)kKbH / (float)kKbW;
+		for (int i = 0; i < 3; ++i) {
+			s_kbR[i] = s_panelR[i];
+			s_kbU[i] = s_panelU[i]*ct - s_panelN[i]*st;   // reclined up
+			s_kbN[i] = s_panelN[i]*ct + s_panelU[i]*st;   // reclined normal (tilts up toward head)
+		}
+		vnorm(s_kbU); vnorm(s_kbN);
+		float top[3];
+		for (int i = 0; i < 3; ++i)
+			top[i] = s_panelC[i] - s_panelU[i]*(s_panelHalfH + kKbGapM) + s_panelN[i]*kKbForwardM;
+		for (int i = 0; i < 3; ++i)
+			s_kbC[i] = top[i] - s_kbU[i]*s_kbHalfH;
+		s_kbPlaced = true;
+		A1VR_LOG("kb placed C=(%.2f,%.2f,%.2f) N=(%.2f,%.2f,%.2f) halfW=%.2f halfH=%.2f menuC=(%.2f,%.2f,%.2f)",
+			s_kbC[0], s_kbC[1], s_kbC[2], s_kbN[0], s_kbN[1], s_kbN[2], s_kbHalfW, s_kbHalfH,
+			s_panelC[0], s_panelC[1], s_panelC[2]);
+	}
+	// Ray-cast one controller onto the keyboard plane. Returns true if it lands within the panel;
+	// outputs panel-local u,v in [-1,1] (for the cursor) and the key index under it (-1 if none).
+	bool kbHitPanel(int h, float* uOut, float* vOut, int* keyOut) {
+		if (!s_aimValid[h]) return false;
+		float O[3] = { s_aimStage[h].position.x, s_aimStage[h].position.y, s_aimStage[h].position.z };
+		float Dd[3]; poseFwd(s_aimStage[h], Dd);
+		float denom = vdot(Dd, s_kbN);
+		if (denom > -1e-4f) return false;
+		float oc[3]; vsub(s_kbC, O, oc);
+		float t = vdot(oc, s_kbN) / denom;
+		if (t <= 0) return false;
+		float hit[3] = { O[0]+Dd[0]*t, O[1]+Dd[1]*t, O[2]+Dd[2]*t };
+		float loc[3]; vsub(hit, s_kbC, loc);
+		float u = vdot(loc, s_kbR) / s_kbHalfW;
+		float v = vdot(loc, s_kbU) / s_kbHalfH;
+		if (u < -1 || u > 1 || v < -1 || v > 1) return false;
+		*uOut = u; *vOut = v;
+		float px = u*0.5f + 0.5f, py = 1.0f - (v*0.5f + 0.5f);
+		int key = -1;
+		for (int i = 0; i < s_kbKeyCount; ++i) {
+			const KbKey& k = s_kbKeys[i];
+			if (px >= k.x && px < k.x+k.w && py >= k.y && py < k.y+k.h) { key = i; break; }
+		}
+		*keyOut = key;
+		return true;
+	}
+	void kbPushKey(SDL_Keycode sym) {
+		SDL_Event d{}; d.type = SDL_KEYDOWN; d.key.state = SDL_PRESSED; d.key.repeat = 0;
+		d.key.keysym.sym = sym; d.key.keysym.scancode = SDL_GetScancodeFromKey(sym); d.key.keysym.mod = KMOD_NONE;
+		SDL_PushEvent(&d);
+		SDL_Event u{}; u.type = SDL_KEYUP; u.key.state = SDL_RELEASED;
+		u.key.keysym.sym = sym; u.key.keysym.scancode = SDL_GetScancodeFromKey(sym); u.key.keysym.mod = KMOD_NONE;
+		SDL_PushEvent(&u);
+	}
+	void kbPress(int i) {
+		if (i < 0 || i >= s_kbKeyCount) return;
+		const KbKey& k = s_kbKeys[i];
+		switch (k.act) {
+			case KA_CHAR: {
+				char c = s_kbShift ? k.hi : k.lo;
+				if (!c) break;
+				SDL_Event e{}; e.type = SDL_TEXTINPUT; e.text.text[0] = c; e.text.text[1] = 0;
+				SDL_PushEvent(&e);
+				if (s_kbShift) { s_kbShift = false; }   // shift is one-shot
+			} break;
+			case KA_SPACE: {
+				SDL_Event e{}; e.type = SDL_TEXTINPUT; e.text.text[0] = ' '; e.text.text[1] = 0;
+				SDL_PushEvent(&e);
+			} break;
+			case KA_BKSP:    kbPushKey(SDLK_BACKSPACE); break;
+			case KA_ENTER:   kbPushKey(SDLK_RETURN);    break;
+			case KA_LEFT:    kbPushKey(SDLK_LEFT);      break;
+			case KA_RIGHT:   kbPushKey(SDLK_RIGHT);     break;
+			case KA_SHIFT:   s_kbShift = !s_kbShift;    break;
+			case KA_SYMBOLS: s_kbSymbols = !s_kbSymbols; s_kbShift = false; break;
+		}
+	}
+	// Per-menu-frame keyboard update: place (once), ray-cast both hands, drive hover/click, and
+	// suppress the menu pointer for any hand that is on the keyboard (so key clicks don't leak
+	// through to the widgets behind it). Call after updatePointer(), before the eye loop.
+	void kbUpdate() {
+		{ static int c = 0; if ((c++ % 60) == 0) A1VR_LOG("kb upd vis=%d panelPlaced=%d kbPlaced=%d keys=%d hover=%d headValid=%d",
+			(int)kbVisible(), (int)s_panelPlaced, (int)s_kbPlaced, s_kbKeyCount, s_kbHover, (int)s_headPoseValid); }
+		if (!kbVisible()) { s_kbPlaced = false; s_kbHover = -1; s_kbTrigPrev = false; s_kbPtr[0].active = s_kbPtr[1].active = false; return; }
+		if (!s_kbPlaced) kbPlace();
+		if (!s_kbPlaced) return;
+		kbEnsureLayout();
+
+		const int dom = s_settings.dominantHand ? 0 : 1, off = 1 - dom;
+		const int order[2] = { dom, off };
+		int usedHand = -1, newHover = -1;
+		for (int h = 0; h < 2; ++h) s_kbPtr[h].active = false;
+		for (int oi = 0; oi < 2; ++oi) {
+			int h = order[oi];
+			float u, v; int key;
+			if (kbHitPanel(h, &u, &v, &key)) {
+				s_kbPtr[h].active = true; s_kbPtr[h].u = u; s_kbPtr[h].v = v; s_kbPtr[h].key = key;
+				s_ptr[h].active = false;   // this hand is on the keyboard: hide it from the menu pointer
+				if (usedHand < 0) { usedHand = h; newHover = key; }
+			}
+		}
+		if (newHover != s_kbHover) { s_kbHover = newHover; s_kbDirty = true; }
+
+		const bool trig = (usedHand >= 0) && (s_trigger[usedHand] > 0.5f);
+		if (trig && !s_kbTrigPrev && s_kbHover >= 0) kbPress(s_kbHover);
+		s_kbTrigPrev = trig;
+
+		if (s_kbDirty) kbRebuild();
+	}
+	// Draw the keyboard quad + its per-hand cursors into the currently-bound eye. vp = proj*eyeFromStage.
+	void kbDrawEye(const float* vp) {
+		if (!kbVisible() || !s_kbPlaced || !s_kbTex) return;
+		const float hw = s_kbHalfW, hh = s_kbHalfH;
+		float model[16] = {
+			s_kbR[0]*hw, s_kbR[1]*hw, s_kbR[2]*hw, 0,
+			s_kbU[0]*hh, s_kbU[1]*hh, s_kbU[2]*hh, 0,
+			s_kbN[0],    s_kbN[1],    s_kbN[2],    0,
+			s_kbC[0],    s_kbC[1],    s_kbC[2],    1 };
+		float mvp[16]; mat_mul(mvp, vp, model);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glUseProgram(s_quadProg);
+		glUniformMatrix4fv(s_quadMVPLoc, 1, GL_FALSE, mvp);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, s_kbTex);
+		glUniform1i(s_quadTexLoc, 0);
+		glBindVertexArray(s_quadVAO);
+		glDrawArrays(GL_TRIANGLES, 0, 6);
+		// cursors: yellow dot per hand on the keyboard
+		const float cs = 0.012f * 1.3f;
+		glUseProgram(s_curProg);
+		glUniform4f(s_curColorLoc, 0.95f, 0.9f, 0.35f, 0.75f);
+		for (int h = 0; h < 2; ++h) {
+			if (!s_kbPtr[h].active) continue;
+			const float u = s_kbPtr[h].u, v = s_kbPtr[h].v;
+			const float cx = s_kbC[0] + u*hw*s_kbR[0] + v*hh*s_kbU[0] + s_kbN[0]*0.01f;
+			const float cy = s_kbC[1] + u*hw*s_kbR[1] + v*hh*s_kbU[1] + s_kbN[1]*0.01f;
+			const float cz = s_kbC[2] + u*hw*s_kbR[2] + v*hh*s_kbU[2] + s_kbN[2]*0.01f;
+			float cm[16] = {
+				s_kbR[0]*cs, s_kbR[1]*cs, s_kbR[2]*cs, 0,
+				s_kbU[0]*cs, s_kbU[1]*cs, s_kbU[2]*cs, 0,
+				s_kbN[0],    s_kbN[1],    s_kbN[2],    0,
+				cx,          cy,          cz,          1 };
+			float cmvp[16]; mat_mul(cmvp, vp, cm);
+			glUniformMatrix4fv(s_curMVPLoc, 1, GL_FALSE, cmvp);
+			glDrawArrays(GL_TRIANGLES, 0, 6);
+		}
+		glDisable(GL_BLEND);
+		glBindVertexArray(0);
+	}
+}
+
+// Report which keyboard layout the focused text field wants (called by the text-entry widget on
+// focus). Resets shift/symbols on a mode change so the new field starts clean.
+extern "C" void VR_SetKeyboardInputHint(int hint) {
+	int m = (hint == VR_KB_NUMERIC) ? KB_NUMERIC : (hint == VR_KB_IP) ? KB_IP : KB_ALPHA;
+	if (m != s_kbMode) { s_kbMode = m; s_kbShift = false; s_kbSymbols = false; }
+}
+
+// Retained for the widget blur hook; visibility is driven by SDL_IsTextInputActive() so this is a
+// no-op, but it documents the focus-lost transition and keeps the desktop stub symmetric.
+extern "C" void VR_KeyboardDismiss(void) {}
+
 extern "C" void VR_PresentScreenLayer(void)
 {
 	if (!s_active) return;
@@ -1952,6 +2286,7 @@ extern "C" void VR_PresentScreenLayer(void)
 	if (render) {
 		if (!s_panelPlaced && s_headPoseValid) placePanel();
 		updatePointer();   // ray-cast both controllers onto the world-locked panel
+		kbUpdate();        // on-screen keyboard: place/hover/click + suppress menu pointer when on it
 
 		// World-locked panel: local quad (-1..1 XY) -> stage via panelRight/Up/Center.
 		const float hw = s_panelHalfW, hh = s_panelHalfH;
@@ -2008,6 +2343,8 @@ extern "C" void VR_PresentScreenLayer(void)
 			}
 			glDisable(GL_BLEND);
 			glBindVertexArray(0);
+			// on-screen keyboard: its own reclined quad below the menu, drawn over the world
+			kbDrawEye(vp);
 			VR_FinishEye(e);
 		}
 	}
