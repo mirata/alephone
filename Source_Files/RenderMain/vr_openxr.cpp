@@ -2131,9 +2131,6 @@ namespace {
 		for (int i = 0; i < 3; ++i)
 			s_kbC[i] = top[i] - s_kbU[i]*s_kbHalfH;
 		s_kbPlaced = true;
-		A1VR_LOG("kb placed C=(%.2f,%.2f,%.2f) N=(%.2f,%.2f,%.2f) halfW=%.2f halfH=%.2f menuC=(%.2f,%.2f,%.2f)",
-			s_kbC[0], s_kbC[1], s_kbC[2], s_kbN[0], s_kbN[1], s_kbN[2], s_kbHalfW, s_kbHalfH,
-			s_panelC[0], s_panelC[1], s_panelC[2]);
 	}
 	// Ray-cast one controller onto the keyboard plane. Returns true if it lands within the panel;
 	// outputs panel-local u,v in [-1,1] (for the cursor) and the key index under it (-1 if none).
@@ -2196,8 +2193,6 @@ namespace {
 	// suppress the menu pointer for any hand that is on the keyboard (so key clicks don't leak
 	// through to the widgets behind it). Call after updatePointer(), before the eye loop.
 	void kbUpdate() {
-		{ static int c = 0; if ((c++ % 60) == 0) A1VR_LOG("kb upd vis=%d panelPlaced=%d kbPlaced=%d keys=%d hover=%d headValid=%d",
-			(int)kbVisible(), (int)s_panelPlaced, (int)s_kbPlaced, s_kbKeyCount, s_kbHover, (int)s_headPoseValid); }
 		if (!kbVisible()) { s_kbPlaced = false; s_kbHover = -1; s_kbTrigPrev = false; s_kbPtr[0].active = s_kbPtr[1].active = false; return; }
 		if (!s_kbPlaced) kbPlace();
 		if (!s_kbPlaced) return;

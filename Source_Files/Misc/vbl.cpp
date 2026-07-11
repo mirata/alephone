@@ -1273,8 +1273,16 @@ uint32 parse_keymap(void)
 			float analogStrafe = 0, analogForward = 0;
 			VR_GetAnalogMove(&analogStrafe, &analogForward);
 			VR_GetTurn(&tx);
-			if (analogStrafe < 0) flags |= _sidestepping_left;
-			else if (analogStrafe > 0) flags |= _sidestepping_right;
+			// Strafe needs a DELIBERATE sideways push. Forward/back keeps its normal low deadzone
+			// (analogForward -> the ABSOLUTE_POSITION encoding below), so it still responds immediately;
+			// but a mostly-forward push has natural off-axis drift, and without this extra threshold
+			// that drift crossing VR_GetAnalogMove's 0.15 deadzone would instantly fire a full-speed
+			// binary sidestep ("sends me sideways"). analogStrafe is already deadzoned+curved; this is
+			// an additional engage threshold on top. Local input only -- the _sidestepping_* flags
+			// still travel over the wire exactly as before (kStar-6 compatible). Tunable.
+			const float kStrafeEngage = 0.4f;
+			if (analogStrafe < -kStrafeEngage) flags |= _sidestepping_left;
+			else if (analogStrafe > kStrafeEngage) flags |= _sidestepping_right;
 			VR_UpdateTurn(tx, 1.0f / 30.0f);   // ~TICKS_PER_SECOND; no continuous _turning_* flags
 			// Fire always comes from the triggers; the button map can ADD extra fire buttons on top.
 			if (VR_GetFire()          || VR_ActionHeld(VR_ACT_PRIMARY_FIRE))   flags |= _left_trigger_state;

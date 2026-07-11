@@ -80,3 +80,4 @@ extern "C" unsigned VR_HudLayerFramebuffer(void) { return 0; }
 extern "C" int  VR_HudLayerWidth(void)  { return 0; }
 extern "C" int  VR_HudLayerHeight(void) { return 0; }
 extern "C" void VR_PresentHudEye(int)   {}
+extern "C" void VR_RenderLoadingFrame(void) {}

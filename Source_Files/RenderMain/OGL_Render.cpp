@@ -3598,10 +3598,17 @@ bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3])
 	TMgr.RenderNormal();
 	if (RR.transfer_mode == _static_transfer) {
 		// Per-pixel noise via the builtin shader's uIsStatic path (same rand() as invincible.frag).
+#if defined(__ANDROID__)
 		g_vrStaticTime += 16.7f;
 		a1ffStaticMode(1, g_vrStaticTime);
 		glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 		a1ffStaticMode(0, 0.0f);
+#else
+		// a1ffStaticMode is an Android GLES-shim builtin (gl_es_compat.h, not compiled on desktop).
+		// This fixed-function quad path is VR-oriented; on desktop just draw the sprite so the build
+		// links (desktop's own renderers handle _static_transfer elsewhere via the S_Invincible shader).
+		glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+#endif
 	} else if (IsInfravisionActive()) {
 		// sprite_infravision.frag: texture → greyscale × vertexColor (tint set in glColor4f above).
 		Shader::get(Shader::S_SpriteInfravision)->enable();
