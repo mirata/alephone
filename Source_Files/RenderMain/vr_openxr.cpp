@@ -488,7 +488,7 @@ namespace {
 		/* hudDistanceM    */ 0.8f,   // head-locked HUD plane distance
 		/* hudSizeM        */ 0.55f,  // head-locked HUD plane height (width follows natural aspect)
 		/* hudTiltDeg      */ 30.0f,  // degrees the HUD bottom-anchor is pitched down from horizontal
-		/* mapPlayerUp     */ 0,      // overhead map rotation: 0=north-up, 1=player-facing-up
+		/* mapPlayerUp     */ 1,      // overhead map rotation: 0=north-up, 1=player-facing-up (default on for VR)
 		/* teleportDistortion */ 1,   // horizontal-stretch/vertical-compress warp on teleport (may cause nausea)
 		/* showLaserSight   */ 0,
 		/* showAimGizmos    */ 0,     // controller aim diagnostic gizmos (OFF; debug-only, flip to 1 to show)

@@ -1009,6 +1009,18 @@ bool player_weapon_is_fist(
 	return player_weapons->current_weapon == _weapon_fist;
 }
 
+// True if the given weapon type carries the Marathon 1 flag. The VR renderer uses this to
+// distinguish M1's single-hand fist from the M2/Infinity alternating dual fists: the engine's
+// own dual-wield test (test_raise_double_weapon) is _twofisted_pistol_class OR (_melee_class
+// AND !_weapon_is_marathon_1), so the M1 fist is single-handed and must render on the dominant
+// hand rather than being routed by on-screen sprite position.
+bool weapon_type_is_marathon_1(
+	short weapon_type)
+{
+	if (weapon_type < 0 || weapon_type >= NUMBER_OF_WEAPONS) return false;
+	return (get_weapon_definition(weapon_type)->flags & _weapon_is_marathon_1) != 0;
+}
+
 short get_player_weapon_ammo_count(
 	short player_index, 
 	short which_weapon,

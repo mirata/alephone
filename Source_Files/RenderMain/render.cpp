@@ -770,9 +770,16 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 	// tick always sees current weapon state regardless of whether weapons are being drawn.
 	short weap_type = NONE, weap_mode = 0;
 	get_player_weapon_mode_and_type(current_player_index, &weap_type, &weap_mode);
+	// Mirror the engine's own dual-wield test (test_raise_double_weapon in weapons.cpp):
+	// _twofisted_pistol_class OR (_melee_class AND !marathon_1). Marathon 2/Infinity fists are
+	// alternating dual fists (routed to hands by on-screen sprite position below); Marathon 1's
+	// fist is a single-hand melee whose idle sprite sits on the left of the screen — treating it
+	// as dual would map it to the off-hand, so a lefty would punch with their non-dominant
+	// controller. Excluding the M1 fist here sends it down the single-weapon path (hand = domHand).
 	const bool weapon_is_dual = (weap_type == _weapon_doublefisted_pistols ||
 	                              weap_type == _weapon_doublefisted_shotguns ||
-	                              weap_type == _weapon_fist);
+	                              (weap_type == _weapon_fist &&
+	                               !weapon_type_is_marathon_1(_weapon_fist)));
 	VR_SetIsDualWield(weapon_is_dual);
 	// Suppress grip-based secondary fire for weapons whose secondary is identical to primary.
 	VR_SetGripAltFireEnabled(weap_type != _weapon_fist && weap_type != _weapon_pistol);

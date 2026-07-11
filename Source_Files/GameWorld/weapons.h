@@ -199,6 +199,10 @@ void get_player_weapon_mode_and_type(short player_index, short *shape_weapon_typ
 short get_player_desired_weapon(short player_index);
 bool player_weapon_is_fist(short player_index);
 
+/* True if the weapon type has the Marathon 1 flag (used by the VR renderer to treat the
+   M1 fist as a single dominant-hand melee rather than an alternating dual-fist). */
+bool weapon_type_is_marathon_1(short weapon_type);
+
 /* This is pinned to the maximum I think I can hold.. */
 short get_player_weapon_ammo_count(short player_index, short which_weapon, short which_trigger);
 
