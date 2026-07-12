@@ -89,6 +89,8 @@ running backwards shouldn’t mean doom in a fistfight
 #include "ChaseCam.h"
 #include "Packing.h"
 
+#include "vr_openxr.h"   // VR analog movement (single-player per-axis displacement scaling)
+
 #include <string.h>
 #include <cstdlib>
 #include <algorithm>
@@ -837,13 +839,25 @@ static void physics_update(
 	new_position= variables->position;
 	cosine= cosine_table[FIXED_INTEGERAL_PART(variables->direction)], sine= sine_table[FIXED_INTEGERAL_PART(variables->direction)];
 
-	// NOTE: analog stick magnitude for VR forward/back movement is NOT applied here as a local
-	// per-tick displacement scale -- it used to be, reading live controller state gated to
-	// "player == local_player", which desynced net games (every OTHER client simulating this
-	// player never saw that scale, so they replayed at full velocity). It's now encoded into
-	// action_flags' ABSOLUTE_POSITION field at input-gather time (see SET_ABSOLUTE_POSITION in
-	// vbl.cpp), so variables->velocity above is already the correct, synced value for every client.
 	_fixed move_velocity = variables->velocity, move_perp_velocity = variables->perpendicular_velocity;
+#if defined(__ANDROID__)
+	// SINGLE-PLAYER VR: scale each axis' per-tick DISPLACEMENT independently by its own analog stick
+	// magnitude (partial deflection = proportionally slower, forward and strafe separately). This is
+	// the original pre-netcode feel and it's what makes VR movement smooth. Reads live controller
+	// state gated to the local player, so it is DELIBERATELY single-player only: in a netgame every
+	// other client simulating this player never sees this scale and would replay at full velocity =
+	// desync. Netgames instead ride the forward speed in action_flags' ABSOLUTE_POSITION field and use
+	// a binary strafe (see vbl.cpp), so this block must stand down when networked.
+	if (VR_IsActive() && player == local_player && !game_is_networked)
+	{
+		float strafe = 0, forward = 0;
+		VR_GetAnalogMove(&strafe, &forward);
+		const float fmag = forward < 0 ? -forward : forward;
+		const float smag = strafe  < 0 ? -strafe  : strafe;
+		move_velocity      = (_fixed)(move_velocity * fmag);
+		move_perp_velocity = (_fixed)(move_perp_velocity * smag);
+	}
+#endif
 	new_position.x+= (move_velocity*cosine-move_perp_velocity*sine)>>TRIG_SHIFT;
 	new_position.y+= (move_velocity*sine+move_perp_velocity*cosine)>>TRIG_SHIFT;
 	

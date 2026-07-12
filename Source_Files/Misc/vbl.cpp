@@ -1268,21 +1268,36 @@ uint32 parse_keymap(void)
 		flags &= ~(_left_trigger_state | _right_trigger_state);
 		{
 			float tx = 0;
-			// Deadzoned + curved stick reading (shared with the ABSOLUTE_POSITION encoding below,
-			// so both use the exact same curve -- no separately-duplicated deadzone constant).
-			float analogStrafe = 0, analogForward = 0;
-			VR_GetAnalogMove(&analogStrafe, &analogForward);
 			VR_GetTurn(&tx);
-			// Strafe needs a DELIBERATE sideways push. Forward/back keeps its normal low deadzone
-			// (analogForward -> the ABSOLUTE_POSITION encoding below), so it still responds immediately;
-			// but a mostly-forward push has natural off-axis drift, and without this extra threshold
-			// that drift crossing VR_GetAnalogMove's 0.15 deadzone would instantly fire a full-speed
-			// binary sidestep ("sends me sideways"). analogStrafe is already deadzoned+curved; this is
-			// an additional engage threshold on top. Local input only -- the _sidestepping_* flags
-			// still travel over the wire exactly as before (kStar-6 compatible). Tunable.
-			const float kStrafeEngage = 0.4f;
-			if (analogStrafe < -kStrafeEngage) flags |= _sidestepping_left;
-			else if (analogStrafe > kStrafeEngage) flags |= _sidestepping_right;
+
+			// MOVEMENT splits on netplay: the wire-sync compromises aren't wanted in single-player,
+			// where there are no other clients to desync (Daniel's call 2026-07-12).
+			//   * SINGLE-PLAYER: original feel -- binary direction flags at the low 0.15 deadzone on
+			//     BOTH axes; physics.cpp then scales each axis' displacement independently by its own
+			//     analog magnitude (full smooth per-axis analog). No wire encoding, no strafe deadzone.
+			//   * NETPLAY: forward speed rides the ABSOLUTE_POSITION action-flag field (synced,
+			//     stock/kStar-6 compatible; encoded below, after the run flag), and strafe is a binary
+			//     on/off flag with a DELIBERATE-push deadzone (there is no analog-strafe wire channel,
+			//     so incidental off-axis drift of a forward push mustn't fire a full-speed sidestep).
+			float netAnalogForward = 0.0f;   // NETPLAY ONLY -- encoded into ABSOLUTE_POSITION further down
+			if (game_is_networked)
+			{
+				float analogStrafe = 0;
+				VR_GetAnalogMove(&analogStrafe, &netAnalogForward);
+				const float kStrafeEngage = 0.4f;   // tunable; deliberate sideways push required
+				if (analogStrafe < -kStrafeEngage) flags |= _sidestepping_left;
+				else if (analogStrafe > kStrafeEngage) flags |= _sidestepping_right;
+			}
+			else
+			{
+				float mx = 0, my = 0;
+				VR_GetMove(&mx, &my);
+				const float dead = 0.15f;
+				if (my >  dead) flags |= _moving_forward;
+				else if (my < -dead) flags |= _moving_backward;
+				if (mx < -dead) flags |= _sidestepping_left;
+				else if (mx >  dead) flags |= _sidestepping_right;
+			}
 			VR_UpdateTurn(tx, 1.0f / 30.0f);   // ~TICKS_PER_SECOND; no continuous _turning_* flags
 			// Fire always comes from the triggers; the button map can ADD extra fire buttons on top.
 			if (VR_GetFire()          || VR_ActionHeld(VR_ACT_PRIMARY_FIRE))   flags |= _left_trigger_state;
@@ -1301,22 +1316,16 @@ uint32 parse_keymap(void)
 			// _inputmod_run_key_toggle pref (toggle vs hold) exactly like the keyboard run key.
 			if (VR_ActionHeld(VR_ACT_ACTION_USE)) flags |= _action_trigger_state;
 			if (VR_ActionHeld(VR_ACT_RUN))        flags |= _run_dont_walk;
-			// Forward/back analog magnitude used to be applied as a LOCAL per-tick velocity scale in
-			// physics.cpp, read live off the controller and gated to "this is my own local player" --
-			// invisible to every other client simulating this player, so remote machines always
-			// replayed at full velocity: a guaranteed net desync. Encode it instead into action_flags'
-			// (pre-existing, previously-unused) ABSOLUTE_POSITION field, exactly like mouselook already
-			// encodes yaw/pitch -- so the analog speed travels over the wire and every client computes
-			// the same velocity for this player. Zero flags/emitted-message format change: this field
-			// (SET_ABSOLUTE_POSITION/_absolute_position_mode) has existed since before the VR port and
-			// physics.cpp already knows how to decode it.
-			//
-			// Sidestep intentionally stays a discrete on/off flag (_sidestepping_left/right, set above)
-			// rather than getting the same absolute-magnitude treatment: there's no analogous unused
-			// wire field for it, and inventing one would be exactly the schema change we're avoiding.
-			if (analogForward != 0.0f)
+			// NETPLAY forward speed: encode the analog magnitude into action_flags' ABSOLUTE_POSITION
+			// field (netAnalogForward is nonzero only in the networked branch above), so the speed
+			// travels over the wire and every client -- including a stock kStar-6 peer, which already
+			// decodes this classic field -- computes the same velocity. In single-player netAnalogForward
+			// stays 0 and this is skipped; forward there is the binary _moving_forward/backward flag plus
+			// the per-axis local scaling in physics.cpp. Sidestep has no analogous unused wire field, so
+			// netplay strafe stays the binary flag set above (inventing a field would be a schema change).
+			if (netAnalogForward != 0.0f)
 			{
-				int encoded = (int)(analogForward * (float)(MAXIMUM_ABSOLUTE_POSITION / 2))
+				int encoded = (int)(netAnalogForward * (float)(MAXIMUM_ABSOLUTE_POSITION / 2))
 					+ MAXIMUM_ABSOLUTE_POSITION / 2;
 				encoded = PIN(encoded, 0, MAXIMUM_ABSOLUTE_POSITION - 1);
 				// _run_dont_walk's bit sits INSIDE this same packed 7-bit field (a preexisting quirk of
