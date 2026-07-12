@@ -170,6 +170,11 @@ bool VR_GetRenderCamera(float* wx, float* wy, float* wz);
 // Added to view->origin.z so the visibility tree uses the true eye height; subtracted in the
 // Rasterizer so the rendered camera is unchanged.
 float VR_GetEyeZOffset(void);
+
+// Effective standing eye height (metres): the player's measured standing head height once recentered,
+// else the eyeHeightM preference. Used as the vertical reference so in-game height is relative to the
+// player's own stance (immune to floor-calibration errors and body-height differences).
+float VR_EyeHeightM(void);
 void VR_GetTurn(float* x);             // non-dominant thumbstick X: snap/smooth turn
 void VR_GetTurnY(float* y);            // non-dominant thumbstick Y: used for map zoom in-game
 bool VR_GetFire(void);                 // right trigger

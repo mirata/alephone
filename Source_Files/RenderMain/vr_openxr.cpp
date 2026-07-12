@@ -86,6 +86,14 @@ float        s_headMoveX = 0, s_headMoveY = 0;   // latched per-tick body delta,
 // the view lean/walk offset starts at 0 wherever the player is standing when recentered.
 float        s_headRefX = 0, s_headRefZ = 0;
 bool         s_headRefInit = false;
+// Vertical recenter reference (stage metres): the player's MEASURED standing eye height, captured at
+// recenter alongside the horizontal reference. QuestZDoom-style -- vertical placement is relative to the
+// player's own stance rather than a fixed eyeHeightM assumption vs the absolute stage floor. This makes
+// the in-game height immune to per-headset floor-calibration errors and body-height differences (which
+// otherwise shrank/grew players who differed from the 1.6 m assumption), and works even if STAGE falls
+// back to LOCAL (no floor at all), since nothing depends on the absolute floor any more. 0 until measured.
+float        s_standingEyeHeightM   = 0.0f;
+bool         s_standingEyeHeightInit = false;
 
 // Engine-owned headless EGL context (no window surface).
 EGLDisplay s_eglDpy  = EGL_NO_DISPLAY;
@@ -1200,15 +1208,28 @@ extern "C" void VR_GetHeadMove(float* x, float* y) { if (x) *x = s_headMoveX; if
 // units (negative when seated/ducking). The engine adds this to view->origin.z so the visibility
 // tree clips floors/ceilings at the TRUE eye height (fixes step-top floors vanishing when seated);
 // the Rasterizer subtracts it back so the rendered camera is unchanged.
+// Effective standing eye height (metres) used as the vertical reference. Once the player has recentered
+// (which happens automatically on the first valid pose and at every level entry) this is their ACTUAL
+// measured standing head height; before that it falls back to the eyeHeightM preference.
+extern "C" float VR_EyeHeightM(void)
+{
+	return s_standingEyeHeightInit ? s_standingEyeHeightM : s_settings.eyeHeightM;
+}
+
 extern "C" float VR_GetEyeZOffset(void)
 {
 	if (!s_headPoseValid) return 0.0f;
-	return (s_stageFromHead.position.y - s_settings.eyeHeightM) * s_settings.worldScaleWUM;
+	return (s_stageFromHead.position.y - VR_EyeHeightM()) * s_settings.worldScaleWUM;
 }
 
 extern "C" void VR_RecenterHead(void)
 {
-	if (s_headPoseValid) { s_headRefX = s_stageFromHead.position.x; s_headRefZ = s_stageFromHead.position.z; s_headRefInit = true; }
+	if (s_headPoseValid) {
+		s_headRefX = s_stageFromHead.position.x; s_headRefZ = s_stageFromHead.position.z; s_headRefInit = true;
+		// Capture the current (standing) eye height as the vertical reference, so the player is placed at
+		// the Marathon eye height right now and duck/lean read as deltas below it.
+		s_standingEyeHeightM = s_stageFromHead.position.y; s_standingEyeHeightInit = true;
+	}
 }
 
 // Continuous float render-camera position, written per render frame by the engine (apply_vr_view_offsets).
@@ -1231,6 +1252,7 @@ extern "C" void VR_GetHeadOffset(float* wx, float* wy)
 	if (!s_headPoseValid) return;
 	if (!s_headRefInit) {   // auto-recenter on first valid pose -> offset starts at 0
 		s_headRefX = s_stageFromHead.position.x; s_headRefZ = s_stageFromHead.position.z;
+		s_standingEyeHeightM = s_stageFromHead.position.y; s_standingEyeHeightInit = true;
 		s_headRefInit = true; return;
 	}
 	const float dhx = s_stageFromHead.position.x - s_headRefX;
@@ -2432,6 +2454,7 @@ extern "C" void VR_GetHeadOffset(float* x, float* y) { if (x) *x = 0; if (y) *y 
 extern "C" void VR_SetRenderCamera(float, float, float) {}
 extern "C" bool VR_GetRenderCamera(float*, float*, float*) { return false; }
 extern "C" float VR_GetEyeZOffset(void) { return 0.0f; }
+extern "C" float VR_EyeHeightM(void) { return 0.0f; }
 extern "C" bool VR_GetFire(void)               { return false; }
 extern "C" bool VR_GetSecondaryFire(void)      { return false; }
 extern "C" bool VR_GetPrimaryPunch(void)       { return false; }

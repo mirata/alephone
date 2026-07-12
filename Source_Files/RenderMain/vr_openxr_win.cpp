@@ -28,6 +28,7 @@ extern "C" void VR_GetHeadOffset(float* x, float* y) { if (x) *x = 0; if (y) *y 
 extern "C" void VR_SetRenderCamera(float, float, float) {}
 extern "C" bool VR_GetRenderCamera(float*, float*, float*) { return false; }
 extern "C" float VR_GetEyeZOffset(void) { return 0.0f; }
+extern "C" float VR_EyeHeightM(void) { return 0.0f; }
 extern "C" bool VR_GetFire(void)               { return false; }
 extern "C" bool VR_GetSecondaryFire(void)      { return false; }
 extern "C" bool VR_GetAction(void)             { return false; }
