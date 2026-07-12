@@ -58,7 +58,8 @@ typedef struct {
 	float screenDistanceM;  // distance of the 2D UI panel (menus/terminals) in metres
 	float screenHeightM;    // height of the 2D UI panel in metres (width follows its aspect)
 	float worldScaleWUM;    // Marathon world-units per metre (bigger = world feels smaller)
-	float eyeHeightM;       // standing HMD eye height mapped to the Marathon eye
+	float heightAdjustM;    // manual height nudge (metres of stature; + = taller in-game). Added on top of
+	                        // the auto-measured standing eye height; 0 = no adjustment.
 	int   snapTurn;         // 1 = snap turning, 0 = smooth (locomotion comfort)
 	float turnDegrees;      // snap: degrees per snap flick; smooth: degrees/sec at full deflection
 	float brightness;       // world brightness multiply (1=unchanged; <1 dims the over-bright world)
@@ -107,6 +108,11 @@ void  VR_SetYawOffset(float angleUnits);     // recenter: pin the offset (e.g. t
 // code, which sets the yaw offset accordingly.
 void VR_RequestYawRecenter(int facingAngleUnits);
 bool VR_TakeYawRecenter(int* targetAngleUnits);
+
+// True (once) when the runtime recentered our reference space (the user held the Meta/Quest button / a
+// system recenter). The game tick consumes this to run the same recenter as the controller Recenter
+// action (yaw-to-facing + height/lean recapture). Clears on read.
+bool VR_TakeSystemRecenter(void);
 
 // Dim the currently-bound eye buffer by VR_Settings()->brightness (a fullscreen multiply pass). Call
 // after the world is rendered into the eye FBO. No-op at brightness >= 1.
@@ -171,10 +177,16 @@ bool VR_GetRenderCamera(float* wx, float* wy, float* wz);
 // Rasterizer so the rendered camera is unchanged.
 float VR_GetEyeZOffset(void);
 
-// Effective standing eye height (metres): the player's measured standing head height once recentered,
-// else the eyeHeightM preference. Used as the vertical reference so in-game height is relative to the
-// player's own stance (immune to floor-calibration errors and body-height differences).
+// Effective eye-height reference (metres): the player's measured standing head height once recentered
+// (nominal before that), minus the Height Adjust preference. Used as the vertical reference so in-game
+// height is relative to the player's own stance (immune to floor-calibration errors and body-height
+// differences), with the trim as a manual nudge on top.
 float VR_EyeHeightM(void);
+
+// Fed by the physics each tick with the player's in-game eye height above the floor (world units). The VR
+// layer uses it with the measured standing height to pick a life-size world scale (worldScaleWUM), so the
+// player is rendered at their true height and reaching the real floor lands on the game floor.
+void VR_SetGameEyeHeightWU(float eyeHeightWU);
 void VR_GetTurn(float* x);             // non-dominant thumbstick X: snap/smooth turn
 void VR_GetTurnY(float* y);            // non-dominant thumbstick Y: used for map zoom in-game
 bool VR_GetFire(void);                 // right trigger

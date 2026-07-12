@@ -3396,11 +3396,18 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
 
     // Controller model→world matrix (column-major for GL).
     // Columns: right (wrx), up (wup), forward (wfwd), translation.
+    // The model's vertices are pre-scaled to fixed WORLD UNITS, so its apparent (metric) size is modelWU/W.
+    // With the life-size world scale W now varying per player height, that would make the gun grow as the
+    // world grows (and differ between players). Scale the basis by W/kWpnScaleRefW so the model renders at
+    // modelWU*(W/512) world units -> apparent size modelWU/512, i.e. exactly the size it had at the old
+    // fixed 512 scale, and identical for every player regardless of their world scale.
+    const float kWpnScaleRefW = 512.0f;
+    const float ws = (VR_IsActive() ? VR_Settings()->worldScaleWUM : kWpnScaleRefW) / kWpnScaleRefW;
     GLfloat m[16] = {
-        sx*wrx[0],  sx*wrx[1],  sx*wrx[2],  0.0f,
-        wup[0],     wup[1],     wup[2],     0.0f,
-        wfwd[0],    wfwd[1],    wfwd[2],    0.0f,
-        cwx,        cwy,        cwz,        1.0f
+        sx*wrx[0]*ws,  sx*wrx[1]*ws,  sx*wrx[2]*ws,  0.0f,
+        wup[0]*ws,     wup[1]*ws,     wup[2]*ws,      0.0f,
+        wfwd[0]*ws,    wfwd[1]*ws,    wfwd[2]*ws,     0.0f,
+        cwx,           cwy,           cwz,            1.0f
     };
 
     if (ModelPtr->Model.MD3NumFrames > 0)

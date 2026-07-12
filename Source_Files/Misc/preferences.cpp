@@ -1091,8 +1091,10 @@ static const float vr_hud_size_values[] = { 0.3f, 0.4f, 0.55f, 0.75f };
 static const char *vr_hud_tilt_labels[] = { "0° (Eye Level)", "15°", "30° (Dashboard)", "45°", NULL };
 static const float vr_hud_tilt_values[] = { 0.0f, 15.0f, 30.0f, 45.0f };
 
-static const char *vr_eye_height_labels[] = { "1.4 m", "1.5 m", "1.6 m", "1.7 m", "1.8 m", NULL };
-static const float vr_eye_height_values[] = { 1.4f, 1.5f, 1.6f, 1.7f, 1.8f };
+// Manual height adjust (metres of stature) added on top of the auto-measured standing eye height. + = the
+// player sits higher in-game, - = lower. Height itself is auto-calibrated at recenter; this is a nudge.
+static const char *vr_height_adjust_labels[] = { "-20 cm", "-10 cm", "Default", "+10 cm", "+20 cm", NULL };
+static const float vr_height_adjust_values[] = { -0.20f, -0.10f, 0.0f, 0.10f, 0.20f };
 
 static const char *vr_brightness_labels[] = { "50%", "60%", "70%", "80%", "90%", "100%", NULL };
 static const float vr_brightness_values[] = { 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f };
@@ -1806,10 +1808,10 @@ static void vr_dialog(void *arg)
 	// World / view
 	table->dual_add_row(new w_static_text("World"), d);
 
-	w_select *eye_height_w = new w_select(
-		vr_closest_index(vr_eye_height_values, 5, vr->eyeHeightM), vr_eye_height_labels);
-	table->dual_add(eye_height_w->label("Eye Height"), d);
-	table->dual_add(eye_height_w, d);
+	w_select *height_adjust_w = new w_select(
+		vr_closest_index(vr_height_adjust_values, 5, vr->heightAdjustM), vr_height_adjust_labels);
+	table->dual_add(height_adjust_w->label("Height Adjust"), d);
+	table->dual_add(height_adjust_w, d);
 
 	w_select *brightness_w = new w_select(
 		vr_closest_index(vr_brightness_values, 6, vr->brightness), vr_brightness_labels);
@@ -1837,7 +1839,7 @@ static void vr_dialog(void *arg)
 		vr->hudSizeM        = vr_hud_size_values[hud_size_w->get_selection()];
 		vr->hudTiltDeg      = vr_hud_tilt_values[hud_tilt_w->get_selection()];
 		vr->mapPlayerUp     = map_player_up_w->get_selection() ? 1 : 0;
-		vr->eyeHeightM      = vr_eye_height_values[eye_height_w->get_selection()];
+		vr->heightAdjustM   = vr_height_adjust_values[height_adjust_w->get_selection()];
 		vr->brightness      = vr_brightness_values[brightness_w->get_selection()];
 
 		write_preferences();
@@ -4605,7 +4607,7 @@ InfoTree vr_preferences_tree()
 	root.put_attr("screen_distance_m", vr->screenDistanceM);
 	root.put_attr("screen_height_m", vr->screenHeightM);
 	root.put_attr("world_scale_wum", vr->worldScaleWUM);
-	root.put_attr("eye_height_m", vr->eyeHeightM);
+	root.put_attr("height_adjust_m", vr->heightAdjustM);
 	root.put_attr("snap_turn", vr->snapTurn);
 	root.put_attr("turn_degrees", vr->turnDegrees);
 	root.put_attr("brightness", vr->brightness);
@@ -5692,7 +5694,11 @@ void parse_vr_preferences(InfoTree root, std::string version)
 	root.read_attr("screen_distance_m", vr->screenDistanceM);
 	root.read_attr("screen_height_m", vr->screenHeightM);
 	root.read_attr("world_scale_wum", vr->worldScaleWUM);
-	root.read_attr("eye_height_m", vr->eyeHeightM);
+	// Note: the old "eye_height_m" (absolute 1.4-1.8 m) key is intentionally NOT read -- it would be
+	// misread as a huge adjust. Absent key -> heightAdjustM keeps its 0.0 default. Read the interim
+	// "height_trim_m" key too so a value saved before the rename isn't lost.
+	root.read_attr("height_trim_m", vr->heightAdjustM);
+	root.read_attr("height_adjust_m", vr->heightAdjustM);
 	root.read_attr("snap_turn", vr->snapTurn);
 	root.read_attr("turn_degrees", vr->turnDegrees);
 	root.read_attr("brightness", vr->brightness);

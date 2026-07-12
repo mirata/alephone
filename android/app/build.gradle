@@ -151,6 +151,13 @@ scenarioForFlavor.each { flavorName, scenarioName ->
     def genDir = layout.buildDirectory.dir("generated-assets/${flavorName}")
 
     def bundleTask = tasks.register("bundle${flavorName.capitalize()}Data", Copy) {
+        // ALWAYS re-run and overwrite. The scenario data is a git submodule whose content can change
+        // without Gradle's up-to-date check reliably noticing -- which once SILENTLY packaged a stale
+        // (wrong) assault-rifle asset into a store APK. Forcing the copy every build (~1s) guarantees
+        // updated files land in the APK. Only the 3 branded release flavors use this; the dev/deploy.ps1
+        // loop has no bundled data and is untouched. (NOTE: a plain Copy overwrites changed files but
+        // does NOT prune a source file that was DELETED/renamed -- do a clean build if you rename assets.)
+        outputs.upToDateWhen { false }
         into genDir.map { it.dir('game') }
         duplicatesStrategy = DuplicatesStrategy.INCLUDE   // later 'from' wins (defaults overlay last)
         // 1. Base Aleph One data (MML, fonts, themes, icons, alephone.xml). Skip the
@@ -174,7 +181,17 @@ scenarioForFlavor.each { flavorName, scenarioName ->
     // Register the generated dir as this flavor's assets root (so game/ -> assets/game/).
     // Wrapping it in files(...).builtBy(bundleTask) attaches the task as the producer of this
     // directory, so EVERY consumer (mergeAssets, lintVital, bundle/AAB) auto-depends on it.
-    // Without this, release builds fail Gradle's implicit-dependency validation because
-    // lintVital reads the generated assets but debug never ran lint to expose it.
     android.sourceSets.getByName(flavorName).assets.srcDir(files(genDir).builtBy(bundleTask))
+
+    // Belt-and-suspenders on top of builtBy: explicitly make this flavor's asset-merge tasks depend
+    // on the bundle, so a fresh/clean build can't package EMPTY assets by running mergeAssets before
+    // the copy (that produced dataless 17MB APKs once). Named-match catches the AGP tasks made later.
+    // The builtBy wiring above only made consumers depend on the bundle while the bundle was being
+    // SKIPPED (up-to-date); once it always runs, Gradle strictly enforces that every task reading the
+    // generated assets declares the dependency -- including the lintVital tasks. List them explicitly.
+    def cap = flavorName.capitalize()
+    tasks.matching {
+        it.name == "merge${cap}ReleaseAssets" || it.name == "merge${cap}DebugAssets" ||
+        it.name == "lintVitalAnalyze${cap}Release" || it.name == "generate${cap}ReleaseLintVitalReportModel"
+    }.configureEach { dependsOn bundleTask }
 }

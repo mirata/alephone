@@ -513,6 +513,15 @@ uint32 process_aim_input(uint32 action_flags, fixed_yaw_pitch delta)
 	player->step_height = FIXED_TO_WORLD(step_height);
 	player->camera_polygon_index= legs->polygon;
 
+#if defined(__ANDROID__)
+	// Feed the player's in-game eye height above the floor (E, world units) to the VR layer so it can pick
+	// a life-size world scale: WU-per-metre such that E maps to the player's measured standing eye height.
+	// This anchors the player to the floor (reaching the real floor lands on the game floor) and renders
+	// them at their true height instead of the fixed ~1.2 m the old 512 scale produced.
+	if (VR_IsActive())
+		VR_SetGameEyeHeightWU(FIXED_TO_WORLD(variables->actual_height - constants->camera_height));
+#endif
+
 	/* shadow facing in player structure and object structure */
 	fixed_facing= variables->direction+variables->head_direction;
 	facing= FIXED_INTEGERAL_PART(fixed_facing), facing= NORMALIZE_ANGLE(facing);

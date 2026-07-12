@@ -5,7 +5,7 @@
 extern "C" bool VR_InitOpenXR(void)     { return false; }
 extern "C" bool VR_IsActive(void)       { return false; }
 extern "C" vr_settings_t* VR_Settings(void) {
-	static vr_settings_t s = { 1, 2.5f, 2.0f, 512.0f, 1.6f, 1, 30.0f, 1.0f, 0, 0, 0, -20.0f, 0.8f, 0.55f, 30.0f, 0 };
+	static vr_settings_t s = { 1, 2.5f, 2.0f, 512.0f, 0.0f, 1, 30.0f, 1.0f, 0, 0, 0, -20.0f, 0.8f, 0.55f, 30.0f, 0 };
 	return &s;
 }
 extern "C" float VR_GetYawOffset(void)   { return 0.0f; }
@@ -13,6 +13,7 @@ extern "C" void  VR_UpdateTurn(float, float) {}
 extern "C" void  VR_SetYawOffset(float)  {}
 extern "C" void  VR_RequestYawRecenter(int) {}
 extern "C" bool  VR_TakeYawRecenter(int*) { return false; }
+extern "C" bool  VR_TakeSystemRecenter(void) { return false; }
 extern "C" void  VR_DimCurrentEye(void)  {}
 extern "C" bool VR_RenderTestFrame(void){ return false; }
 extern "C" bool VR_InitEGL(void)        { return false; }
@@ -29,6 +30,7 @@ extern "C" void VR_SetRenderCamera(float, float, float) {}
 extern "C" bool VR_GetRenderCamera(float*, float*, float*) { return false; }
 extern "C" float VR_GetEyeZOffset(void) { return 0.0f; }
 extern "C" float VR_EyeHeightM(void) { return 0.0f; }
+extern "C" void VR_SetGameEyeHeightWU(float) {}
 extern "C" bool VR_GetFire(void)               { return false; }
 extern "C" bool VR_GetSecondaryFire(void)      { return false; }
 extern "C" bool VR_GetAction(void)             { return false; }

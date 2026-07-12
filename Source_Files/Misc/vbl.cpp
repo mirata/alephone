@@ -1352,7 +1352,10 @@ uint32 parse_keymap(void)
 				if (aNext && !prevNext) flags |= _cycle_weapons_forward;
 				if (aPrev && !prevPrev) flags |= _cycle_weapons_backward;
 				if (aMap  && !prevMap)  flags |= _toggle_map;
-				if (aRc   && !prevRc) {
+				// Also recenter when the runtime reports a system recenter (the user held the Meta/Quest
+				// button). Evaluated first (not short-circuited) so the one-shot flag is always consumed.
+				const bool sysRc = VR_TakeSystemRecenter();
+				if ((aRc && !prevRc) || sysRc) {
 					// Recenter the view: make the current head yaw the neutral forward again (keeps the
 					// player facing the same in-game direction) and re-zero the lean/position origin. The
 					// yaw request is consumed a few lines below by VR_TakeYawRecenter in the same tick.

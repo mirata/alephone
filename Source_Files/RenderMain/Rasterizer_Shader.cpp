@@ -119,9 +119,10 @@ void Rasterizer_Shader_Class::SetView(view_data& view) {
 	{
 		const int eye = VR_CurrentEye();
 		const float WUperMetre = VR_Settings()->worldScaleWUM;
-		// Measured standing eye height (falls back to the eyeHeightM pref until first recenter). MUST match
-		// the reference used by VR_GetEyeZOffset() so the render camera and the visibility-tree eye stay
-		// coupled (render eye Z = camZ + (headY - VR_EyeHeightM())*W == camZ + VR_GetEyeZOffset()).
+		// Effective eye-height reference: measured standing height (nominal before first recenter) minus the
+		// Height Adjust pref. MUST match the reference used by VR_GetEyeZOffset() so the render camera and the
+		// visibility-tree eye stay coupled (render eye Z = camZ + (headY - VR_EyeHeightM())*W == camZ +
+		// VR_GetEyeZOffset()).
 		const float eyeHeightM = VR_EyeHeightM();
 
 		float vrProj[16];

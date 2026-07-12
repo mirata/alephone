@@ -94,6 +94,22 @@ bool         s_headRefInit = false;
 // back to LOCAL (no floor at all), since nothing depends on the absolute floor any more. 0 until measured.
 float        s_standingEyeHeightM   = 0.0f;
 bool         s_standingEyeHeightInit = false;
+// Set when the runtime recenters our world reference space -- i.e. the user HELD the Meta/Quest button
+// (a system recenter). That button is reserved by the OS so we can't read it as an input, but it raises
+// XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING, which we treat as a recenter request (as QuestZDoom's
+// TBXR does). Two independent one-shot flags: the gameplay flag is consumed by the game tick (vbl.cpp) to
+// run the same recenter as the controller Recenter action (yaw-to-facing + height/lean recapture); the
+// panel flag is consumed by the 2D-screen path to re-anchor the world-locked menu/terminal/keyboard panel
+// to wherever the player is now facing. Our recenter recaptures from the CURRENT head pose, so it works
+// regardless of which reference space (STAGE or LOCAL) the runtime actually moved -- the event is only the
+// trigger.
+bool         s_systemRecenterPending = false;
+bool         s_panelRecenterPending  = false;
+// The player's in-game eye height above the floor (world units), fed in from the physics each tick. With
+// the measured standing eye height it sets a LIFE-SIZE world scale (worldScaleWUM = this / standingHeight)
+// so the player is rendered at their true height and reaching the real floor lands on the game floor.
+// Nominal (0.6*WORLD_ONE) until the physics reports the real value for the running scenario.
+float        s_gameEyeHeightWU = 614.0f;
 
 // Engine-owned headless EGL context (no window surface).
 EGLDisplay s_eglDpy  = EGL_NO_DISPLAY;
@@ -401,6 +417,16 @@ void pollEvents() {
 				XR_CHECK(xrEndSession(s_session));
 				s_sessionRunning = false;
 			}
+		} else if (ev.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+			// The runtime re-centered our world reference (Meta/Quest button hold, or a system recenter).
+			// Treat it as a recenter request: gameplay recenters (yaw/height/lean) via the game tick, and the
+			// world-locked 2D panel re-anchors to the player's new facing. Not filtered by referenceSpaceType
+			// -- our offset-based recenter recaptures from the current head pose regardless of which space
+			// moved (matches QuestZDoom's TBXR handling).
+			auto* rc = reinterpret_cast<XrEventDataReferenceSpaceChangePending*>(&ev);
+			A1VR_LOG("reference space change (recenter): space type %d", rc->referenceSpaceType);
+			s_systemRecenterPending = true;
+			s_panelRecenterPending  = true;
 		}
 		ev.type = XR_TYPE_EVENT_DATA_BUFFER;
 	}
@@ -484,7 +510,7 @@ namespace {
 		/* screenDistanceM */ 2.5f,
 		/* screenHeightM   */ 2.0f,
 		/* worldScaleWUM   */ 512.0f,
-		/* eyeHeightM      */ 1.6f,
+		/* heightAdjustM   */ 0.0f,
 		/* snapTurn        */ 1,
 		/* turnDegrees     */ 30.0f,
 		/* brightness      */ 1.0f,   // neutral; real fix is the sRGB write-control below
@@ -1208,12 +1234,42 @@ extern "C" void VR_GetHeadMove(float* x, float* y) { if (x) *x = s_headMoveX; if
 // units (negative when seated/ducking). The engine adds this to view->origin.z so the visibility
 // tree clips floors/ceilings at the TRUE eye height (fixes step-top floors vanishing when seated);
 // the Rasterizer subtracts it back so the rendered camera is unchanged.
-// Effective standing eye height (metres) used as the vertical reference. Once the player has recentered
-// (which happens automatically on the first valid pose and at every level entry) this is their ACTUAL
-// measured standing head height; before that it falls back to the eyeHeightM preference.
+
+// Pick a LIFE-SIZE world scale: WU-per-metre so the game's fixed eye-height-above-floor (s_gameEyeHeightWU)
+// maps to the player's measured standing eye height. Then eye_world_Z = camZ + (headY - H)*W places the eye
+// at camZ (= game eye height E above the floor) when standing, and E/W == H, so the floor sits H metres
+// below the eye -- reaching the real floor lands the hand on the game floor and head tracking stays 1:1.
+// Only once a standing height is measured; clamped so a bad/miscalibrated measurement can't wildly
+// mis-scale the world. Runs whenever the physics feeds E or the player recenters.
+static void recomputeWorldScale()
+{
+	if (!s_standingEyeHeightInit || s_standingEyeHeightM < 0.5f) return;
+	float w = s_gameEyeHeightWU / s_standingEyeHeightM;
+	if (w < 330.0f) w = 330.0f; else if (w > 560.0f) w = 560.0f;   // ~1.1 m .. ~1.86 m standing at E=614
+	if (w != s_settings.worldScaleWUM) {
+		A1VR_LOG("life-size world scale: E=%.0f WU / H=%.3f m -> worldScaleWUM=%.1f (was %.1f)",
+			s_gameEyeHeightWU, s_standingEyeHeightM, w, s_settings.worldScaleWUM);
+		s_settings.worldScaleWUM = w;
+	}
+}
+
+// Fed by the physics each tick: the player's in-game eye height above the floor (world units) for the
+// running scenario. Updates the life-size world scale.
+extern "C" void VR_SetGameEyeHeightWU(float eyeHeightWU)
+{
+	if (eyeHeightWU > 1.0f) { s_gameEyeHeightWU = eyeHeightWU; recomputeWorldScale(); }
+}
+
+// Effective eye-height REFERENCE (metres) used for vertical placement: eye_world_Z = camZ + (headY -
+// VR_EyeHeightM())*W. Once the player has recentered (auto on the first valid pose and at every level
+// entry) the baseline is their ACTUAL measured standing head height; before that a nominal fallback.
+// The Height Adjust preference then shifts it: subtracting heightAdjustM from the reference raises the
+// placed camera by heightAdjustM*worldScale, so +adjust = taller in-game, -adjust = shorter.
 extern "C" float VR_EyeHeightM(void)
 {
-	return s_standingEyeHeightInit ? s_standingEyeHeightM : s_settings.eyeHeightM;
+	const float kNominalEyeHeightM = 1.6f;   // used only in the brief window before the first recenter
+	const float baseline = s_standingEyeHeightInit ? s_standingEyeHeightM : kNominalEyeHeightM;
+	return baseline - s_settings.heightAdjustM;
 }
 
 extern "C" float VR_GetEyeZOffset(void)
@@ -1229,7 +1285,17 @@ extern "C" void VR_RecenterHead(void)
 		// Capture the current (standing) eye height as the vertical reference, so the player is placed at
 		// the Marathon eye height right now and duck/lean read as deltas below it.
 		s_standingEyeHeightM = s_stageFromHead.position.y; s_standingEyeHeightInit = true;
+		recomputeWorldScale();   // life-size scale now that we know the standing height
 	}
+}
+
+// True (once) after the runtime recentered our reference space (Meta/Quest button hold). The game tick
+// consumes this to run the same recenter as the controller Recenter action. Clears on read.
+extern "C" bool VR_TakeSystemRecenter(void)
+{
+	if (!s_systemRecenterPending) return false;
+	s_systemRecenterPending = false;
+	return true;
 }
 
 // Continuous float render-camera position, written per render frame by the engine (apply_vr_view_offsets).
@@ -1253,6 +1319,7 @@ extern "C" void VR_GetHeadOffset(float* wx, float* wy)
 	if (!s_headRefInit) {   // auto-recenter on first valid pose -> offset starts at 0
 		s_headRefX = s_stageFromHead.position.x; s_headRefZ = s_stageFromHead.position.z;
 		s_standingEyeHeightM = s_stageFromHead.position.y; s_standingEyeHeightInit = true;
+		recomputeWorldScale();   // life-size scale now that we know the standing height
 		s_headRefInit = true; return;
 	}
 	const float dhx = s_stageFromHead.position.x - s_headRefX;
@@ -2301,6 +2368,9 @@ extern "C" void VR_PresentScreenLayer(void)
 	ensureScreenLayer();
 	const bool render = VR_BeginFrame();
 	if (render) {
+		// System recenter (Meta/Quest button hold) while a 2D screen is up: re-anchor the world-locked
+		// panel -- and the keyboard, which is placed relative to it -- to the player's new facing.
+		if (s_panelRecenterPending) { s_panelPlaced = false; s_kbPlaced = false; s_panelRecenterPending = false; }
 		if (!s_panelPlaced && s_headPoseValid) placePanel();
 		updatePointer();   // ray-cast both controllers onto the world-locked panel
 		kbUpdate();        // on-screen keyboard: place/hover/click + suppress menu pointer when on it
@@ -2425,7 +2495,7 @@ extern "C" void VR_GetEyeIPDOffsetWU(int eye, float* wx, float* wy)
 extern "C" bool VR_InitOpenXR(void)     { return false; }
 extern "C" bool VR_IsActive(void)       { return false; }
 extern "C" vr_settings_t* VR_Settings(void) {
-	static vr_settings_t s = { 1, 2.5f, 2.0f, 512.0f, 1.6f, 1, 30.0f, 1.0f, 0, 0, 0, -20.0f, 0.8f, 0.55f, 30.0f, 0, 0, 0 };
+	static vr_settings_t s = { 1, 2.5f, 2.0f, 512.0f, 0.0f, 1, 30.0f, 1.0f, 0, 0, 0, -20.0f, 0.8f, 0.55f, 30.0f, 0, 0, 0 };
 	return &s;
 }
 extern "C" float VR_GetYawOffset(void)   { return 0.0f; }
@@ -2433,6 +2503,7 @@ extern "C" void  VR_UpdateTurn(float, float) {}
 extern "C" void  VR_SetYawOffset(float)  {}
 extern "C" void  VR_RequestYawRecenter(int) {}
 extern "C" bool  VR_TakeYawRecenter(int*) { return false; }
+extern "C" bool  VR_TakeSystemRecenter(void) { return false; }
 extern "C" void  VR_DimCurrentEye(void)  {}
 extern "C" bool VR_RenderTestFrame(void){ return false; }
 extern "C" void VR_RenderLoadingFrame(void) {}
@@ -2455,6 +2526,7 @@ extern "C" void VR_SetRenderCamera(float, float, float) {}
 extern "C" bool VR_GetRenderCamera(float*, float*, float*) { return false; }
 extern "C" float VR_GetEyeZOffset(void) { return 0.0f; }
 extern "C" float VR_EyeHeightM(void) { return 0.0f; }
+extern "C" void VR_SetGameEyeHeightWU(float) {}
 extern "C" bool VR_GetFire(void)               { return false; }
 extern "C" bool VR_GetSecondaryFire(void)      { return false; }
 extern "C" bool VR_GetPrimaryPunch(void)       { return false; }
