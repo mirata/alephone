@@ -4622,6 +4622,7 @@ InfoTree vr_preferences_tree()
 	root.put_attr("teleport_distortion", vr->teleportDistortion);
 	root.put_attr("laser_sight", vr->showLaserSight);
 	root.put_attr("punch_speed", vr->punchSpeed);
+	root.put_attr("lean_give_fraction", vr->leanGiveFraction);
 	root.put_attr("button_a", vr->buttonAction[VR_BTN_A]);
 	root.put_attr("button_b", vr->buttonAction[VR_BTN_B]);
 	root.put_attr("button_x", vr->buttonAction[VR_BTN_X]);
@@ -5713,6 +5714,7 @@ void parse_vr_preferences(InfoTree root, std::string version)
 	root.read_attr("teleport_distortion", vr->teleportDistortion);
 	root.read_attr("laser_sight", vr->showLaserSight);
 	root.read_attr("punch_speed", vr->punchSpeed);
+	root.read_attr("lean_give_fraction", vr->leanGiveFraction);
 	root.read_attr("button_a", vr->buttonAction[VR_BTN_A]);
 	root.read_attr("button_b", vr->buttonAction[VR_BTN_B]);
 	root.read_attr("button_x", vr->buttonAction[VR_BTN_X]);

@@ -89,6 +89,7 @@ Feb 20, 2002 (Woody Zenfell):
 #include "Logging.h"
 #include "mouse.h"
 #include "player.h"
+#include "physics_models.h"   // physics_constants (VR netplay room-scale forward fold)
 #include "weapons.h"
 #include "vr_openxr.h"
 #include "key_definitions.h"
@@ -1230,6 +1231,10 @@ void encode_hotkey_sequence(int hotkey)
 
 uint32_t last_input_update;
 
+// For the netplay VR room-scale fold: convert the head's per-tick physical step into the same
+// ABSOLUTE_POSITION forward fraction the stick uses (needs the model's maximum_forward_velocity).
+extern struct physics_constants *get_physics_constants_for_model(short physics_model, uint32 action_flags);
+
 uint32 parse_keymap(void)
 {
   uint32 flags = 0;
@@ -1270,6 +1275,13 @@ uint32 parse_keymap(void)
 			float tx = 0;
 			VR_GetTurn(&tx);
 
+			// ROOM-SCALE: latch the head's physical movement since last tick as a world-unit body delta.
+			// This is the canonical once-per-tick local-input point (parse_keymap is called once per real
+			// tick, and NOT during prediction). Single-player consumes the delta directly in physics.cpp
+			// (VR_GetHeadMove -> position, with collision); the netplay branch below folds it onto the wire.
+			// It also advances the render's absorbed-head origin, keeping VR_GetHeadOffset a small residual.
+			VR_LatchHeadMove();
+
 			// MOVEMENT splits on netplay: the wire-sync compromises aren't wanted in single-player,
 			// where there are no other clients to desync (Daniel's call 2026-07-12).
 			//   * SINGLE-PLAYER: original feel -- binary direction flags at the low 0.15 deadzone on
@@ -1287,6 +1299,35 @@ uint32 parse_keymap(void)
 				const float kStrafeEngage = 0.4f;   // tunable; deliberate sideways push required
 				if (analogStrafe < -kStrafeEngage) flags |= _sidestepping_left;
 				else if (analogStrafe > kStrafeEngage) flags |= _sidestepping_right;
+
+				// ROOM-SCALE on the existing wire (best-effort, no schema change): decompose the head's
+				// physical step this tick into forward/strafe relative to the player's facing. The forward
+				// part is added to the analog forward (rides ABSOLUTE_POSITION, encoded below) so it travels
+				// over the wire and every client -- including a stock kStar-6 peer -- decodes the same
+				// velocity. The lateral part engages the BINARY sidestep past a deliberate-step threshold
+				// (there is no analog-strafe wire field, so sideways room-scale is necessarily coarse). All
+				// of this is baked into the transmitted flags, so it cannot desync; full 2D fidelity in
+				// netplay is the VR_NETCODE protocol-extension track.
+				float hmx = 0, hmy = 0;
+				VR_GetHeadMove(&hmx, &hmy);
+				const angle facing = local_player->facing;
+				const float cf = cosine_table[facing] / (float)TRIG_MAGNITUDE;
+				const float sf = sine_table[facing]   / (float)TRIG_MAGNITUDE;
+				const float headFwdWU    =  hmx * cf + hmy * sf;   // component along facing
+				const float headStrafeWU = -hmx * sf + hmy * cf;   // component to the right of facing
+				struct physics_constants *pc = get_physics_constants_for_model(static_world->physics_model, flags);
+				if (pc && pc->maximum_forward_velocity > 0)
+				{
+					// velocity(fixed, world<<6 per tick) == fraction * maximum_forward_velocity (physics.cpp
+					// decode), and per-tick displacement d (WU) maps to velocity d<<6 -> fraction = d*64/max.
+					const float fwdFrac = (headFwdWU * (float)(1 << (FIXED_FRACTIONAL_BITS - WORLD_FRACTIONAL_BITS)))
+						/ (float)pc->maximum_forward_velocity;
+					float total = netAnalogForward + fwdFrac;
+					netAnalogForward = total < -1.0f ? -1.0f : (total > 1.0f ? 1.0f : total);
+				}
+				const float kHeadStrafeWU = 6.0f;   // ~a deliberate physical sidestep, not incidental sway
+				if (headStrafeWU < -kHeadStrafeWU) flags |= _sidestepping_left;
+				else if (headStrafeWU > kHeadStrafeWU) flags |= _sidestepping_right;
 			}
 			else
 			{
@@ -1546,10 +1587,15 @@ uint32 parse_keymap(void)
 	      PLAYER_HAS_MAP_OPEN(local_player) && View_MapActive()) {
 		  static bool mapZoomArmed = true;
 		  float turnY = 0; VR_GetTurnY(&turnY);
+		  float turnX = 0; VR_GetTurn(&turnX);
 		  const float kFire = 0.5f, kRelease = 0.2f;
+		  // Zoom (stick Y) and snap-turn (stick X) share one thumbstick. Only zoom on a predominantly
+		  // VERTICAL push, so a left/right snap-turn -- which has some incidental diagonal Y -- can't
+		  // inadvertently change the zoom (was firing ~90% of snap-turns).
+		  const bool verticalDominant = fabsf(turnY) > fabsf(turnX);
 		  if (mapZoomArmed) {
-			  if (turnY >  kFire) { zoom_overhead_map_in();  mapZoomArmed = false; }
-			  if (turnY < -kFire) { zoom_overhead_map_out(); mapZoomArmed = false; }
+			  if (verticalDominant && turnY >  kFire) { zoom_overhead_map_in();  mapZoomArmed = false; }
+			  if (verticalDominant && turnY < -kFire) { zoom_overhead_map_out(); mapZoomArmed = false; }
 		  } else if (fabsf(turnY) < kRelease) {
 			  mapZoomArmed = true;
 		  }

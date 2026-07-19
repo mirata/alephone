@@ -176,6 +176,11 @@ protected:
 		_justify_left,
 		_justify_center
 	};
+
+	// True only while drawing an ANNOTATION label (not the map title). The VR overhead map rotates the
+	// whole map (player-facing-up); annotation labels should keep their ORIGIN pinned to their rotated
+	// map location but render the glyphs upright/readable, whereas the title stays a fixed upright header.
+	bool DrawingMapAnnotation = false;
 	
 	// For special overall things
 	virtual void begin_overall() {}
@@ -293,8 +298,10 @@ private:
 		if (!(color>=0&&color<NUMBER_OF_ANNOTATION_DEFINITIONS)) return;
 		if (!(scale>=OVERHEAD_MAP_MINIMUM_SCALE&&scale<=OVERHEAD_MAP_MAXIMUM_SCALE)) return;
 		annotation_definition& NoteDef = ConfigPtr->annotation_definitions[color];
+		DrawingMapAnnotation = true;
 		draw_text(*location,NoteDef.color, text,
 			NoteDef.Fonts[scale-OVERHEAD_MAP_MINIMUM_SCALE],_justify_left);
+		DrawingMapAnnotation = false;
 	}
 	void draw_map_name(
 		overhead_map_data &Control,

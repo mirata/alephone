@@ -73,6 +73,9 @@ Jan 25, 2002 (Br'fin (Jeremy Parsons)):
 #include "OGL_Headers.h"
 #include "OGL_Render.h"
 #include "OGL_Textures.h"
+#if defined(__ANDROID__)
+#include "vr_openxr.h"   // VR_IsActive (VR map text scaling + upright annotation labels)
+#endif
 
 
 // rgb_color straight to OpenGL
@@ -344,28 +347,47 @@ void OverheadMap_OGL_Class::draw_text(
 	FontSpecifier& FontData,
 	short justify)
 {	
-	// Find the left-side location
-	world_point2d left_location = location;
-	switch(justify)
-	{
-	case _justify_left:
-		break;
-		
-	case _justify_center:
-		left_location.x -= (FontData.TextWidth(text)>>1);
-		break;
-		
-	default:
+	if (justify != _justify_left && justify != _justify_center)
 		return;
-	}
-	
-	// Set color and location	
+
+	// Set color and location
 	SetColor(color);
-	
+
+#if defined(__ANDROID__)
+	// VR map text tweaks: 125% larger (readable at the panel's reading distance), and annotation labels
+	// keep their ORIGIN under the map's player-up rotation while rendering the glyphs upright.
+	const float ts = VR_IsActive() ? 1.25f : 1.0f;
+#else
+	const float ts = 1.0f;
+#endif
+
 	glMatrixMode(GL_MODELVIEW);
 	glPushMatrix();
-	glLoadIdentity();
-	glTranslatef(left_location.x,left_location.y,0);
+
+#if defined(__ANDROID__)
+	if (VR_IsActive() && DrawingMapAnnotation)
+	{
+		// Anchor rides the current (rotated) modelview so the label stays over its map feature; then load
+		// identity and draw upright so the text is always readable regardless of the map's rotation.
+		GLfloat mv[16];
+		glGetFloatv(GL_MODELVIEW_MATRIX, mv);
+		const float sx = mv[0]*location.x + mv[4]*location.y + mv[12];
+		const float sy = mv[1]*location.x + mv[5]*location.y + mv[13];
+		glLoadIdentity();
+		glTranslatef(sx, sy, 0);
+	}
+	else
+#endif
+	{
+		glLoadIdentity();
+		glTranslatef(location.x, location.y, 0);
+	}
+
+	glScalef(ts, ts, 1.0f);
+	// Justify in the (scaled) local frame so centering matches the rendered width.
+	if (justify == _justify_center)
+		glTranslatef(-(float)(FontData.TextWidth(text) >> 1), 0.0f, 0.0f);
+
 	FontData.NearFilter = TxtrTypeInfoList[OGL_Txtr_HUD].NearFilter;
 	FontData.OGL_Render(text);
 	glPopMatrix();

@@ -90,6 +90,11 @@ typedef struct {
 	                        //     trigger; each hand punches independently along where it points. default 1
 	float punchSpeed;       // forward controller speed (m/s, measured along the aim direction) that triggers
 	                        //     a fist punch. lower = easier/twitchier; higher = needs a committed thrust
+	float leanGiveFraction; // head-lean "give" as a FRACTION of the player's collision radius: the head may
+	                        //     lean this far from the body's room-space anchor before the body starts to
+	                        //     follow (pure lean below it). Kills the against-a-wall ratchet and lets you
+	                        //     lean into a wall a little. 0 = strict 1:1 (old behaviour). radius is read
+	                        //     live from the physics model -- never hardcoded -- so the give tracks it.
 } vr_settings_t;
 
 vr_settings_t* VR_Settings(void);
@@ -159,6 +164,10 @@ void VR_GetHeadMove(float* x, float* y);
 // camera + visibility origin without touching the physics position (render-side -> can't fly).
 // VR_RecenterHead pins the reference to the current head (offset becomes 0 from there).
 void VR_GetHeadOffset(float* wx, float* wy);
+// Same offset for the render camera built on the INTERPOLATED body: pass the body's heartbeat_fraction t
+// so the head reference is lerped across the tick boundary identically, cancelling the interpolation lag
+// (removes the head-walk jitter/stepping that a live offset on a lagging int16 body would reintroduce).
+void VR_GetHeadOffsetInterp(float t, float* wx, float* wy);
 void VR_RecenterHead(void);
 
 // Continuous FLOAT render-camera position (Marathon world units). The engine writes this each render
@@ -187,6 +196,11 @@ float VR_EyeHeightM(void);
 // layer uses it with the measured standing height to pick a life-size world scale (worldScaleWUM), so the
 // player is rendered at their true height and reaching the real floor lands on the game floor.
 void VR_SetGameEyeHeightWU(float eyeHeightWU);
+
+// Fed by the physics each tick with the local player's actual collision radius (world units) from the
+// running physics model. The VR head-follow uses it (scaled by leanGiveFraction) as the head-lean
+// deadzone, so the "give" is a fraction of the real radius rather than a hardcoded distance.
+void VR_SetPlayerRadiusWU(float radiusWU);
 void VR_GetTurn(float* x);             // non-dominant thumbstick X: snap/smooth turn
 void VR_GetTurnY(float* y);            // non-dominant thumbstick Y: used for map zoom in-game
 bool VR_GetFire(void);                 // right trigger

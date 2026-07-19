@@ -197,11 +197,12 @@ void update_player_physics_variables(
 	struct physics_constants *constants= get_physics_constants_for_model(static_world->physics_model, action_flags);
 
 	physics_update(constants, variables, player, action_flags);
-	// NOTE: do NOT inject head positional movement into the physics position here -- Marathon renders
-	// the local player via client-side PREDICTION (re-simulates from action_flags each frame), so a
-	// position nudge that isn't in the action_flags makes the predicted/rendered view diverge and fly.
-	// QZD can move its actor directly because GZDoom renders the actor; Marathon can't. Head lean is
-	// handled view-side instead (full 6DOF camera in VR_GetEyeViewMetres).
+	// VR ROOM-SCALE head-walk is injected INSIDE physics_update (single-player only), where it rides the
+	// normal wall/object collision. It is deliberately NOT done for network games: there the local player
+	// IS re-simulated by client-side prediction from action_flags (set_prediction_wanted==_network_player),
+	// so a position delta that isn't encoded in the flags would diverge/"fly" -- netplay instead puts the
+	// head-walk on the wire in vbl.cpp (ABSOLUTE_POSITION + sidestep). Single-player has no prediction, so
+	// the direct delta is exact and safe.
 	instantiate_physics_variables(constants, variables, player_index, false, !predictive);
 
 #ifdef DIVERGENCE_CHECK
@@ -520,6 +521,11 @@ uint32 process_aim_input(uint32 action_flags, fixed_yaw_pitch delta)
 	// them at their true height instead of the fixed ~1.2 m the old 512 scale produced.
 	if (VR_IsActive())
 		VR_SetGameEyeHeightWU(FIXED_TO_WORLD(variables->actual_height - constants->camera_height));
+	// Feed the local player's ACTUAL collision radius (from the physics model, not a constant) so the VR
+	// head-follow can size its lean "give" as a fraction of it -- see VR_LatchHeadMove. Local player only:
+	// it's a local-viewpoint concept and only the local player's body follows a head.
+	if (VR_IsActive() && player == local_player)
+		VR_SetPlayerRadiusWU((float)FIXED_TO_WORLD(constants->radius));
 #endif
 
 	/* shadow facing in player structure and object structure */
@@ -869,7 +875,28 @@ static void physics_update(
 #endif
 	new_position.x+= (move_velocity*cosine-move_perp_velocity*sine)>>TRIG_SHIFT;
 	new_position.y+= (move_velocity*sine+move_perp_velocity*cosine)>>TRIG_SHIFT;
-	
+
+#if defined(__ANDROID__)
+	// SINGLE-PLAYER VR ROOM-SCALE: add the head's physical movement this tick (latched once per tick in
+	// parse_keymap; VR_GetHeadMove returns a world-unit map delta with world scale + snap-turn yaw already
+	// applied) DIRECTLY to the position. It then flows through the SAME wall/object collision as the stick
+	// move (keep_line_segment_out_of_walls + legal_player_move in instantiate_physics_variables), so
+	// physically walking translates 1:1 into in-game movement and is stopped ONLY by real geometry -- never
+	// by an artificial radius. A direct position delta (not a velocity) is exact and is safe here because
+	// the local player is re-simulated by client-side PREDICTION only in NETWORK games (interface.cpp:
+	// set_prediction_wanted(user==_network_player)); single-player has no prediction, so an unencoded
+	// position delta cannot diverge/"fly". Netgames instead put head-walk on the wire (vbl.cpp folds it
+	// into ABSOLUTE_POSITION + binary sidestep), so this block stands down when networked to avoid a
+	// double-apply/desync -- mirroring the analog-move split above.
+	if (VR_IsActive() && player == local_player && !game_is_networked)
+	{
+		float hmx = 0, hmy = 0;
+		VR_GetHeadMove(&hmx, &hmy);
+		new_position.x += (_fixed)(hmx * (float)(1 << (FIXED_FRACTIONAL_BITS - WORLD_FRACTIONAL_BITS)));
+		new_position.y += (_fixed)(hmy * (float)(1 << (FIXED_FRACTIONAL_BITS - WORLD_FRACTIONAL_BITS)));
+	}
+#endif
+
 	/* set above/below floor flags, remember old flags */
 	variables->old_flags= variables->flags;
 	if (new_position.z<variables->floor_height) variables->flags|= _BELOW_GROUND_BIT; else variables->flags&= (uint16)~_BELOW_GROUND_BIT;

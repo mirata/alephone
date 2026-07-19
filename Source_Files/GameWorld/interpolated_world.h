@@ -39,7 +39,7 @@ void interpolate_world_view(float heartbeat_fraction);
 // both of which make the camera step/snap during locomotion. This returns the same interpolation in
 // float with the fraction clamped to [0,1], so the VR render camera moves smoothly while walking.
 // Returns false if no interpolation state is available yet (caller should fall back to view->origin).
-bool get_interpolated_body_origin_float(float* x, float* y, float* z);
+bool get_interpolated_body_origin_float(float* x, float* y, float* z, float* out_t = nullptr);
 
 void track_contrail_interpolation(int16_t projectile_index, int16_t effect_index);
 bool get_interpolated_weapon_display_information(short* count, weapon_display_information* data);

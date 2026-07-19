@@ -543,6 +543,23 @@ void Screen::bound_screen_to_rect(SDL_Rect &r, bool in_game)
 		int vpx = static_cast<int>(pixw/2.0f - (virw * vscale)/2.0f + (r.x * vscale) + 0.5f);
 		int vpy = static_cast<int>(pixh/2.0f - (virh * vscale)/2.0f + (r.y * vscale) + 0.5f);
 
+#if defined(__ANDROID__)
+		// DIAG (menu shift-right bug): the 2D UI centers into the fixed FBO here; a nonzero menu vpx (or a
+		// vpw != FBO width) is exactly the "image shifted right + cropped" symptom. Log to the PERSISTENT
+		// file (logWarning) -- only on CHANGE, so it captures the transition even at end of a long session
+		// (logcat rotates). Menu path only (!in_game) to avoid the legitimate sub-rect 3D-view viewports.
+		if (VR_IsActive() && !in_game) {
+			static int s_lastMenuVpx = -999999, s_lastMenuVpw = -1;
+			if (vpx != s_lastMenuVpx || vpw != s_lastMenuVpw) {
+				s_lastMenuVpx = vpx; s_lastMenuVpw = vpw;
+				logWarning("VRbound menu vpx=%d vpw=%d pix=%dx%d virw=%d vscale=%.3f main_screen=%d surf=%dx%d fbo=%dx%d",
+					vpx, vpw, pixw, pixh, virw, vscale, (int)(main_screen != NULL),
+					main_surface ? main_surface->w : -1, main_surface ? main_surface->h : -1,
+					VR_ScreenLayerWidth(), VR_ScreenLayerHeight());
+			}
+		}
+#endif
+
 		glMatrixMode(GL_PROJECTION);
 		glLoadIdentity();
 		glViewport(vpx, pixh - vph - vpy, vpw, vph);
@@ -1348,7 +1365,9 @@ void update_world_view_camera()
 			const int yawOffset = (int)(VR_GetYawOffset() + 0.5f);   // angle units, 0..511
 			int hy = (int)(hmdYaw   >= 0 ? hmdYaw   + 0.5f : hmdYaw   - 0.5f);
 			int hp = (int)(hmdPitch >= 0 ? hmdPitch + 0.5f : hmdPitch - 0.5f);
-			if (hp >  112) hp =  112;   // keep |pitch| < 128 (90 deg): cosine_table[pitch]!=0 in dtanpitch
+			// Clamp the vis-tree pitch short of 90 deg (cosine_table[128]==0 -> dtanpitch div-by-zero).
+			// Only drives the visibility tree, not the rendered orientation (that's the OpenXR eye pose).
+			if (hp >  112) hp =  112;
 			else if (hp < -112) hp = -112;
 			world_view->yaw   = NORMALIZE_ANGLE(yawOffset + hy);
 			world_view->pitch = NORMALIZE_ANGLE(hp);
@@ -1416,7 +1435,8 @@ static void apply_vr_view_offsets()
 	// This is captured BEFORE eye-Z is folded into origin.z: the render camera's Z is the body height
 	// only (the live head height rides in via the vrView matrix), so the rasterizer never re-adds eye-Z.
 	float bodyX, bodyY, bodyZ;
-	if (!get_interpolated_body_origin_float(&bodyX, &bodyY, &bodyZ))
+	float bodyInterpT = 1.f;
+	if (!get_interpolated_body_origin_float(&bodyX, &bodyY, &bodyZ, &bodyInterpT))
 	{
 		bodyX = (float)world_view->origin.x;
 		bodyY = (float)world_view->origin.y;
@@ -1428,8 +1448,12 @@ static void apply_vr_view_offsets()
 	// visibility tree now; the rendered camera height comes from bodyZ + vrView (published below).
 	world_view->origin.z += (world_distance)VR_GetEyeZOffset();
 
+	// Head offset for the INTERPOLATED body: reference lerped with the SAME fraction bodyX/Y used, so the
+	// tick-committed head-walk in the (sub-WU) interpolated body cancels exactly and only the LIVE head
+	// motion rides on top -> continuous, no int16 stepping, no per-tick sawtooth (bodyX/Y now moves with
+	// head-walk, unlike before when the body was head-independent).
 	float ox = 0, oy = 0;
-	VR_GetHeadOffset(&ox, &oy);
+	VR_GetHeadOffsetInterp(bodyInterpT, &ox, &oy);
 
 	// How far the int16 wall clamp (+recover) moved the target away from the raw lean position. 0 in the
 	// open; nonzero AND int16-quantised (hence toggling) only when the clamp engages near a wall.
@@ -2593,16 +2617,27 @@ bool MainScreenVisible()
 }
 int MainScreenLogicalWidth()
 {
+#if defined(__ANDROID__)
+	// VR: the 2D UI renders into the fixed screen-layer FBO. Return its size directly rather than reading
+	// main_surface/main_screen -- if the SDL window ever gets created (main_screen non-null) or the surface
+	// is rebuilt at the Quest's native size, every dimension helper would report that instead of the FBO,
+	// and bound_screen would offset+crop the whole 2D image to the right. Keeping these pinned to the FBO
+	// size keeps the render, the viewport, and the mouse mapping all consistent at 1280x1024.
+	if (VR_IsActive()) return VR_ScreenLayerWidth();
+#endif
 	return (main_surface ? main_surface->w : 0);
 }
 int MainScreenLogicalHeight()
 {
+#if defined(__ANDROID__)
+	if (VR_IsActive()) return VR_ScreenLayerHeight();
+#endif
 	return (main_surface ? main_surface->h : 0);
 }
 int MainScreenWindowWidth()
 {
 #if defined(__ANDROID__)
-	if (!main_screen) return main_surface ? main_surface->w : 0;   // VR: no SDL window
+	if (VR_IsActive()) return VR_ScreenLayerWidth();   // VR: pin to the FBO, not main_screen/main_surface
 #endif
 	int w = 0;
 	SDL_GetWindowSize(main_screen, &w, NULL);
@@ -2611,7 +2646,7 @@ int MainScreenWindowWidth()
 int MainScreenWindowHeight()
 {
 #if defined(__ANDROID__)
-	if (!main_screen) return main_surface ? main_surface->h : 0;   // VR: no SDL window
+	if (VR_IsActive()) return VR_ScreenLayerHeight();
 #endif
 	int h = 0;
 	SDL_GetWindowSize(main_screen, NULL, &h);
@@ -2620,7 +2655,7 @@ int MainScreenWindowHeight()
 int MainScreenPixelWidth()
 {
 #if defined(__ANDROID__)
-	if (!main_screen) return main_surface ? main_surface->w : 0;   // VR: 1:1, no SDL window
+	if (VR_IsActive()) return VR_ScreenLayerWidth();   // VR: pin to the FBO (see MainScreenLogicalWidth)
 #endif
 	int w = 0;
 	int dummy = 0;				// SDL 2.24/Win crashes if you pass nullptr
@@ -2635,7 +2670,7 @@ int MainScreenPixelWidth()
 int MainScreenPixelHeight()
 {
 #if defined(__ANDROID__)
-	if (!main_screen) return main_surface ? main_surface->h : 0;   // VR: 1:1, no SDL window
+	if (VR_IsActive()) return VR_ScreenLayerHeight();
 #endif
 	int h = 0;
 	int dummy = 0;				// SDL 2.24/Win crashes if you pass nullptr

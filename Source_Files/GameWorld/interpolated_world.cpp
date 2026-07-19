@@ -98,6 +98,12 @@ struct TickWorldView {
 	angle yaw, pitch;
 	fixed_angle virtual_yaw, virtual_pitch;
 	world_point3d origin;
+	// Sub-WU-precise horizontal body position (world units, fractional). The int16 `origin` drops the
+	// sub-world-unit fraction the physics keeps in fixed point; VR room-scale head-walk moves the physics
+	// body, so that 1-WU quantisation would step the continuous VR render camera. Captured from the current
+	// player's fixed position (falls back to `origin` when they don't correspond). Used by
+	// get_interpolated_body_origin_float for the VR camera only.
+	float origin_x_f, origin_y_f;
 	_fixed maximum_depth_intensity;
 };
 
@@ -321,6 +327,19 @@ void enter_interpolated_world()
 	next->virtual_pitch = view->virtual_pitch;
 	next->origin = view->origin;
 	next->maximum_depth_intensity = view->maximum_depth_intensity;
+
+	// Sub-WU-precise horizontal body: recover the fraction the int16 `origin` dropped from the current
+	// player's fixed physics position, so the VR render camera doesn't inherit 1-WU stepping now that
+	// head-walk moves the body. Only when it corresponds to `origin` (same body, no Lua/chase camera).
+	next->origin_x_f = (float)view->origin.x;
+	next->origin_y_f = (float)view->origin.y;
+	if (current_player)
+	{
+		const float fx = current_player->variables.position.x / (float)(1 << (FIXED_FRACTIONAL_BITS - WORLD_FRACTIONAL_BITS));
+		const float fy = current_player->variables.position.y / (float)(1 << (FIXED_FRACTIONAL_BITS - WORLD_FRACTIONAL_BITS));
+		if (std::fabs(fx - (float)view->origin.x) < 2.0f) next->origin_x_f = fx;
+		if (std::fabs(fy - (float)view->origin.y) < 2.0f) next->origin_y_f = fy;
+	}
 
 	previous_tick_weapon_display.assign(current_tick_weapon_display.begin(),
 										current_tick_weapon_display.end());
@@ -758,7 +777,10 @@ void interpolate_world_view(float heartbeat_fraction)
 // as locomotion stutter once the lean is otherwise smooth. Reproduce the SAME lerp in float, fraction
 // clamped to [0,1] (so it holds at the latest tick instead of snapping), matching the int16 origin to
 // within <1 WU so it stays consistent with the visibility tree that still uses view->origin.
-bool get_interpolated_body_origin_float(float* x, float* y, float* z)
+// out_t (optional) receives the effective interpolation fraction actually used (0..1, or 1 when not
+// interpolating). VR passes it to VR_GetHeadOffsetInterp so the head reference is lerped across the SAME
+// tick boundary as this body -- cancelling the interpolation lag exactly.
+bool get_interpolated_body_origin_float(float* x, float* y, float* z, float* out_t)
 {
 	auto prev = &previous_tick_world_view;
 	auto next = &current_tick_world_view;
@@ -768,17 +790,19 @@ bool get_interpolated_body_origin_float(float* x, float* y, float* z)
 		prev->origin_polygon_index == NONE ||
 		!should_interpolate(prev->origin, next->origin))
 	{
-		if (x) *x = (float)next->origin.x;
-		if (y) *y = (float)next->origin.y;
+		if (x) *x = next->origin_x_f;
+		if (y) *y = next->origin_y_f;
 		if (z) *z = (float)next->origin.z;
+		if (out_t) *out_t = 1.f;
 		return true;
 	}
 
 	float t = world_view->heartbeat_fraction;
 	if (t < 0.f) t = 0.f; else if (t > 1.f) t = 1.f;   // clamp -> no >1 snap (hold at next)
-	if (x) *x = prev->origin.x + (next->origin.x - prev->origin.x) * t;
-	if (y) *y = prev->origin.y + (next->origin.y - prev->origin.y) * t;
+	if (x) *x = prev->origin_x_f + (next->origin_x_f - prev->origin_x_f) * t;
+	if (y) *y = prev->origin_y_f + (next->origin_y_f - prev->origin_y_f) * t;
 	if (z) *z = prev->origin.z + (next->origin.z - prev->origin.z) * t;
+	if (out_t) *out_t = t;
 	return true;
 }
 

@@ -82,10 +82,11 @@ bool         s_headPoseValid = false;   // s_stageFromHead orientation has been 
 float        s_lastHeadX = 0, s_lastHeadZ = 0;
 bool         s_headLatchInit = false;
 float        s_headMoveX = 0, s_headMoveY = 0;   // latched per-tick body delta, world units (map x,y)
-// Recenter reference (stage metres, horizontal): the head's position is reported RELATIVE to this, so
-// the view lean/walk offset starts at 0 wherever the player is standing when recentered.
-float        s_headRefX = 0, s_headRefZ = 0;
-bool         s_headRefInit = false;
+// The head stage position at the PREVIOUS tick's latch (s_lastHead is the CURRENT tick's). The render
+// interpolates BETWEEN these two to build a head reference that lags the live head exactly as the
+// interpolated body lags -- subtracting it from the live head removes the interpolation lag so head-walk
+// appears once and continuously (see VR_GetHeadOffsetInterp). Seeded to s_lastHead so t-lerp starts flat.
+float        s_prevHeadX = 0, s_prevHeadZ = 0;
 // Vertical recenter reference (stage metres): the player's MEASURED standing eye height, captured at
 // recenter alongside the horizontal reference. QuestZDoom-style -- vertical placement is relative to the
 // player's own stance rather than a fixed eyeHeightM assumption vs the absolute stage floor. This makes
@@ -110,6 +111,10 @@ bool         s_panelRecenterPending  = false;
 // so the player is rendered at their true height and reaching the real floor lands on the game floor.
 // Nominal (0.6*WORLD_ONE) until the physics reports the real value for the running scenario.
 float        s_gameEyeHeightWU = 614.0f;
+
+// Local player's actual collision radius (world units), fed live from the physics model. Drives the
+// head-lean deadzone (a fraction of it); 0 until physics reports it, which just means no give yet.
+float        s_playerRadiusWU = 0.0f;
 
 // Engine-owned headless EGL context (no window surface).
 EGLDisplay s_eglDpy  = EGL_NO_DISPLAY;
@@ -537,6 +542,8 @@ namespace {
 		/* punchWithFists   */ 1,      // thrust a fist to punch (in addition to the trigger)
 		/* punchSpeed       */ 1.6f,   // m/s forward controller speed that triggers a punch = "Medium"
 		                            //   punch strength in VR CONTROLS (Low 1.1 / Medium 1.6 / High 2.4)
+		/* leanGiveFraction */ 0.80f,  // head may lean 80% of the player's collision radius before the body
+		                            //   follows (against-a-wall "give"; 0 = strict 1:1)
 	};
 
 	// Locomotion yaw offset (snap/smooth turn), in Marathon angle units (512 = full circle).
@@ -925,20 +932,10 @@ extern "C" bool VR_BeginFrame(void)
 			s_headLatchInit = true;
 		}
 
-		// Slowly drift the lean reference toward the current head position so the head OFFSET
-		// (VR_GetHeadOffset) represents only RECENT head motion -- i.e. leaning -- and NOT absolute room
-		// position. The reference is captured once at startup; without this drift, VR tracking drift (over
-		// minutes) plus any physical walking makes the offset accumulate without bound, so the render
-		// camera leans further and further and eventually sits in the wall clamp's unstable zone -- the
-		// walls get progressively stuttery the LONGER the session runs, persist across a level restart
-		// (session static), and only clear on a full game restart (which re-seeds the reference). A slow
-		// drift (tau ~9 s @ ~72-90 Hz) leaves real leans intact for several seconds but quietly absorbs
-		// slow drift / settled walking so nothing ever accumulates. Once per frame.
-		if (s_headRefInit && (hl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
-			const float kRefDrift = 0.0015f;
-			s_headRefX += kRefDrift * (s_stageFromHead.position.x - s_headRefX);
-			s_headRefZ += kRefDrift * (s_stageFromHead.position.z - s_headRefZ);
-		}
+		// (No lean-reference drift any more: the render offset is now the RESIDUAL relative to s_lastHead,
+		// the absorbed head origin that VR_LatchHeadMove advances every physics tick as the body follows
+		// the head. The residual is inherently ~one tick of head motion, so it can't accumulate -- the old
+		// unbounded-offset problem the drift patched is gone with the body actually moving.)
 
 		XrViewLocateInfo vli = { XR_TYPE_VIEW_LOCATE_INFO };
 		vli.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -1199,33 +1196,63 @@ extern "C" void VR_LatchHeadMove(void)
 	const float hz = s_stageFromHead.position.z;
 	if (!s_headLatchInit || !s_headPoseValid) {
 		s_lastHeadX = hx; s_lastHeadZ = hz;
+		s_prevHeadX = hx; s_prevHeadZ = hz;
 		s_headLatchInit = s_headPoseValid;
 		s_headMoveX = s_headMoveY = 0;
 		return;
 	}
+	const float W  = s_settings.worldScaleWUM;
+
+	// LEAN GIVE (deadzone). s_lastHead is the body's room-space ANCHOR, not the raw head. The head may
+	// lean up to L metres from the anchor with the body FROZEN (a pure head lean); only motion beyond L
+	// advances the anchor and drives the body. L is a fraction of the player's ACTUAL collision radius
+	// (fed live from the physics model via VR_SetPlayerRadiusWU -- never hardcoded) converted to metres
+	// through the world scale, so the give tracks the physics radius and stays the same share of the
+	// body's footprint at any world scale.
+	//
+	// This kills the against-a-wall RATCHET: pressed at a terminal, leaning the head in then back out
+	// stays inside L, so the anchor (and the body) never move -- instead of the wall eating the lean-IN
+	// while the unopposed lean-OUT walks the body away from the wall a little each cycle. Fitting through
+	// tight gaps and pushing right up to walls are UNCHANGED: the body's radius and collision are
+	// untouched; the anchor merely trails the head by <=L along the SAME path (a time lag, not a lateral
+	// change), so the collision capsule still threads exactly the same geometry.
+	float L = 0.0f;
+	if (s_playerRadiusWU > 0.0f && W > 0.0f)
+		L = s_settings.leanGiveFraction * (s_playerRadiusWU / W);
+
+	// Chase the anchor toward the head, leaving it L behind; within L it stays put (body frozen).
 	float dhx = hx - s_lastHeadX;
 	float dhz = hz - s_lastHeadZ;
-	s_lastHeadX = hx; s_lastHeadZ = hz;
+	const float dist = std::sqrt(dhx * dhx + dhz * dhz);
+	float mx = 0.0f, mz = 0.0f;   // anchor advance this tick == the body's stage-space move
+	if (dist > L) {
+		const float k = (dist - L) / dist;
+		mx = dhx * k; mz = dhz * k;
+	}
 
-	// Safety clamp (catastrophe guard only -- normal lean/walk is well under this; the old takeoff was
-	// the residual/rate bug, now removed, not large deltas). ~0.15 m/tick = ~4.5 m/s head speed.
+	// Safety clamp (catastrophe guard only -- normal lean/walk is well under this). ~0.15 m/tick.
 	const float kMax = 0.15f;
-	if (dhx >  kMax) dhx =  kMax; else if (dhx < -kMax) dhx = -kMax;
-	if (dhz >  kMax) dhz =  kMax; else if (dhz < -kMax) dhz = -kMax;
+	if (mx >  kMax) mx =  kMax; else if (mx < -kMax) mx = -kMax;
+	if (mz >  kMax) mz =  kMax; else if (mz < -kMax) mz = -kMax;
 
-	// World body delta = Rz(yawOffset) * (-dhx, -dhz) * worldScale (matches the render's head-offset:
+	// Roll the anchor: prev -> render interp reference; advance by EXACTLY the emitted body move so the
+	// render residual (head - anchor, VR_GetHeadOffset) and the body stay in lockstep.
+	s_prevHeadX = s_lastHeadX; s_prevHeadZ = s_lastHeadZ;
+	s_lastHeadX += mx; s_lastHeadZ += mz;
+
+	// World body delta = Rz(yawOffset) * (-mx, -mz) * worldScale (matches the render's head-offset:
 	// head_world = origin + Rz(yawOffset) * (-hx, -hz) * W). Stage deltas keep snap-turns from
 	// registering as movement (a snap rotates the play space, not the head's physical position).
-	const float W  = s_settings.worldScaleWUM;
 	const float yr = s_yawOffset * (2.0f * 3.14159265358979f / 512.0f);
 	const float c  = std::cos(yr), s = std::sin(yr);
-	s_headMoveX = W * (-c * dhx + s * dhz);
-	s_headMoveY = W * (-s * dhx - c * dhz);
+	s_headMoveX = W * (-c * mx + s * mz);
+	s_headMoveY = W * (-s * mx - c * mz);
 
-	// Diagnostic (throttled): raw head delta (m/tick, post-clamp) + resulting body delta (world units).
+	// Diagnostic (throttled): head-vs-anchor distance + lean radius + resulting body delta (world units).
 	static int s_dbg = 0;
 	if ((s_dbg++ % 15) == 0)
-		A1VR_LOG("headmove: pos=(%.3f,%.3f) d=(%.4f,%.4f) -> body=(%.2f,%.2f) wu", hx, hz, dhx, dhz, s_headMoveX, s_headMoveY);
+		A1VR_LOG("headmove: pos=(%.3f,%.3f) lean=%.3f/L=%.3f -> move=(%.4f,%.4f) body=(%.2f,%.2f) wu",
+			hx, hz, dist, L, mx, mz, s_headMoveX, s_headMoveY);
 }
 
 extern "C" void VR_GetHeadMove(float* x, float* y) { if (x) *x = s_headMoveX; if (y) *y = s_headMoveY; }
@@ -1260,6 +1287,13 @@ extern "C" void VR_SetGameEyeHeightWU(float eyeHeightWU)
 	if (eyeHeightWU > 1.0f) { s_gameEyeHeightWU = eyeHeightWU; recomputeWorldScale(); }
 }
 
+// Fed by the physics each tick: the local player's actual collision radius (world units) from the running
+// physics model. Used (scaled by leanGiveFraction) as the head-lean deadzone -- see VR_LatchHeadMove.
+extern "C" void VR_SetPlayerRadiusWU(float radiusWU)
+{
+	if (radiusWU > 0.0f) s_playerRadiusWU = radiusWU;
+}
+
 // Effective eye-height REFERENCE (metres) used for vertical placement: eye_world_Z = camZ + (headY -
 // VR_EyeHeightM())*W. Once the player has recentered (auto on the first valid pose and at every level
 // entry) the baseline is their ACTUAL measured standing head height; before that a nominal fallback.
@@ -1281,7 +1315,11 @@ extern "C" float VR_GetEyeZOffset(void)
 extern "C" void VR_RecenterHead(void)
 {
 	if (s_headPoseValid) {
-		s_headRefX = s_stageFromHead.position.x; s_headRefZ = s_stageFromHead.position.z; s_headRefInit = true;
+		// Re-anchor the absorbed head origin to the current head so the render residual (VR_GetHeadOffset)
+		// and the per-tick body delta (VR_GetHeadMove) both start from 0 here -- i.e. "you are standing
+		// where you are now." The body doesn't teleport; only the head/body mapping is re-zeroed.
+		s_lastHeadX = s_stageFromHead.position.x; s_lastHeadZ = s_stageFromHead.position.z;
+		s_headLatchInit = true;
 		// Capture the current (standing) eye height as the vertical reference, so the player is placed at
 		// the Marathon eye height right now and duck/lean read as deltas below it.
 		s_standingEyeHeightM = s_stageFromHead.position.y; s_standingEyeHeightInit = true;
@@ -1316,33 +1354,63 @@ extern "C" void VR_GetHeadOffset(float* wx, float* wy)
 {
 	if (wx) *wx = 0; if (wy) *wy = 0;
 	if (!s_headPoseValid) return;
-	if (!s_headRefInit) {   // auto-recenter on first valid pose -> offset starts at 0
-		s_headRefX = s_stageFromHead.position.x; s_headRefZ = s_stageFromHead.position.z;
+	// Capture the standing eye height on the first valid pose if a recenter hasn't already (life-size scale).
+	if (!s_standingEyeHeightInit) {
 		s_standingEyeHeightM = s_stageFromHead.position.y; s_standingEyeHeightInit = true;
-		recomputeWorldScale();   // life-size scale now that we know the standing height
-		s_headRefInit = true; return;
+		recomputeWorldScale();
 	}
-	const float dhx = s_stageFromHead.position.x - s_headRefX;
-	const float dhz = s_stageFromHead.position.z - s_headRefZ;
+	// s_lastHead is seeded by the frame loop on the first valid pose; until then the residual is 0.
+	if (!s_headLatchInit) return;
+
+	// RESIDUAL: the head's horizontal position relative to s_lastHead, the "absorbed" origin the body has
+	// been moved up to (advanced every physics tick by VR_LatchHeadMove). Between ticks this grows with
+	// live head motion so the render camera tracks the head smoothly at HMD rate; at each tick the body
+	// absorbs it (with wall collision) and this returns toward 0. The body carries the bulk of any walk,
+	// so this offset stays small -- no lean cap is needed (and a cap would fight real room-scale walking).
+	// Applied to the VIEW ORIGIN engine-side, which independently wall-clamps it (screen.cpp), so peeking
+	// still can't see through walls.
+	const float dhx = s_stageFromHead.position.x - s_lastHeadX;
+	const float dhz = s_stageFromHead.position.z - s_lastHeadZ;
 	const float W  = s_settings.worldScaleWUM;
 	const float yr = s_yawOffset * (2.0f * 3.14159265358979f / 512.0f);
 	const float c  = std::cos(yr), s = std::sin(yr);
 	float ox = W * (-c * dhx + s * dhz);
 	float oy = W * (-s * dhx - c * dhz);
 
-	// Cap the lean-offset MAGNITUDE. This offset is meant to be room-scale LEANING (small, and it returns
-	// to ~0 when you straighten up). But because head-follows-body locomotion isn't wired (VR_GetHeadMove
-	// is unused), physically WALKING across the play space translates the head persistently away from the
-	// recenter reference and this offset grows without bound -- pushing the render camera a metre+ through
-	// walls and driving the wall clamp into its unstable regime. The result is jitter that appears after
-	// you've physically moved around, persists across a level restart (the reference is a session static),
-	// and only clears on a full game restart (static re-init). Capping the magnitude keeps generous leaning
-	// intact while preventing physical walking from running the offset away. ~0.75 m is well beyond any
-	// real lean; past it the camera simply stops following (use the stick to actually move).
-	const float maxLean = 0.75f * W;
+	// Safety clamp only (catastrophe guard for a bad pose / a tick that was skipped for many frames, e.g.
+	// returning from a menu). Well beyond a single tick of real head motion; never engages in normal play.
+	const float maxResidual = 1.5f * W;
 	const float mag = std::sqrt(ox * ox + oy * oy);
-	if (mag > maxLean) { const float k = maxLean / mag; ox *= k; oy *= k; }
+	if (mag > maxResidual) { const float k = maxResidual / mag; ox *= k; oy *= k; }
 
+	if (wx) *wx = ox;
+	if (wy) *wy = oy;
+}
+
+// Render-camera head offset for the INTERPOLATED body (screen.cpp). The render camera is built as
+// interpolated_body + this offset. The interpolated body LAGS the live head by up to one tick (it lerps
+// the previous/current tick snapshots), so subtracting a head reference lerped the SAME way removes that
+// lag: offset = map(live_head - lerp(prevTickHead, curTickHead, t)). With the body snapshots carried at
+// sub-WU precision (interpolated_world.cpp) the tick-committed head-follow in the body cancels this
+// reference exactly, leaving interpolated_body + offset == (interpolated non-head body) + LIVE head --
+// continuous, no int16 stepping, no per-tick sawtooth. `t` is the same heartbeat_fraction the body used.
+extern "C" void VR_GetHeadOffsetInterp(float t, float* wx, float* wy)
+{
+	if (wx) *wx = 0; if (wy) *wy = 0;
+	if (!s_headPoseValid || !s_headLatchInit) return;
+	if (t < 0.f) t = 0.f; else if (t > 1.f) t = 1.f;
+	const float refX = s_prevHeadX + (s_lastHeadX - s_prevHeadX) * t;
+	const float refZ = s_prevHeadZ + (s_lastHeadZ - s_prevHeadZ) * t;
+	const float dhx = s_stageFromHead.position.x - refX;
+	const float dhz = s_stageFromHead.position.z - refZ;
+	const float W  = s_settings.worldScaleWUM;
+	const float yr = s_yawOffset * (2.0f * 3.14159265358979f / 512.0f);
+	const float c  = std::cos(yr), s = std::sin(yr);
+	float ox = W * (-c * dhx + s * dhz);
+	float oy = W * (-s * dhx - c * dhz);
+	const float maxResidual = 1.5f * W;   // catastrophe guard only (skipped ticks / bad pose)
+	const float mag = std::sqrt(ox * ox + oy * oy);
+	if (mag > maxResidual) { const float k = maxResidual / mag; ox *= k; oy *= k; }
 	if (wx) *wx = ox;
 	if (wy) *wy = oy;
 }
@@ -2527,6 +2595,7 @@ extern "C" bool VR_GetRenderCamera(float*, float*, float*) { return false; }
 extern "C" float VR_GetEyeZOffset(void) { return 0.0f; }
 extern "C" float VR_EyeHeightM(void) { return 0.0f; }
 extern "C" void VR_SetGameEyeHeightWU(float) {}
+extern "C" void VR_SetPlayerRadiusWU(float) {}
 extern "C" bool VR_GetFire(void)               { return false; }
 extern "C" bool VR_GetSecondaryFire(void)      { return false; }
 extern "C" bool VR_GetPrimaryPunch(void)       { return false; }
