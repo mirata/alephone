@@ -563,6 +563,7 @@
     <ClCompile Include="..\..\Source_Files\Network\StandaloneHub\StandaloneHub.cpp" />
     <ClCompile Include="..\..\Source_Files\Network\StandaloneHub\standalone_hub_main.cpp" />
     <ClCompile Include="..\..\Source_Files\Network\StarGameProtocol.cpp" />
+    <ClCompile Include="..\..\Source_Files\Network\vr_net.cpp" />
     <ClCompile Include="..\..\Source_Files\Network\Update.cpp" />
     <ClCompile Include="..\..\Source_Files\RenderMain\AnimatedTextures.cpp" />
     <ClCompile Include="..\..\Source_Files\RenderMain\Crosshairs_SDL.cpp" />
@@ -781,6 +782,7 @@
     <ClInclude Include="..\..\Source_Files\Network\SSLP_Protocol.h" />
     <ClInclude Include="..\..\Source_Files\Network\StandaloneHub\StandaloneHub.h" />
     <ClInclude Include="..\..\Source_Files\Network\StarGameProtocol.h" />
+    <ClInclude Include="..\..\Source_Files\Network\vr_net.h" />
     <ClInclude Include="..\..\Source_Files\Network\Update.h" />
     <ClInclude Include="..\..\Source_Files\RenderMain\AnimatedTextures.h" />
     <ClInclude Include="..\..\Source_Files\RenderMain\collection_definition.h" />

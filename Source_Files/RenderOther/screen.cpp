@@ -543,23 +543,6 @@ void Screen::bound_screen_to_rect(SDL_Rect &r, bool in_game)
 		int vpx = static_cast<int>(pixw/2.0f - (virw * vscale)/2.0f + (r.x * vscale) + 0.5f);
 		int vpy = static_cast<int>(pixh/2.0f - (virh * vscale)/2.0f + (r.y * vscale) + 0.5f);
 
-#if defined(__ANDROID__)
-		// DIAG (menu shift-right bug): the 2D UI centers into the fixed FBO here; a nonzero menu vpx (or a
-		// vpw != FBO width) is exactly the "image shifted right + cropped" symptom. Log to the PERSISTENT
-		// file (logWarning) -- only on CHANGE, so it captures the transition even at end of a long session
-		// (logcat rotates). Menu path only (!in_game) to avoid the legitimate sub-rect 3D-view viewports.
-		if (VR_IsActive() && !in_game) {
-			static int s_lastMenuVpx = -999999, s_lastMenuVpw = -1;
-			if (vpx != s_lastMenuVpx || vpw != s_lastMenuVpw) {
-				s_lastMenuVpx = vpx; s_lastMenuVpw = vpw;
-				logWarning("VRbound menu vpx=%d vpw=%d pix=%dx%d virw=%d vscale=%.3f main_screen=%d surf=%dx%d fbo=%dx%d",
-					vpx, vpw, pixw, pixh, virw, vscale, (int)(main_screen != NULL),
-					main_surface ? main_surface->w : -1, main_surface ? main_surface->h : -1,
-					VR_ScreenLayerWidth(), VR_ScreenLayerHeight());
-			}
-		}
-#endif
-
 		glMatrixMode(GL_PROJECTION);
 		glLoadIdentity();
 		glViewport(vpx, pixh - vph - vpy, vpw, vph);

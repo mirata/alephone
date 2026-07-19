@@ -105,6 +105,7 @@ Apr 10, 2003 (Woody Zenfell):
 #include "preferences.h"
 #include "InfoTree.h"
 #include "vr_openxr.h"
+#include "vr_net.h"   // vr_net_is_active / vr_net_get_sim_block (Phase 2: synced per-hand aim)
 #include "vr_weapons.h"
 
 #include "Packing.h"
@@ -1963,12 +1964,25 @@ static void fire_weapon(
 		   the authoritative shot no longer uses free controller aim in netgames, there's no reason
 		   for a VR shooter's spread to differ from everyone else's either. */
 		angle vr_theta_error= trigger_definition->theta_error;
-		if (VR_IsActive() && player_index == current_player_index && !game_is_networked)
+		// NETGAME (VR netcode active): apply the MML VR spread scale for EVERY player. It's read from the
+		// shared scenario MML (<vr_spread>), parsed identically on every client incl. flat PC (XML_MakeRoot,
+		// cross-platform), so global_random() is rolled identically everywhere -- deterministic, no RNG
+		// desync. This retires the single-player-only gate. See docs/VR_NETCODE.md.
+		if (vr_net_is_active())
 		{
 			float spread_scale= VR_GetWeaponSpreadScale(weapon_data->weapon_type);
 			if (spread_scale != 1.f)
 				vr_theta_error= (angle)(vr_theta_error * spread_scale);
 		}
+#if defined(__ANDROID__)
+		// Single-player live VR (unchanged; game_is_networked false here).
+		else if (VR_IsActive() && player_index == current_player_index && !game_is_networked)
+		{
+			float spread_scale= VR_GetWeaponSpreadScale(weapon_data->weapon_type);
+			if (spread_scale != 1.f)
+				vr_theta_error= (angle)(vr_theta_error * spread_scale);
+		}
+#endif
 
 		while(rounds_to_fire--)
 		{
@@ -2117,15 +2131,32 @@ static void calculate_weapon_origin_and_vector(
 	// from nothing but the already-synced player->facing/elevation/camera_location, same as PC.
 	angle fire_facing= player->facing;
 	angle fire_elevation= player->elevation;
+
+	// Which hand fires this trigger: the off-hand aims the second trigger of a dual-wield (pistols and
+	// fists), so each gun/fist in a pair aims independently; everything else uses the dominant hand.
+	const bool vr_use_offhand = (which_trigger == _secondary_weapon
+			&& (definition->weapon_class == _twofisted_pistol_class
+			 || definition->weapon_class == _melee_class));
+
+	// NETGAME (VR netcode extension active): derive the fire direction from THIS player's tick-aligned
+	// synced block, on every client, so the exact same shot is computed identically everywhere -- the
+	// desync-free replacement for the local-only live-controller path below. A flat/non-VR player's
+	// block carries their facing/elevation (vr_capture_local_net_block defaults), so they fire straight
+	// ahead as in the classic game -- correct graceful fallback. See docs/VR_NETCODE.md.
+	if (vr_net_is_active())
+	{
+		const vr_block& b = vr_net_get_sim_block(player_index);
+		fire_facing    = (angle)(vr_use_offhand ? b.off_yaw   : b.dom_yaw);
+		fire_elevation = (angle)(vr_use_offhand ? b.off_pitch : b.dom_pitch);
+	}
 #if defined(__ANDROID__)
-	if (VR_IsActive() && player_index == local_player_index && !game_is_networked)
+	// SINGLE-PLAYER live VR (unchanged): reads live controller state on the shooter's own machine.
+	// game_is_networked is false here, and vr_net_is_active() is only ever true in a netgame, so this
+	// and the synced-block branch above are mutually exclusive.
+	else if (VR_IsActive() && player_index == local_player_index && !game_is_networked)
 	{
 		float dir[3];
-		// Off-hand aim for the second trigger of a dual-wield: pistols (_twofisted_pistol_class) AND
-		// fists (_melee_class, both triggers = the two hands) so each fist punches along its own hand.
-		const bool got = (which_trigger == _secondary_weapon
-				&& (definition->weapon_class == _twofisted_pistol_class
-				 || definition->weapon_class == _melee_class))
+		const bool got = vr_use_offhand
 			? VR_GetSecondaryWeaponAim(dir)
 			: VR_GetWeaponAim(dir);
 		if (got)
@@ -2140,35 +2171,52 @@ static void calculate_weapon_origin_and_vector(
 
 	*origin= player->camera_location;
 	source_location= *origin;
-#if defined(__ANDROID__)
-	// Same netgame-desync reasoning as the aim override above: head lean is a local-only view
-	// offset (VR_GetHeadOffset), so this can only feed the AUTHORITATIVE shot origin when there's
-	// no other machine that needs to agree on where it came from.
-	if (VR_IsActive() && player_index == local_player_index && !game_is_networked)
+
+	// Shot origin = the player's physical head position (camera + lean + crouch). Two sources, mutually
+	// exclusive, both wall-clamped so a lean/duck can't push the muzzle through geometry:
+	//   * NETGAME VR: the synced block's lean/eye-Z (world units) for THIS player, on every client, so
+	//     the origin is identical everywhere (flat players carry zero -> classic camera_location).
+	//   * SINGLE-PLAYER live VR: read the local controller/HMD directly (unchanged).
 	{
-		float ox = 0.0f, oy = 0.0f;
-		VR_GetHeadOffset(&ox, &oy);
-
-		world_point3d vr_origin = *origin;
-		vr_origin.x += (world_distance)ox;
-		vr_origin.y += (world_distance)oy;
-		vr_origin.z += (world_distance)VR_GetEyeZOffset();
-
-		short support_polygon = player->camera_polygon_index;
-		if (support_polygon == NONE) support_polygon = object->polygon;
-		if (support_polygon != NONE)
+		bool have_vr_origin = false;
+		world_distance lean_x = 0, lean_y = 0, eye_z = 0;
+		if (vr_net_is_active())
 		{
-			world_point3d clamped = vr_origin;
-			world_distance floor_height, ceiling_height;
-			keep_line_segment_out_of_walls(support_polygon, &player->camera_location, &clamped,
-				WORLD_ONE, 0, &floor_height, &ceiling_height, &support_polygon);
-			vr_origin = clamped;
+			const vr_block& b = vr_net_get_sim_block(player_index);
+			lean_x = (world_distance)b.lean_x; lean_y = (world_distance)b.lean_y; eye_z = (world_distance)b.eye_z;
+			have_vr_origin = true;
 		}
-
-		*origin = vr_origin;
-		source_location = vr_origin;
-	}
+#if defined(__ANDROID__)
+		else if (VR_IsActive() && player_index == local_player_index && !game_is_networked)
+		{
+			float ox = 0.0f, oy = 0.0f;
+			VR_GetHeadOffset(&ox, &oy);
+			lean_x = (world_distance)ox; lean_y = (world_distance)oy; eye_z = (world_distance)VR_GetEyeZOffset();
+			have_vr_origin = true;
+		}
 #endif
+		if (have_vr_origin)
+		{
+			world_point3d vr_origin = *origin;
+			vr_origin.x += lean_x;
+			vr_origin.y += lean_y;
+			vr_origin.z += eye_z;
+
+			short support_polygon = player->camera_polygon_index;
+			if (support_polygon == NONE) support_polygon = object->polygon;
+			if (support_polygon != NONE)
+			{
+				world_point3d clamped = vr_origin;
+				world_distance floor_height, ceiling_height;
+				keep_line_segment_out_of_walls(support_polygon, &player->camera_location, &clamped,
+					WORLD_ONE, 0, &floor_height, &ceiling_height, &support_polygon);
+				vr_origin = clamped;
+			}
+
+			*origin = vr_origin;
+			source_location = vr_origin;
+		}
+	}
 	origin->z += trigger_definition->dz;
 
 	/* Translate the projectile out to the end of the gun barrel.. */
@@ -2185,14 +2233,14 @@ static void calculate_weapon_origin_and_vector(
 		dx_translation_amount= 0;
 	} else {
 		dx_translation_amount= trigger_definition->dx;
+		// In VR each pistol fires along its controller's aim; the classic screen-space barrel offset
+		// would shift the muzzle off the hand and land bullets left/right of the aim. Zero it so each
+		// hand shoots exactly where it aims -- for the synced netgame path (all clients, deterministic)
+		// and the single-player live path alike. See docs/VR_NETCODE.md.
+		if (vr_net_is_active() && definition->weapon_class == _twofisted_pistol_class)
+			dx_translation_amount = 0;
 #if defined(__ANDROID__)
-		// In VR, each pistol fires along its controller's aim; the classic screen-space barrel
-		// offset shifts the origin away from the controller position and causes bullets to land
-		// left/right of the aim cursor. Zero it so each hand shoots exactly where it aims.
-		// Single-player only -- this correction only makes sense alongside the controller-aim
-		// override above, which is itself disabled in netgames for sync reasons; keeping the
-		// classic dx offset in netgames matches what every other client (VR or PC) computes.
-		if (VR_IsActive() && player_index == local_player_index && !game_is_networked
+		else if (VR_IsActive() && player_index == local_player_index && !game_is_networked
 			&& definition->weapon_class == _twofisted_pistol_class)
 			dx_translation_amount = 0;
 #endif
@@ -2573,11 +2621,20 @@ static bool handle_trigger_down(
 					/* Rocky modification */
 					if(PRIMARY_WEAPON_IS_VALID(weapon) && SECONDARY_WEAPON_IS_VALID(weapon))
 					{
+						// In VR each controller is an independent hand: bypass the alternating stagger
+						// so each trigger fires its own gun at its own rate. Netgame (VR netcode active):
+						// apply on EVERY client -- both triggers are already synced action_flags, so this
+						// is deterministic and the shot patterns agree everywhere (the desync-free
+						// replacement for the local-only path). See docs/VR_NETCODE.md.
+						if (vr_net_is_active() && definition->weapon_class == _twofisted_pistol_class)
+						{
+							fired = true;
+							break;
+						}
 #if defined(__ANDROID__)
-						// In VR each controller is an independent hand: bypass the alternating
-						// stagger so each trigger fires its own gun at its own rate.
-						if (VR_IsActive() && definition->weapon_class == _twofisted_pistol_class
-							&& player_index == local_player_index)
+						// Single-player live VR: local player only (game_is_networked false here).
+						else if (VR_IsActive() && definition->weapon_class == _twofisted_pistol_class
+							&& player_index == local_player_index && !game_is_networked)
 						{
 							fired = true;
 							break;

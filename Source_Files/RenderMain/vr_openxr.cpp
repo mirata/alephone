@@ -29,6 +29,7 @@
 #include <cmath>
 
 #include "vr_openxr.h"
+#include "Logging.h"         // logWarning -> persistent on-device log (panel-placement diagnostic)
 #include "sdl_fonts.h"       // font_info (on-screen keyboard label rendering)
 #include "screen_drawing.h"  // draw_text / text_width
 #include "sdl_dialogs.h"     // get_theme_font / DEFAULT_WIDGET
@@ -1935,6 +1936,12 @@ namespace {
 		s_panelHalfH = 0.5f*s_settings.screenHeightM;
 		s_panelHalfW = s_panelHalfH * (float)kScreenW/(float)kScreenH;
 		s_panelPlaced = true;
+		// DIAG (menu-out-of-alignment): persistent log of the head pose the panel was placed from and the
+		// resulting panel centre. If the menu is still off after this, the numbers show whether the head
+		// stage-pose was sane (e.g. corrupted by crossing the guardian) or the placement math is at fault.
+		// SHIP-DISABLED (store test build): writes to the on-device log file; re-enable to keep debugging.
+		//logWarning("VRpanel place head=(%.2f,%.2f,%.2f) fwdH=(%.2f,%.2f) C=(%.2f,%.2f,%.2f) D=%.2f hh=%.2f hw=%.2f",
+		//	hp[0], hp[1], hp[2], hf[0], hf[2], s_panelC[0], s_panelC[1], s_panelC[2], D, s_panelHalfH, s_panelHalfW);
 	}
 
 	// Intersect each controller aim ray with the panel independently; both can hit at once.
@@ -2442,6 +2449,30 @@ extern "C" void VR_PresentScreenLayer(void)
 		if (!s_panelPlaced && s_headPoseValid) placePanel();
 		updatePointer();   // ray-cast both controllers onto the world-locked panel
 		kbUpdate();        // on-screen keyboard: place/hover/click + suppress menu pointer when on it
+
+		// DIAG (menu-out-of-alignment): ~1/sec persistent log of the LIVE head-vs-panel relationship while
+		// the menu is shown. Decisive: when the menu looks off, "off=Ndeg" tells whether the head is actually
+		// pointed AT the panel (~0 -> a render/pose bug: panel drawn wrong despite being in front) or well
+		// off it (large -> a placement/position bug), and the head/panel coords show if the stage pose is
+		// sane or corrupted (e.g. by crossing the guardian). Remove once root-caused.
+		// SHIP-DISABLED (store test build): this ran ~1/sec and wrote to the on-device log file the whole
+		// time a menu was open. Re-enable (uncomment the block) to resume debugging panel alignment.
+		/*
+		if (s_headPoseValid) {
+			static int s_pdbg = 0;
+			if ((s_pdbg++ % 45) == 0) {
+				const float hpx=s_stageFromHead.position.x, hpy=s_stageFromHead.position.y, hpz=s_stageFromHead.position.z;
+				float hf[3]; poseFwd(s_stageFromHead, hf); hf[1]=0;
+				const float hlen=std::sqrt(hf[0]*hf[0]+hf[2]*hf[2]);
+				const float tx=s_panelC[0]-hpx, tz=s_panelC[2]-hpz;
+				const float dist=std::sqrt(tx*tx+tz*tz);
+				float cang = (hlen>1e-4f && dist>1e-4f) ? (hf[0]*tx+hf[2]*tz)/(hlen*dist) : 2.0f;
+				float angDeg = (cang>1.5f) ? -1.0f : std::acos(cang<-1.f?-1.f:(cang>1.f?1.f:cang))*57.29578f;
+				logWarning("VRpanel disp head=(%.2f,%.2f,%.2f) fwdH=(%.2f,%.2f) C=(%.2f,%.2f,%.2f) dist=%.2f dY=%.2f off=%.0fdeg placed=%d",
+					hpx,hpy,hpz, hf[0],hf[2], s_panelC[0],s_panelC[1],s_panelC[2], dist, s_panelC[1]-hpy, angDeg, (int)s_panelPlaced);
+			}
+		}
+		*/
 
 		// World-locked panel: local quad (-1..1 XY) -> stage via panelRight/Up/Center.
 		const float hw = s_panelHalfW, hh = s_panelHalfH;

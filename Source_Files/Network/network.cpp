@@ -188,6 +188,10 @@ static MessageInflater *inflater = NULL;
 static MessageDispatcher *joinDispatcher = NULL;
 static uint64_t next_join_attempt;
 static Capabilities my_capabilities;
+// Joiner side: did the gatherer advertise the VR netcode extension for this game? Captured from the
+// gatherer's CapabilitiesMessage and read at game start to activate the VR protocol. See
+// NetGathererAdvertisedVR() / docs/VR_NETCODE.md.
+static bool sGathererAdvertisedVR = false;
 static std::shared_ptr<Pinger> pinger = nullptr; //multithread safety
 static GatherCallbacks *gatherCallbacks = NULL;
 static ChatCallbacks *chatCallbacks = NULL;
@@ -437,6 +441,21 @@ bool Client::capabilities_indicate_player_is_gatherable(bool warn_joiner)
 			}
 			return false;
 		}
+	}
+
+	// VR netcode extension: when WE are hosting it (my_capabilities[kVR] >= 1, set from the host
+	// preference in NetGather), a joiner that can't speak it (kVR absent/0 -- stock or older build)
+	// must be refused, because the VR game stream carries VR pose messages an unaware client would
+	// choke on. When we're not hosting it (kVR 0) this never fires, so legacy games stay open to any
+	// client. See docs/VR_NETCODE.md.
+	if (my_capabilities[Capabilities::kVR] >= Capabilities::kVRVersion &&
+	    capabilities[Capabilities::kVR] < my_capabilities[Capabilities::kVR])
+	{
+		if (warn_joiner) {
+			ServerWarningMessage serverWarningMessage(expand_app_variables("The gatherer is hosting with the VR netcode extension, which your build does not support. You will not appear in the list of available players."), ServerWarningMessage::kJoinerUngatherable);
+			channel->enqueueOutgoingMessage(serverWarningMessage);
+		}
+		return false;
 	}
 
 	if (deferred_script.size())
@@ -811,6 +830,9 @@ static void handleCapabilitiesMessage(CapabilitiesMessage* capabilitiesMessage,
 {
 	if (handlerState == netJoining) {
 		Capabilities capabilities = *capabilitiesMessage->capabilities();
+		// Remember whether the gatherer is hosting the VR netcode extension (advertised kVR >= 1).
+		// This is the per-game legacy-vs-VR decision; it drives vr_net activation at game start.
+		sGathererAdvertisedVR = (capabilities[Capabilities::kVR] >= Capabilities::kVRVersion);
 		if (capabilities[Capabilities::kGameworld] < my_capabilities[Capabilities::kGameworld] || (shapes_file_is_m1() && capabilities[Capabilities::kGameworldM1] < my_capabilities[Capabilities::kGameworldM1]) || (network_preferences->game_protocol == _network_game_protocol_star && capabilities[Capabilities::kStar] < my_capabilities[Capabilities::kStar]))
 		{
 			// I'm not gatherable
@@ -829,7 +851,18 @@ static void handleCapabilitiesMessage(CapabilitiesMessage* capabilitiesMessage,
 	} else {
 		logAnomaly("unexpected capabilities message received (netState is %i)", netState);
 	}
-}   
+}
+
+// Whether THIS machine runs the VR netcode extension for the current game. The gatherer/server uses
+// its own host preference; a joiner uses what the gatherer advertised (captured above). Consulted
+// once at game start by StarGameProtocol::Sync so hub, spokes and the renderer all agree. See
+// docs/VR_NETCODE.md.
+bool NetVRNetcodeActive(bool isServer)
+{
+	if (isServer)
+		return network_preferences && network_preferences->use_vr_netcode;
+	return sGathererAdvertisedVR;
+}
 
 static void handleClientInfoMessage(ClientInfoMessage* clientInfoMessage, CommunicationsChannel * channel) {
 	if (netState == netJoining || netState == netWaiting || netState == netStartingUp || netState == netActive) {
@@ -1273,6 +1306,11 @@ bool NetEnter(bool use_remote_hub)
 	my_capabilities[Capabilities::kZippedData] = Capabilities::kZippedDataVersion;
 	my_capabilities[Capabilities::kNetworkStats] = Capabilities::kNetworkStatsVersion;
 	my_capabilities[Capabilities::kRugby] = Capabilities::kRugbyVersion;
+	// Advertise that this build CAN speak the VR netcode extension. As a joiner this tells a VR
+	// gatherer we're compatible; as a gatherer NetGather() overrides it below with the actual
+	// host-preference choice (1 = host it, 0 = legacy). See docs/VR_NETCODE.md.
+	my_capabilities[Capabilities::kVR] = Capabilities::kVRVersion;
+	sGathererAdvertisedVR = false;
 
 	// net commands!
 	sIgnoredPlayers.clear();
@@ -1445,7 +1483,19 @@ bool NetGather(
 	bool attempt_upnp)
 {
         resuming_saved_game = resuming_game;
-        
+
+	// As the gatherer, advertise the VR netcode extension only if the host preference is on -- AND never
+	// for an internet game (advertised on the metaserver, or routed through a remote dedicated server),
+	// since that infrastructure doesn't understand the extended packet format yet: a remote hub can't
+	// relay the per-tick VR blocks, and advertising would just refuse the stock clients that try to
+	// join. So VR is direct/local-hub only. Joiners read this to decide legacy vs VR, and it drives our
+	// refusal of non-VR clients. Off = a legacy game any client can join. See docs/VR_NETCODE.md.
+	my_capabilities[Capabilities::kVR] =
+		(network_preferences->use_vr_netcode
+		 && !network_preferences->advertise_on_metaserver
+		 && !network_preferences->use_remote_hub)
+			? Capabilities::kVRVersion : 0;
+
 	NetInitializeTopology(game_data, game_data_size, player_data, player_data_size);
 	NetInitializeSessionIdentifier();
 

@@ -33,10 +33,15 @@
 #include "StarGameProtocol.h"
 
 #include "network_star.h"
+#include "vr_net.h" // vr_net_set_active
+#include "Logging.h" // logWarning (VRNET activation proof)
 #include "TickBasedCircularQueue.h"
 #include "player.h" // GetRealActionQueues
 #include "interface.h" // process_action_flags (despite paf() being defined in vbl.*)
 #include "InfoTree.h"
+#ifndef A1_NETWORK_STANDALONE_HUB
+#include "network.h" // NetVRNetcodeActive
+#endif
 
 // This is a bit hacky yeah, we really ought to check both RealActionQueues and the recording queues, etc.
 template <typename tValueType>
@@ -97,7 +102,21 @@ StarGameProtocol::Sync(NetTopology* inTopology, int32 inSmallestGameTick, int in
 #endif
 	
 	sTopology = inTopology;
-	
+
+	// Decide once, here, whether this game runs the VR netcode extension, so the hub, every spoke and
+	// the renderer agree for the whole game. A standalone/remote hub never originates VR (direct play
+	// only) so it stays legacy. See docs/VR_NETCODE.md.
+#ifdef A1_NETWORK_STANDALONE_HUB
+	vr_net_set_active(false);
+#else
+	vr_net_set_active(NetVRNetcodeActive(isServer));
+#endif
+	// One-shot proof the negotiation resolved correctly on THIS machine (grep the log for "VRNET"): a
+	// PC<->Quest test should show ACTIVE on both, with the host as server. If a machine shows inactive
+	// while the host shows active, the capability handshake didn't agree. See docs/VR_NETCODE.md.
+	logWarning("VRNET StarGameProtocol::Sync: VR netcode %s (isServer=%d, localPlayer=%d)",
+		vr_net_is_active() ? "ACTIVE" : "inactive", (int)isServer, (int)inLocalPlayerIndex);
+
         bool theConnectedPlayerStatus[MAXIMUM_NUMBER_OF_NETWORK_PLAYERS];
 
         for(int i = 0; i < sTopology->player_count; i++)

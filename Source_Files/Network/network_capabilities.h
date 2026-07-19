@@ -45,6 +45,7 @@ class Capabilities : public capabilities_t
   static const int kZippedDataVersion = 1; // map, lua, physics
   static const int kNetworkStatsVersion = 1; // latency, jitter, errors
   static const int kRugbyVersion = 1; // sane score limit
+  static const int kVRVersion = 1; // VR netcode extension (see docs/VR_NETCODE.md and vr_net.h)
 
   static const string kGameworld;    // the PRNG, physics, etc.
   static const string kGameworldM1;  // like gameworld, but for Marathon 1 compatibility
@@ -55,6 +56,8 @@ class Capabilities : public capabilities_t
   static const string kZippedData;   // can receive zipped data
   static const string kNetworkStats; // can receive network stats
   static const string kRugby;        // rugby version
+  static const string kVR;           // VR netcode extension: advertised value 1 = this game runs the
+                                     // extension (gatherer chose to host it), 0/absent = legacy game
   
   uint32& operator[](const string& k) { 
     assert(k.length() < kMaxKeySize);

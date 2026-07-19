@@ -79,6 +79,7 @@ Feb 20, 2002 (Woody Zenfell):
 #include "cseries.h"
 #include <string.h>
 #include <stdlib.h>
+#include <cmath>   // std::sqrt (VR net block aim quantization)
 
 #include <boost/algorithm/string/predicate.hpp>
 
@@ -92,6 +93,7 @@ Feb 20, 2002 (Woody Zenfell):
 #include "physics_models.h"   // physics_constants (VR netplay room-scale forward fold)
 #include "weapons.h"
 #include "vr_openxr.h"
+#include "vr_net.h"   // vr_capture_local_net_block / vr_block
 #include "key_definitions.h"
 #include "tags.h"
 #include "vbl.h"
@@ -340,7 +342,15 @@ bool input_controller(
 			else // then getting input from the keyboard/mouse
 			{
 				uint32 action_flags= parse_keymap();
-				
+
+				// VR netcode: capture this tick's VR block and latch it so it lands in the SAME
+				// RealActionQueues slot as the flag below -> the sim reads it in lockstep, the same
+				// unified path used in netgame (there the block instead arrives over the wire). See
+				// docs/VR_NETCODE.md.
+				vr_block localBlock;
+				vr_capture_local_net_block(localBlock);
+				vr_net_latch_enqueue_block(local_player_index, localBlock);
+
 				process_action_flags(local_player_index, &action_flags, 1);
 				heartbeat_count++; // ba-doom
 			}
@@ -1223,6 +1233,54 @@ void encode_hotkey_sequence(int hotkey)
 	hotkey_sequence[2] =
 		((hotkey % 4) << _cycle_weapons_forward_bit) |
 		hotkey_used;
+}
+
+// Fill the local player's VR input block (see vr_net.h / docs/VR_NETCODE.md). Neutral defaults aim
+// along the player's facing/elevation so a flat/non-VR client emits sensible data; a VR client fills
+// real controller/HMD state. Angle conversion from a controller aim vector mirrors weapons.cpp.
+void vr_capture_local_net_block(vr_block& out)
+{
+	vr_block_clear(out);
+
+	angle facing = 0, elevation = 0;
+	if (local_player_index != NONE)
+	{
+		player_data* lp = get_player_data(local_player_index);
+		facing = lp->facing;
+		elevation = lp->elevation;
+	}
+	out.head_yaw = out.dom_yaw = out.off_yaw = (uint16)NORMALIZE_ANGLE(facing);
+	out.head_pitch = out.dom_pitch = out.off_pitch = (int16)elevation;
+
+#if defined(__ANDROID__)
+	if (VR_IsActive())
+	{
+		const float S = 1024.0f;
+		float dir[3];
+		if (VR_GetWeaponAim(dir))
+		{
+			out.dom_yaw = (uint16)NORMALIZE_ANGLE(arctangent((int32)(dir[0]*S), (int32)(dir[1]*S)));
+			const float h = std::sqrt(dir[0]*dir[0] + dir[1]*dir[1]);
+			out.dom_pitch = (int16)arctangent((int32)(h*S), (int32)(dir[2]*S));
+		}
+		if (VR_GetSecondaryWeaponAim(dir))
+		{
+			out.off_yaw = (uint16)NORMALIZE_ANGLE(arctangent((int32)(dir[0]*S), (int32)(dir[1]*S)));
+			const float h = std::sqrt(dir[0]*dir[0] + dir[1]*dir[1]);
+			out.off_pitch = (int16)arctangent((int32)(h*S), (int32)(dir[2]*S));
+		}
+		float ox = 0, oy = 0;
+		VR_GetHeadOffset(&ox, &oy);
+		out.lean_x = (int16)ox;
+		out.lean_y = (int16)oy;
+		out.eye_z = (int16)VR_GetEyeZOffset();
+
+		float st = 0, fw = 0;
+		VR_GetAnalogMove(&st, &fw);
+		out.forward = (int16)(fw * (float)kVRNetAnalogScale);
+		out.strafe  = (int16)(st * (float)kVRNetAnalogScale);
+	}
+#endif
 }
 
 /*

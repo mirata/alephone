@@ -369,14 +369,20 @@ overlay_queue_with_queue_into_queue(ActionQueues* inBaseQueues, ActionQueues* in
         
         for(int p = 0; p < dynamic_world->player_count; p++)
         {
+                // VR netcode: carry the block paired with the flag we're about to move base->output so
+                // it stays in lockstep through this queue hop (peek before the dequeue advances the head).
+                vr_block vrblock = inBaseQueues->peekVRBlockAtHead(p);
+
                 // Trust me, this is right - we dequeue from the Base Queues whether or not they get overridden.
                 uint32 action_flags = inBaseQueues->dequeueActionFlags(p);
-                
+
                 if(inOverlayQueues != NULL && inOverlayQueues->countActionFlags(p) > 0)
                 {
+                        vrblock = inOverlayQueues->peekVRBlockAtHead(p);
                         action_flags = inOverlayQueues->dequeueActionFlags(p);
                 }
-                
+
+                inOutputQueues->setNextVRBlock(p, vrblock);
                 inOutputQueues->enqueueActionFlags(p, &action_flags, 1);
         }
         

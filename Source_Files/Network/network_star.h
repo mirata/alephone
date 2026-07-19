@@ -43,6 +43,9 @@ enum {
         kEndOfMessagesMessageType = 0x454d,	// 'EM'
         kTimingAdjustmentMessageType = 0x5441,	// 'TA'
         kPlayerNetDeadMessageType = 0x4e44,	// 'ND'
+        kVRPoseMessageType = 0x5652,	// 'VR' -- per-player VR input block (VR netcode extension, kVR>=1).
+                                        // Carried in the packet message section (not the tick-flag queue)
+                                        // for the Phase 1 debug-viz proof. See docs/VR_NETCODE.md.
 
 	kSpokeToHubIdentification = 0x4944,   // 'ID'
 	kSpokeToHubGameDataPacketV1Magic = 0x5331, // 'S1'

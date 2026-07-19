@@ -144,6 +144,8 @@ struct network_preferences_data
 	bool mute_metaserver_guests;
 	bool join_metaserver_by_default;
 	bool allow_stats;
+	bool use_vr_netcode; // gatherer: host the VR netcode extension (advertises kStar 7 -> full-fidelity
+	                     // VR strafe/aim/pose over the wire; refuses stock/legacy clients). Off = legacy.
 };
 
 enum SoloProfileType {

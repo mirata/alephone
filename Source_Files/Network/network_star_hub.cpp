@@ -45,6 +45,7 @@
 #if !defined(DISABLE_NETWORKING)
 
 #include "network_star.h"
+#include "vr_net.h"
 
 #include "TickBasedCircularQueue.h"
 #include "network_private.h"
@@ -275,6 +276,19 @@ static TickBasedActionQueueCollection sLateFlagsQueues;
 // holds the last real flags we received from this player
 static vector<action_flags_t> sLastFlagsReceived;
 
+// VR pose relay (Phase 1): latest block received from each spoke, re-sent to every spoke. Carried in
+// the packet message section, clear of the tick-flag queues (see docs/VR_NETCODE.md).
+static vr_block sHubVRBlocks[MAXIMUM_NUMBER_OF_NETWORK_PLAYERS];
+static bool     sHubHaveVRBlock[MAXIMUM_NUMBER_OF_NETWORK_PLAYERS];
+
+// Phase 2 tick-aligned VR blocks (see docs/VR_NETCODE.md): each spoke's per-tick block, read from the
+// flag record and re-sent to every spoke in the matching flag record, keyed by tick so it stays
+// aligned with getFlagsQueue(player). Ringed by tick.
+enum { kVRWireRing = 512 };
+static vr_block sHubTickVRBlocks[MAXIMUM_NUMBER_OF_NETWORK_PLAYERS][kVRWireRing];
+static inline vr_block& hubTickVRBlock(int player, int32 tick)
+{ return sHubTickVRBlocks[player][((tick % kVRWireRing) + kVRWireRing) % kVRWireRing]; }
+
 // sSmallestUnsentTick is used for reducing the number of packets sent: we won't send a packet unless
 // sSmallestIncompleteTick - sSmallestUnsentTick >= sHubPreferences.mSendPeriod
 static int32 sSmallestUnsentTick;
@@ -502,6 +516,7 @@ hub_initialize(int32 inStartingTick, int inNumPlayers, const IPaddress* const* i
         sPlayerDataDisposition.reset(theFirstTick);
 	sPlayerReflectedFlags.reset(theFirstTick);
 	sLastFlagsReceived.resize(inNumPlayers);
+	for (int i = 0; i < MAXIMUM_NUMBER_OF_NETWORK_PLAYERS; i++) sHubHaveVRBlock[i] = false;
 	sFlagSendTimeQueue.reset(theFirstTick);
         sSmallestIncompleteTick = theFirstTick;
 	sSmallestUnsentTick = theFirstTick;
@@ -792,12 +807,18 @@ hub_received_game_data_packet_v1(AIStream& ps, int inSenderIndex)
         int32	theStartTick;
         ps >> theStartTick;
 
+        // VR netcode: when the extension is active each per-tick record is flag + block, so the record
+        // size (used for the count + redundant-skip math below, and read of each flag) grows by the
+        // block size. Off = record is just the 4-byte flag, byte-identical to stock. See docs/VR_NETCODE.md.
+        const int theVRBlockBytes = vr_net_is_active() ? (int)kVRBlockSerializedLength : 0;
+        const int theRecordLength = kActionFlagsSerializedLength + theVRBlockBytes;
+
         // Make sure there's an integral number of action_flags
         int	theRemainingDataLength = ps.maxg() - ps.tellg();
-        if(theRemainingDataLength % kActionFlagsSerializedLength != 0)
+        if(theRemainingDataLength % theRecordLength != 0)
                 return;
 
-        int32	theActionFlagsCount = theRemainingDataLength / kActionFlagsSerializedLength;
+        int32	theActionFlagsCount = theRemainingDataLength / theRecordLength;
 
         TickBasedActionQueue& theQueue = getFlagsQueue(inSenderIndex);
 	TickBasedActionQueue& theLateQueue = getLateFlagsQueue(inSenderIndex);
@@ -820,7 +841,7 @@ hub_received_game_data_packet_v1(AIStream& ps, int inSenderIndex)
         // Skip redundant flags without processing/checking them
 //        int	theRedundantActionFlagsCount = std::min(theQueue.getWriteTick() - theStartTick, theActionFlagsCount);
 	int     theRedundantActionFlagsCount = std::min(theLateQueue.getWriteTick() - theStartTick, theActionFlagsCount);
-	int	theRedundantDataLength = theRedundantActionFlagsCount * kActionFlagsSerializedLength;
+	int	theRedundantDataLength = theRedundantActionFlagsCount * theRecordLength;
 	ps.ignore(theRedundantDataLength);
 
 	assert(theQueue.getWriteTick() >= theLateQueue.getWriteTick());
@@ -828,8 +849,12 @@ hub_received_game_data_packet_v1(AIStream& ps, int inSenderIndex)
 	int theLateActionFlagsCount = std::min(theQueue.getWriteTick() - theLateQueue.getWriteTick(), theActionFlagsCount - theRedundantActionFlagsCount);
 	for (int i = 0; i < theLateActionFlagsCount; i++)
 	{
+		int32 theTick = theLateQueue.getWriteTick();
 		action_flags_t theActionFlags;
 		ps >> theActionFlags;
+		// VR netcode: read the block that rides in this flag's record and ring it by tick so the send
+		// loop can re-emit it in the matching record. See docs/VR_NETCODE.md.
+		if (theVRBlockBytes) { vr_block b; ps >> b; hubTickVRBlock(inSenderIndex, theTick) = b; }
 		// we consume these faster than we enqueue them (hopefully)
 		// so, not checking for capacity though we probably should
 		theLateQueue.enqueue(theActionFlags);
@@ -845,8 +870,11 @@ hub_received_game_data_packet_v1(AIStream& ps, int inSenderIndex)
         
         for(int i = 0; i < theEnqueueableFlagsCount; i++)
         {
+                int32 theTick = theQueue.getWriteTick();
                 action_flags_t theActionFlags;
                 ps >> theActionFlags;
+                // VR netcode: read + ring the block riding in this flag's record (keyed by tick).
+                if (theVRBlockBytes) { vr_block b; ps >> b; hubTickVRBlock(inSenderIndex, theTick) = b; }
                 theQueue.enqueue(theActionFlags);
 		theLateQueue.enqueue(theActionFlags);
 		sLastFlagsReceived[inSenderIndex] = theActionFlags;
@@ -1139,6 +1167,19 @@ process_messages(AIStream& ps, int inSenderIndex)
                                 done = true;
                                 break;
 
+                        case kVRPoseMessageType:
+                        {
+                                uint16 idx;
+                                vr_block blk;
+                                ps >> idx >> blk;   // consume exactly what the spoke wrote (index + block)
+                                if (idx < MAXIMUM_NUMBER_OF_NETWORK_PLAYERS)
+                                {
+                                        sHubVRBlocks[idx] = blk;
+                                        sHubHaveVRBlock[idx] = true;
+                                }
+                                break;
+                        }
+
                         default:
                                 break;
                 }
@@ -1385,9 +1426,24 @@ send_packets()
                                         }
                                 }
         
+                                // VR pose relay (Phase 1): forward every player's latest block to this
+                                // spoke, but only when the VR netcode extension is active for this game
+                                // (else the wire stays byte-identical to stock). Space-guarded so a large
+                                // roster can't overflow the packet ahead of the flags below (which do
+                                // their own space budgeting). See docs/VR_NETCODE.md.
+                                if (vr_net_is_active())
+                                {
+                                        for(size_t j = 0; j < sNetworkPlayers.size(); j++)
+                                        {
+                                                if(!sHubHaveVRBlock[j]) continue;
+                                                if(ps.maxp() - ps.tellp() < (int)(kVRBlockSerializedLength + 8)) break;
+                                                ps << (uint16)kVRPoseMessageType << (uint16)j << sHubVRBlocks[j];
+                                        }
+                                }
+
                                 // End of messages
                                 ps << (uint16)kEndOfMessagesMessageType;
-        
+
                                 // We use this flag to make sure we encode the start tick at most once, and
                                 // only if we're actually sending action_flags.
                                 bool haveSentStartTick = false;
@@ -1420,9 +1476,11 @@ send_packets()
 
 						int bytesAvailableForFlags = ps.maxp() - ps.tellp() - 4; // have to encode the tick
 						// don't run out of room in the packet, though
-						if (maxTicks * sNetworkPlayers.size() * 4 > bytesAvailableForFlags) 
+						// VR netcode: each per-tick record is flag + (active ? block) per player.
+						int perPlayerRecord = kActionFlagsSerializedLength + (vr_net_is_active() ? (int)kVRBlockSerializedLength : 0);
+						if (maxTicks * (int)sNetworkPlayers.size() * perPlayerRecord > bytesAvailableForFlags)
 						{
-							int maximumBytesPerTick = sNetworkPlayers.size() * 4;
+							int maximumBytesPerTick = sNetworkPlayers.size() * perPlayerRecord;
 							maxTicks = bytesAvailableForFlags / maximumBytesPerTick;
 						}
 
@@ -1485,6 +1543,11 @@ send_packets()
                                                                 haveSentStartTick = true;
                                                         }
                                                         ps << getFlagsQueue(j).peek(tick);
+                                                        // VR netcode: attach player j's block for this
+                                                        // tick right after its flag (same record the
+                                                        // spoke decodes). See docs/VR_NETCODE.md.
+                                                        if (vr_net_is_active())
+                                                                ps << hubTickVRBlock(j, tick);
                                                 }
                                         }
                                 }

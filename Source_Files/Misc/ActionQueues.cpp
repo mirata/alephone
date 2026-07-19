@@ -53,14 +53,19 @@ ActionQueues::ActionQueues(unsigned int inNumPlayers, unsigned int inQueueSize, 
     /* allocate space for our action queue headers and the queues themselves */
     mQueueHeaders	= new action_queue[mNumPlayers];
     mFlagsBuffer	= new uint32[mNumPlayers * mQueueSize];
-        
+    mVRBuffer		= new vr_block[mNumPlayers * mQueueSize];
+    mPendingVRBlock	= new vr_block[mNumPlayers];
+
     /* tell the queues where their buffers are */
     for (unsigned i = 0; i < mNumPlayers; ++i)
     {
             mQueueHeaders[i].buffer= mFlagsBuffer + i*mQueueSize;
             // From reset()
             mQueueHeaders[i].read_index = mQueueHeaders[i].write_index = 0;
+            vr_block_clear(mPendingVRBlock[i]);
     }
+    for (unsigned i = 0; i < mNumPlayers * mQueueSize; ++i)
+            vr_block_clear(mVRBuffer[i]);
 }
 
 
@@ -68,6 +73,12 @@ ActionQueues::ActionQueues(unsigned int inNumPlayers, unsigned int inQueueSize, 
 ActionQueues::~ActionQueues() {
     if(mFlagsBuffer)
         delete [] mFlagsBuffer;
+
+    if(mVRBuffer)
+        delete [] mVRBuffer;
+
+    if(mPendingVRBlock)
+        delete [] mPendingVRBlock;
 
     if(mQueueHeaders)
         delete [] mQueueHeaders;
@@ -113,12 +124,31 @@ ActionQueues::enqueueActionFlags(
 	while ((count-= 1)>=0)
 	{
 		queue->buffer[queue->write_index]= *action_flags++;
+		// VR netcode: store the latched block into the SAME slot as this flag (lockstep). The latch is
+		// consumed (reset to neutral) so a subsequent enqueue without a fresh block stores a zero block.
+		mVRBuffer[player_index*mQueueSize + queue->write_index]= mPendingVRBlock[player_index];
+		vr_block_clear(mPendingVRBlock[player_index]);
 		queue->write_index= (queue->write_index+1) % mQueueSize;
 		if (queue->write_index==queue->read_index)
 			logError("blew player %d's queue", player_index);
 	}
-	
+
 	return;
+}
+
+void
+ActionQueues::setNextVRBlock(int inPlayerIndex, const vr_block& inBlock)
+{
+	assert(inPlayerIndex >= 0 && inPlayerIndex < static_cast<int>(mNumPlayers));
+	mPendingVRBlock[inPlayerIndex]= inBlock;
+}
+
+vr_block
+ActionQueues::peekVRBlockAtHead(int inPlayerIndex)
+{
+	assert(inPlayerIndex >= 0 && inPlayerIndex < static_cast<int>(mNumPlayers));
+	struct action_queue *queue= mQueueHeaders+inPlayerIndex;
+	return mVRBuffer[inPlayerIndex*mQueueSize + queue->read_index];
 }
 
 

@@ -1143,6 +1143,7 @@ SetupNetgameDialog::~SetupNetgameDialog ()
 	
 	delete m_useUpnpWidget;
 	delete m_useRemoteHub;
+	delete m_useVRNetcodeWidget;
 }
 
 bool SetupNetgameDialog::SetupNetworkGameByRunning (
@@ -1287,6 +1288,9 @@ bool SetupNetgameDialog::SetupNetworkGameByRunning (
 
 	BoolPref useRemoteHubPref(active_network_preferences->use_remote_hub);
 	binders.insert<bool>(m_useRemoteHub, &useRemoteHubPref);
+
+	BoolPref useVRNetcodePref(active_network_preferences->use_vr_netcode);
+	binders.insert<bool>(m_useVRNetcodeWidget, &useVRNetcodePref);
 
 #ifdef HAVE_MINIUPNPC
 	active_network_preferences->attempt_upnp &= !active_network_preferences->use_remote_hub;
@@ -2728,9 +2732,25 @@ public:
 		horizontal_placer *latency_placer = new horizontal_placer(get_theme_space(ITEM_WIDGET));
 		latency_placer->dual_add(latency_tolerance_w->label("Latency Tolerance"), m_dialog);
 		latency_placer->dual_add(latency_tolerance_w, m_dialog);
-		
+
 		network_table->add(new w_spacer(), true);
 		network_table->add(latency_placer, true);
+
+		// Host this game with the VR netcode extension (full-fidelity VR strafe/aim/pose over the wire;
+		// refuses stock/legacy clients). A flat PC can host it for VR players. In the same section as
+		// "Advertise Game on Internet" and DISABLED while that is on -- the internet metaserver/dedicated
+		// servers don't understand the extended format yet, so VR is direct/local-hub only (NetGather
+		// also force-disables it then). See docs/VR_NETCODE.md.
+		w_toggle *vr_netcode_w = new w_toggle(network_preferences->use_vr_netcode);
+		vr_netcode_w->set_enabled(advertise_on_metaserver_w->get_selection() == 0);
+		advertise_on_metaserver_w->set_selection_changed_callback([vr_netcode_w](w_select* w) {
+			vr_netcode_w->set_enabled(w->get_selection() == 0);
+		});
+		// add_row (not add) for the spacer: add() fills a single cell and would leave the following
+		// dual_add pair straddling two rows with a null cell -> crash in table_placer::place().
+		network_table->add_row(new w_spacer(), true);
+		network_table->dual_add(vr_netcode_w, m_dialog);
+		network_table->dual_add(vr_netcode_w->label("VR Netcode Extension"), m_dialog);
 
 		right_placer->add(network_table, true);
 
@@ -2894,6 +2914,7 @@ public:
 		m_scoreLimitWidget = new EditNumberWidget (scorelimit_w);
 	
 		m_aliensWidget = new ToggleWidget (aliens_w);
+		m_useVRNetcodeWidget = new ToggleWidget (vr_netcode_w);
 		m_allowTeamsWidget = new ToggleWidget (teams_w);
 		m_deadPlayersDropItemsWidget = new ToggleWidget (drop_w);
 		m_penalizeDeathWidget = new ToggleWidget (pen_die_w);

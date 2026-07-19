@@ -870,9 +870,9 @@ static void online_dialog(void *arg)
 	w_toggle *join_meta_w = new w_toggle(network_preferences->join_metaserver_by_default);
 	lobby_table->dual_add(join_meta_w->label("Join Pregame Lobby by Default"), d);
 	lobby_table->dual_add(join_meta_w, d);
-	
+
 	lobby_table->add_row(new w_spacer(), true);
-	
+
 	lobby->add(lobby_table, true);
 	
 	vertical_placer *stats = new vertical_placer();
@@ -996,8 +996,8 @@ static void online_dialog(void *arg)
 			Plugins::instance()->invalidate();
 			changed = true;
 		}
-		
-		
+
+
 		if (changed)
 			write_preferences();
 	}
@@ -4528,6 +4528,7 @@ InfoTree network_preferences_tree()
 	root.put_attr("mute_metaserver_guests", network_preferences->mute_metaserver_guests);
 	root.put_attr("join_metaserver_by_default", network_preferences->join_metaserver_by_default);
 	root.put_attr("allow_stats", network_preferences->allow_stats);
+	root.put_attr("use_vr_netcode", network_preferences->use_vr_netcode);
 
 	for (int i = 0; i < 2; i++)
 		root.add_color("color", network_preferences->metaserver_colors[i], i);
@@ -4755,6 +4756,13 @@ static void default_network_preferences(network_preferences_data *preferences)
 	preferences->metaserver_colors[1] = get_interface_color(PLAYER_COLOR_BASE_INDEX);
 	preferences->join_metaserver_by_default = false;
 	preferences->allow_stats = false;
+#if defined(__ANDROID__)
+	// Quest builds default the VR netcode extension ON so a hosted game gets full-fidelity VR out of
+	// the box (see docs/VR_NETCODE.md). Desktop defaults off (legacy-compatible) unless turned on.
+	preferences->use_vr_netcode = true;
+#else
+	preferences->use_vr_netcode = false;
+#endif
 }
 
 static void default_player_preferences(player_preferences_data *preferences)
@@ -5618,6 +5626,7 @@ void parse_network_preferences(InfoTree root, std::string version)
 	
 	root.read_attr("join_metaserver_by_default", network_preferences->join_metaserver_by_default);
 	root.read_attr("allow_stats", network_preferences->allow_stats);
+	root.read_attr("use_vr_netcode", network_preferences->use_vr_netcode);
 
 	for (const InfoTree &color : root.children_named("color"))
 	{

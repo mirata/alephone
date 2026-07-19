@@ -218,6 +218,7 @@ Jan 17, 2001 (Loren Petrich):
 #ifdef HAVE_OPENGL
 #include "OGL_Render.h"
 #include "OGL_Model_Def.h"
+#include "OGL_Headers.h"   // gl* symbols for the cross-platform network VR pose debug lines
 #endif
 
 #ifdef QUICKDRAW_DEBUG
@@ -242,6 +243,7 @@ extern WindowPtr screen_window;
 #include "Rasterizer_Shader.h"
 #include "vr_openxr.h"
 #include "vr_weapons.h"
+#include "vr_net.h"
 #endif
 #include "preferences.h"
 #include "screen.h"
@@ -1238,6 +1240,99 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 }
 #endif // __ANDROID__
 
+#ifdef HAVE_OPENGL
+// Toggle for the network VR pose debug lines below. Default on -- the whole point right now is to
+// watch remote players' head/gun aim while debugging the VR netcode. Cross-platform (also drawn on the
+// flat PC build, which is the primary validation: watch the PC screen while moving on the Quest).
+bool debug_show_net_vr_pose = true;
+
+// ---- Network players' VR pose debug lines ---------------------------------------------------
+// Phase-1 correctness proof for the VR netcode extension (docs/VR_NETCODE.md). For every OTHER network
+// player, draw world-space lines from their eye along their HEAD view direction and each GUN aim, taken
+// straight from the VR block they sent over the wire (vr_net_get_player_block). If these track a remote
+// VR player's real head/guns -- and a flat PC player's rays point along that player's facing (graceful
+// fallback) -- the wire is delivering correct pose data. Depth test off so lines are always visible.
+// Runs on BOTH the Quest (VR eye loop) and the flat PC (main view) whenever OpenGL is the renderer and
+// the game is a VR-netcode netgame. Absolute world coords are correct because SetView() puts the camera
+// translation into the GL_MODELVIEW stack (Rasterizer_Shader.cpp), so glUseProgram(0) fixed-function
+// lines land in world space; on the Quest VR_BeginEye sets the per-eye matrices the same way.
+static void render_net_vr_pose(view_data* /*view*/)
+{
+	if (!OGL_IsActive()) return;
+	if (!debug_show_net_vr_pose) return;
+	if (!game_is_networked || !vr_net_is_active()) return;
+
+#if defined(__ANDROID__)
+	const double W = VR_IsActive() ? VR_Settings()->worldScaleWUM : 1.0;
+#else
+	const double W = 1.0;   // flat PC: world units == render units
+#endif
+	const double TWO_PI = 8.0 * atan(1.0);
+
+	glUseProgram(0);
+	glDisable(GL_TEXTURE_2D);
+	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	glDisableClientState(GL_COLOR_ARRAY);
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glDisable(GL_DEPTH_TEST);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glLineWidth(2.0f);
+
+	// Marathon angle (512-unit circle) -> unit world direction.
+	auto angleToDir = [&](uint16 yaw, int16 pitch, double d[3]) {
+		const double ya = (double)(yaw & (NUMBER_OF_ANGLES - 1)) * (TWO_PI / NUMBER_OF_ANGLES);
+		const double pa = (double)pitch * (TWO_PI / NUMBER_OF_ANGLES);
+		const double cp = cos(pa);
+		d[0] = cos(ya) * cp; d[1] = sin(ya) * cp; d[2] = sin(pa);
+	};
+	auto drawRay = [&](const world_point3d& o, uint16 yaw, int16 pitch, float r, float g, float b) {
+		double dir[3]; angleToDir(yaw, pitch, dir);
+		const double L = 3.0 * WORLD_ONE * W;
+		GLfloat v[6] = { (float)o.x, (float)o.y, (float)o.z,
+		                 (float)(o.x + dir[0]*L), (float)(o.y + dir[1]*L), (float)(o.z + dir[2]*L) };
+		glColor4f(r, g, b, 0.9f);
+		glVertexPointer(3, GL_FLOAT, 0, v);
+		glDrawArrays(GL_LINES, 0, 2);
+	};
+
+	for (short i = 0; i < dynamic_world->player_count; i++)
+	{
+		if (i == local_player_index) continue;
+		vr_block blk;
+		if (!vr_net_get_player_block(i, blk)) continue;
+
+		// camera_location is the simulated eye position. Physical lean + crouch are render-only (not in
+		// the sim), so they ride the wire block; add them here (they are already Marathon world units --
+		// the getters bake in the sender's worldScale -- so no receiver-side scaling) to show the remote
+		// player's TRUE physical head placement, incl. ducking. Folding these into the actual shot origin
+		// is Phase 2; here it just makes the pose viz faithful.
+		world_point3d head = get_player_data(i)->camera_location;
+		head.x += blk.lean_x;
+		head.y += blk.lean_y;
+		head.z += blk.eye_z;
+
+		drawRay(head, blk.head_yaw, blk.head_pitch, 0.1f, 1.0f, 0.2f); // head view = green
+		drawRay(head, blk.dom_yaw,  blk.dom_pitch,  1.0f, 0.2f, 0.2f); // dominant gun = red
+		drawRay(head, blk.off_yaw,  blk.off_pitch,  0.2f, 0.5f, 1.0f); // off-hand gun = blue
+
+		// short vertical tick at the eye so a stationary player is still visible
+		GLfloat vt[6] = { (float)head.x, (float)head.y, (float)(head.z - 0.15*WORLD_ONE*W),
+		                  (float)head.x, (float)head.y, (float)(head.z + 0.15*WORLD_ONE*W) };
+		glColor4f(1.0f, 1.0f, 0.1f, 0.9f);
+		glVertexPointer(3, GL_FLOAT, 0, vt);
+		glDrawArrays(GL_LINES, 0, 2);
+	}
+
+	glLineWidth(1.0f);
+	glDisable(GL_BLEND);
+	glEnable(GL_DEPTH_TEST);
+	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	glEnable(GL_TEXTURE_2D);
+	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+}
+#endif // HAVE_OPENGL
+
 /* origin,origin_polygon_index,yaw,pitch,roll,etc. have probably changed since last call */
 void render_view(
 	struct view_data *view,
@@ -1416,6 +1511,7 @@ void render_view(
 						view->origin = base_origin;
 						render_vr_aim_reticle(view);
 						render_vr_aim_gizmos(view);
+						render_net_vr_pose(view);
 						render_vr_weapon_sprites_3d(view);
 
 						RasPtr->End();
@@ -1443,6 +1539,11 @@ void render_view(
 				if (!RenPtr->renders_viewer_sprites_in_tree()) {
 					render_viewer_sprite_layer(view, RasPtr);
 				}
+#ifdef HAVE_OPENGL
+				// Flat PC build: draw remote players' VR head/gun debug lines. This is the primary
+				// validation for the VR netcode -- watch the PC screen while moving on the Quest.
+				render_net_vr_pose(view);
+#endif
 				// Finish rendering main view
 				RasPtr->End();
 			}

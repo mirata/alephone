@@ -29,5 +29,6 @@ const string Capabilities::kGatherable = "Gatherable";
 const string Capabilities::kZippedData = "ZippedData";
 const string Capabilities::kNetworkStats = "NetworkStats";
 const string Capabilities::kRugby = "Rugby";
+const string Capabilities::kVR = "VR";
 
 

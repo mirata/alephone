@@ -44,11 +44,12 @@ May 14, 2003 (Woody Zenfell):
 #define	ACTIONQUEUES_H
 
 #include "cseries.h"
+#include "vr_net.h" // vr_block (VR netcode extension: per-tick VR input rides in lockstep with flags)
 
 class ActionQueues {
 public:
     ActionQueues(unsigned int inNumPlayers, unsigned int inQueueSize, bool inZombiesControllable);
-    
+
     void		reset();
     void		resetQueue(int inPlayerIndex);
 
@@ -60,9 +61,17 @@ public:
     unsigned int	availableCapacity(int inPlayerIndex) { return totalCapacity(inPlayerIndex) - countActionFlags(inPlayerIndex); }
     bool		zombiesControllable();
     void		setZombiesControllable(bool inZombiesControllable);
-    
+
+    // VR netcode extension (see docs/VR_NETCODE.md): a vr_block rides in lockstep with each tick's
+    // action_flags, sharing the queue slot (read/write index). setNextVRBlock() latches the block that
+    // the NEXT enqueueActionFlags() will store into the same slot as its flag (default: neutral, so
+    // non-VR/SP ticks store a harmless zero block). peekVRBlockAtHead() returns the block paired with
+    // the flag currently at the read head (call before dequeueActionFlags, which advances the index).
+    void		setNextVRBlock(int inPlayerIndex, const vr_block& inBlock);
+    vr_block		peekVRBlockAtHead(int inPlayerIndex);
+
     ~ActionQueues();
-    
+
 protected:
     struct action_queue {
 	    unsigned int read_index, write_index;
@@ -74,6 +83,8 @@ protected:
     unsigned int	mQueueSize;
     action_queue*	mQueueHeaders;
     uint32*		mFlagsBuffer;
+    vr_block*		mVRBuffer;         // parallel to mFlagsBuffer, same indices
+    vr_block*		mPendingVRBlock;   // per-player latch for the next enqueue (see setNextVRBlock)
     bool		mZombiesControllable;
 
 // Hide these until they have valid implementation

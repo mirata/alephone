@@ -259,6 +259,14 @@ short current_player_index = NONE;
 static ActionQueues*   sRealActionQueues = NULL;
 ActionQueues* GetRealActionQueues() { return sRealActionQueues; }
 
+// VR netcode (see vr_net.h): latch the block that the next enqueue into RealActionQueues will pair
+// with its flag. Called by SP local input (vbl.cpp) and by the star spoke as it enqueues each
+// player's tick flag, so the block reaches the sim in lockstep with the flag.
+void vr_net_latch_enqueue_block(int player_index, const vr_block& b)
+{
+	if (sRealActionQueues) sRealActionQueues->setNextVRBlock(player_index, b);
+}
+
 static struct player_shape_definitions player_shapes=
 {
 	6, /* collection */
@@ -655,6 +663,10 @@ void update_players(ActionQueues* inActionQueuesToUse, bool inPredictive)
 	
 	for (player_index= 0, player= players; player_index<dynamic_world->player_count; ++player_index, ++player)
 	{
+		// VR netcode (see docs/VR_NETCODE.md): publish this player's tick-aligned VR block to the sim
+		// BEFORE dequeuing the flag it shares a slot with (peek reads the read head; the dequeue below
+		// advances it). Every VR-affected sim computation this tick reads it via vr_net_get_sim_block().
+		vr_net_set_sim_block(player_index, inActionQueuesToUse->peekVRBlockAtHead(player_index));
 		uint32 action_flags = inActionQueuesToUse->dequeueActionFlags(player_index);
 
 		if (action_flags == 0xffffffff)
@@ -743,7 +755,34 @@ void update_players(ActionQueues* inActionQueuesToUse, bool inPredictive)
 			// LP change: made this code more general;
 			// find the oxygen-change rate appropriate to each environment,
 			// then handle the rate appropriately.
-			if ((static_world->environment_flags&_environment_vacuum) || (player->variables.flags&_HEAD_BELOW_MEDIA_BIT))
+			bool head_below_media = (player->variables.flags&_HEAD_BELOW_MEDIA_BIT) != 0;
+
+			// VR netcode (see docs/VR_NETCODE.md): a VR player can PHYSICALLY duck their head below a
+			// liquid surface without the sim's body moving. The physical crouch (block eye_z, synced +
+			// tick-aligned) lowers the real eye, so re-check head-below-media for EVERY player from the
+			// block -> ducking underwater drains oxygen identically on all participants. Only ever ADDS
+			// head-below (a crouch can dip under; standing is already handled by the physics bit).
+			if (vr_net_is_active() && !head_below_media)
+			{
+				const vr_block& b = vr_net_get_sim_block(player_index);
+				if (b.eye_z < 0)   // crouched below standing eye height
+				{
+					struct monster_data *o2media_monster = get_monster_data(player->monster_index);
+					struct object_data   *o2media_object  = get_object_data(o2media_monster->object_index);
+					struct polygon_data  *o2media_polygon = get_polygon_data(o2media_object->polygon);
+					if (o2media_polygon->media_index != NONE)
+					{
+						media_data *med = get_media_data(o2media_polygon->media_index);
+						if (med)
+						{
+							world_distance eye_z = player->camera_location.z + (world_distance)b.eye_z;
+							if (eye_z < med->height) head_below_media = true;
+						}
+					}
+				}
+			}
+
+			if ((static_world->environment_flags&_environment_vacuum) || head_below_media)
 				player_settings.OxygenChange = - player_settings.OxygenDepletion;
 			else
 				player_settings.OxygenChange = player_settings.OxygenReplenishment;

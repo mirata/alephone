@@ -36,6 +36,7 @@
 #if !defined(DISABLE_NETWORKING)
 
 #include "network_star.h"
+#include "vr_net.h"
 #include "AStream.h"
 #include "mytm.h"
 #include "network_private.h" // kPROTOCOL_TYPE
@@ -125,6 +126,19 @@ static int32 sDisplayLatencyTicks = 0; // sum of the latency ticks from the last
 
 static int32 sSmallestUnconfirmedTick;
 
+// VR pose (Phase 1: latest-per-player, carried in the packet message section -- see docs/VR_NETCODE.md
+// and vr_net.h). Received from the hub for every player; read by the debug pose viz.
+static vr_block sReceivedVRBlocks[MAXIMUM_NUMBER_OF_NETWORK_PLAYERS];
+static bool     sHaveVRBlock[MAXIMUM_NUMBER_OF_NETWORK_PLAYERS];
+
+// Phase 2 tick-aligned VR blocks. Each per-tick flag record optionally carries the sending player's
+// vr_block right after the flag (when the VR netcode extension is active), so it inherits the flags'
+// exact reliability/recovery and reaches every client's sim in lockstep with the flag. sLocalVRBlocks
+// rings the LOCAL player's captured blocks by tick (for send + our own confirmed-flag delivery). See
+// docs/VR_NETCODE.md.
+enum { kVRWireRing = 512 };
+static vr_block sLocalVRBlocks[kVRWireRing];
+
 static void spoke_became_disconnected();
 static void spoke_received_game_data_packet_v1(AIStream& ps, bool reflected_flags);
 static void spoke_received_ping_request(AIStream& ps, const IPaddress& address);
@@ -133,6 +147,7 @@ static void process_messages(AIStream& ps, IncomingGameDataPacketProcessingConte
 static void handle_end_of_messages_message(AIStream& ps, IncomingGameDataPacketProcessingContext& context);
 static void handle_player_net_dead_message(AIStream& ps, IncomingGameDataPacketProcessingContext& context);
 static void handle_timing_adjustment_message(AIStream& ps, IncomingGameDataPacketProcessingContext& context);
+static void handle_vr_pose_message(AIStream& ps, IncomingGameDataPacketProcessingContext& context);
 static bool spoke_tick();
 static void send_packet();
 static void send_identification_packet();
@@ -223,6 +238,8 @@ spoke_initialize(const IPaddress& inHubAddress, int32 inFirstTick, size_t inNumb
         sMessageTypeToMessageHandler[kEndOfMessagesMessageType] = handle_end_of_messages_message;
         sMessageTypeToMessageHandler[kTimingAdjustmentMessageType] = handle_timing_adjustment_message;
         sMessageTypeToMessageHandler[kPlayerNetDeadMessageType] = handle_player_net_dead_message;
+        sMessageTypeToMessageHandler[kVRPoseMessageType] = handle_vr_pose_message;
+        for (int i = 0; i < MAXIMUM_NUMBER_OF_NETWORK_PLAYERS; i++) sHaveVRBlock[i] = false;
         sNeedToSendLocalOutgoingBuffer = false;
 
         sSpokeActive = true;
@@ -447,9 +464,13 @@ spoke_received_game_data_packet_v1(AIStream& ps, bool reflected_flags)
 				{
 					while (sSmallestUnconfirmedTick < sUnconfirmedFlags.getWriteTick())
 					{
+						// VR netcode: deliver our own captured block in lockstep even when alone, so a
+						// solo netgame host still gets hand aim etc. See docs/VR_NETCODE.md.
+						if (vr_net_is_active())
+							vr_net_latch_enqueue_block(i, sLocalVRBlocks[((sSmallestUnconfirmedTick % kVRWireRing) + kVRWireRing) % kVRWireRing]);
 						sNetworkPlayers[i].mQueue->enqueue(sUnconfirmedFlags.peek(sSmallestUnconfirmedTick++));
 					}
-				} 
+				}
 				else if (!thePlayer.mZombie)
 				{
 					while(thePlayer.mQueue->getWriteTick() < theSmallestUnacknowledgedTick)
@@ -535,14 +556,21 @@ spoke_received_game_data_packet_v1(AIStream& ps, bool reflected_flags)
 					assert(sSmallestUnconfirmedTick >= sUnconfirmedFlags.getReadTick());
 					assert(sSmallestUnconfirmedTick < sUnconfirmedFlags.getWriteTick());
 					// confirm this flag
+					// VR netcode: our own block for this tick is local (never came over the wire);
+					// deliver it in lockstep with the confirmed flag. Same bytes we sent, so every
+					// client's sim agrees. See docs/VR_NETCODE.md.
+					if (vr_net_is_active())
+						vr_net_latch_enqueue_block(i, sLocalVRBlocks[((sSmallestUnconfirmedTick % kVRWireRing) + kVRWireRing) % kVRWireRing]);
 					sNetworkPlayers[i].mQueue->enqueue(sUnconfirmedFlags.peek(sSmallestUnconfirmedTick));
 					sSmallestUnconfirmedTick++;
 				}
-				
+
 				continue;
 			}
 
                         bool shouldEnqueueNetDeadFlags = false;
+                        vr_block theBlock;
+                        vr_block_clear(theBlock);   // net-dead / absent -> neutral block
 
                         // We won't get flags for netdead players
                         NetworkPlayer_spoke& thePlayer = sNetworkPlayers[i];
@@ -568,9 +596,15 @@ spoke_received_game_data_packet_v1(AIStream& ps, bool reflected_flags)
                         else
 			{
                                 // We should have a flag for this player for this tick!
-				try 
+				try
 				{
 					ps >> theFlags;
+					// VR netcode: the block rides right after the flag in the same per-tick record
+					// (present whenever the extension is active), so it inherits the flag's exact
+					// reliability. Read it for EVERY flag read (even redundant ones) to keep the
+					// stream aligned; it's used only when we enqueue below. See docs/VR_NETCODE.md.
+					if (vr_net_is_active())
+						ps >> theBlock;
 				}
 				catch (const AStream::failure& f)
 				{
@@ -589,6 +623,10 @@ spoke_received_game_data_packet_v1(AIStream& ps, bool reflected_flags)
 					assert(!sNetworkPlayers[i].mConnected || theQueue.getWriteTick() == sSmallestUnreceivedTick);
 					assert(theQueue.availableCapacity() > 0);
 					logTraceNMT("enqueueing flags %x for player %d tick %d", theFlags, i, theQueue.getWriteTick());
+					// VR netcode: deliver this player's block in lockstep with the flag it shares a
+					// record with (net-dead/absent -> the neutral block set above).
+					if (vr_net_is_active())
+						vr_net_latch_enqueue_block(i, theBlock);
 					theQueue.enqueue(theFlags);
 					if (i == sLocalPlayerIndex) sSmallestUnconfirmedTick++;
 				}
@@ -727,6 +765,39 @@ handle_timing_adjustment_message(AIStream& ps, IncomingGameDataPacketProcessingC
         context.mGotTimingAdjustmentMessage = true;
 }
 
+static void
+handle_vr_pose_message(AIStream& ps, IncomingGameDataPacketProcessingContext& context)
+{
+	uint16 playerIndex;
+	vr_block block;
+	ps >> playerIndex >> block;   // must consume exactly what the hub wrote (index + block)
+
+	if (playerIndex < MAXIMUM_NUMBER_OF_NETWORK_PLAYERS)
+	{
+		sReceivedVRBlocks[playerIndex] = block;
+		sHaveVRBlock[playerIndex] = true;
+		// Phase 1 pipe proof: throttled log of a remote player's aim so a PC<->VR test can confirm
+		// the block is crossing correctly (remove once the debug lines are trusted). ~once/sec at 30tps.
+		if (playerIndex != sLocalPlayerIndex)
+		{
+			static int s_c = 0;
+			if ((s_c++ % 30) == 0)
+				logWarning("VRNET rx player %d: dom_yaw=%d dom_pitch=%d off_yaw=%d lean=(%d,%d) eyeZ=%d fwd=%d str=%d",
+					(int)playerIndex, (int)block.dom_yaw, (int)block.dom_pitch, (int)block.off_yaw,
+					(int)block.lean_x, (int)block.lean_y, (int)block.eye_z, (int)block.forward, (int)block.strafe);
+		}
+	}
+}
+
+// Latest VR block received for a player (see vr_net.h).
+bool vr_net_get_player_block(int player_index, vr_block& out)
+{
+	if (player_index < 0 || player_index >= MAXIMUM_NUMBER_OF_NETWORK_PLAYERS || !sHaveVRBlock[player_index])
+		return false;
+	out = sReceivedVRBlocks[player_index];
+	return true;
+}
+
 static bool
 spoke_tick()
 {
@@ -776,7 +847,18 @@ spoke_tick()
 
 			logDumpNMT("enqueueing flags for tick %d", theTargetQueue.getWriteTick());
 
-			theTargetQueue.enqueue(parse_keymap());
+			// VR netcode: capture this tick's VR block adjacent to parse_keymap (same frame's live VR
+			// state) and ring it by the tick this flag occupies, so send_packet can attach it and our
+			// own confirmed-flag path can deliver it to the sim. See docs/VR_NETCODE.md.
+			int32 theLocalVRTick = theTargetQueue.getWriteTick();
+			uint32 theLocalFlags = parse_keymap();
+			if (vr_net_is_active())
+			{
+				vr_block b;
+				vr_capture_local_net_block(b);
+				sLocalVRBlocks[((theLocalVRTick % kVRWireRing) + kVRWireRing) % kVRWireRing] = b;
+			}
+			theTargetQueue.enqueue(theLocalFlags);
 			shouldSend = true;
 			theNumberOfFlagsToProvide--;
 		}
@@ -870,6 +952,16 @@ send_packet()
                 // Acknowledgement
                 ps << sSmallestUnreceivedTick;
 
+                // VR pose (Phase 1): our latest local input block, for the hub to relay to everyone.
+                // Only when the VR netcode extension is active for this game -- otherwise the wire stays
+                // byte-identical to stock so a legacy game remains compatible (see docs/VR_NETCODE.md).
+                if (vr_net_is_active())
+                {
+                        vr_block localBlock;
+                        vr_capture_local_net_block(localBlock);
+                        ps << (uint16)kVRPoseMessageType << (uint16)sLocalPlayerIndex << localBlock;
+                }
+
                 // No more messages
                 ps << (uint16)kEndOfMessagesMessageType;
         
@@ -878,7 +970,14 @@ send_packet()
                 {
                         ps << sOutgoingFlags.getReadTick();
                         for(int32 tick = sOutgoingFlags.getReadTick(); tick < sOutgoingFlags.getWriteTick(); tick++)
+                        {
                                 ps << sOutgoingFlags.peek(tick);
+                                // VR netcode: attach this tick's block right after its flag (see the recv
+                                // side + docs/VR_NETCODE.md). Same record for every flag, so the hub's
+                                // length math stays uniform.
+                                if (vr_net_is_active())
+                                        ps << sLocalVRBlocks[((tick % kVRWireRing) + kVRWireRing) % kVRWireRing];
+                        }
                 }
 
 		logDumpNMT("preparing to send packet: ACK %d, flags [%d,%d)", sSmallestUnreceivedTick, sOutgoingFlags.getReadTick(), sOutgoingFlags.getWriteTick());

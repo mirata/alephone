@@ -194,6 +194,7 @@ void NetDoneGathering (void);
 void NetExit(void);
 void NetRemoteHubSendCommand(RemoteHubCommand command, int data = NONE);
 void NetSetCapabilities(const Capabilities* capabilities);
+bool NetVRNetcodeActive(bool isServer); // VR netcode extension active for this game? (see vr_net.h)
 bool NetGather(void *game_data, short game_data_size, void *player_data, 
 	short player_data_size, bool resuming_game, bool attempt_upnp);
 short NetState(void);

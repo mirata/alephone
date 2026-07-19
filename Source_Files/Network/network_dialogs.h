@@ -437,6 +437,7 @@ protected:
 	
 	ToggleWidget*       m_useUpnpWidget;
 	ToggleWidget*       m_useRemoteHub;
+	ToggleWidget*       m_useVRNetcodeWidget; // host the VR netcode extension (see docs/VR_NETCODE.md)
 	SelectorWidget*         m_latencyToleranceWidget;
 };
 
