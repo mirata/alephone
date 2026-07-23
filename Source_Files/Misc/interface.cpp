@@ -3330,8 +3330,35 @@ static void try_and_display_chapter_screen(
 			
 			scroll_full_screen_pict_resource_from_scenario(pict_resource_number, text_block);
 
+#if defined(__ANDROID__)
+			// VR: a plain blocking wait_for_click_or_keypress submits NO OpenXR frames for the whole
+			// timeout, so the compositor freezes and a late button press isn't serviced promptly (on
+			// PC a blocking wait just holds the last frame, so it's fine there -- hence VR-only). Mirror
+			// the scroll loop above instead: re-present the picture each iteration (draw_intro_screen
+			// submits a VR frame) while polling for the same click/keypress and honoring the SAME
+			// timeout, so timing/behavior matches the desktop path -- it just doesn't freeze.
+			{
+				const uint32 wait_ticks = text_block ? UINT32_MAX : 10 * MACHINE_TICKS_PER_SECOND;
+				const uint64_t start_tick = machine_tick_count();
+				bool aborted = false;
+				while (!aborted && (uint32)(machine_tick_count() - start_tick) < wait_ticks)
+				{
+					draw_intro_screen();     // keep submitting VR frames (compositor stays live)
+					global_idle_proc();
+					yield();
+					SDL_Event event;
+					while (SDL_PollEvent(&event))
+					{
+						if (event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_KEYDOWN ||
+						    event.type == SDL_CONTROLLERBUTTONDOWN)
+						{ aborted = true; break; }
+					}
+				}
+			}
+#else
 			wait_for_click_or_keypress(text_block ? -1 : 10*MACHINE_TICKS_PER_SECOND);
-			
+#endif
+
 			/* Fade out! (Pray) */
 			interface_fade_out(pict_resource_number, false);
 			
