@@ -783,6 +783,9 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 	                              (weap_type == _weapon_fist &&
 	                               !weapon_type_is_marathon_1(_weapon_fist)));
 	VR_SetIsDualWield(weapon_is_dual);
+	// Pistol-style one-handers (magnum, fusion pistol) opt out of two-handed grip via MML
+	// (<no_two_handed_weapon>); keep them single-handed even when the hands come together.
+	VR_SetTwoHandedDisabled(VR_IsWeaponTwoHandedDisabled(weap_type));
 	// Suppress grip-based secondary fire for weapons whose secondary is identical to primary.
 	VR_SetGripAltFireEnabled(weap_type != _weapon_fist && weap_type != _weapon_pistol);
 
@@ -1241,10 +1244,10 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 #endif // __ANDROID__
 
 #ifdef HAVE_OPENGL
-// Toggle for the network VR pose debug lines below. Default on -- the whole point right now is to
-// watch remote players' head/gun aim while debugging the VR netcode. Cross-platform (also drawn on the
-// flat PC build, which is the primary validation: watch the PC screen while moving on the Quest).
-bool debug_show_net_vr_pose = true;
+// Toggle for the network VR pose debug lines below. OFF for release -- the wire is validated (bullets
+// verified on 2 machines), so the head/gun debug rays are no longer drawn. Kept (not deleted) as a
+// diagnostic for future VR netcode work; flip to true to see remote players' head/gun aim again.
+bool debug_show_net_vr_pose = false;
 
 // ---- Network players' VR pose debug lines ---------------------------------------------------
 // Phase-1 correctness proof for the VR netcode extension (docs/VR_NETCODE.md). For every OTHER network
@@ -1462,6 +1465,10 @@ void render_view(
 				{
 					const world_point3d  base_origin = view->origin;
 					const short          base_poly   = view->origin_polygon_index;
+					// Discrete sprite-view (N/NE/E/...) selection uses this shared head-centre for BOTH
+					// eyes, so a creature near a 45deg view boundary doesn't show a different sprite per
+					// eye (get_object_shape_and_transfer_mode consults it). Cleared after the loop.
+					VR_SetSpriteViewOrigin(&base_origin);
 					for (int eye = 0; eye < 2; ++eye)
 					{
 						// render_flags is a global flat array; the outer build_render_tree call
@@ -1517,8 +1524,19 @@ void render_view(
 						RasPtr->End();
 						VR_PresentHudEye(eye);
 						VR_PresentMapEye(eye);
+						// VR screenshot promo feature DISABLED. Was: capture ONE eye's fully-composited
+						// framebuffer to a clean PNG when VR_TakeScreenshotIfRequested(). Uncomment (with
+						// the trigger/binding sites) to re-enable. See [[promo-temp-changes]].
+						// if (eye == 0 && VR_TakeScreenshotIfRequested())
+						// {
+						// 	GLint vp[4] = {0,0,0,0};
+						// 	glGetIntegerv(GL_VIEWPORT, vp);
+						// 	dump_screen_region(vp[0], vp[1], vp[2], vp[3]);
+						// }
 						VR_FinishEye(eye);
 					}
+					// Clear so non-stereo passes (overhead map, etc.) use their own camera_location.
+					VR_SetSpriteViewOrigin(nullptr);
 				}
 				VR_SubmitFrame();
 				VR_MarkWorldFramePresented();

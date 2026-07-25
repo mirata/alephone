@@ -70,6 +70,9 @@ extern "C" void VR_KeyboardDismiss(void) {}
 extern "C" bool VR_GetAimPoseStage(int, float*, float*) { return false; }
 extern "C" bool VR_GetAimOrientStage(int, float*, float*) { return false; }
 extern "C" void VR_SetIsDualWield(bool) {}
+extern "C" void VR_SetTwoHandedDisabled(bool) {}
+extern "C" void VR_SetSpriteViewOrigin(const struct world_point3d*) {}
+extern "C" bool VR_GetSpriteViewOrigin(struct world_point3d*) { return false; }
 extern "C" void VR_SetOffHandHasWeapon(bool) {}
 extern "C" void VR_SetGripAltFireEnabled(bool) {}
 extern "C" bool VR_IsTwoHandedActive() { return false; }

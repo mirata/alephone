@@ -1105,7 +1105,7 @@ static const float vr_brightness_values[] = { 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f
 static const char *vr_action_labels[] = {
 	"None", "Primary Fire", "Secondary Fire", "Action / Use",
 	"Next Weapon", "Prev Weapon", "Run", "Toggle Map", "Recenter View",
-	"Prev Item", "Next Item", NULL
+	"Prev Item", "Next Item", /* "Screenshot" -- promo feature disabled */ NULL
 };
 // The six bindable buttons, in VR_BTN_* order. The menu label per button.
 static const char *vr_button_labels[] = {
@@ -1701,7 +1701,9 @@ static void vr_controls_dialog(void *arg)
 	w_select *btn_w[VR_BTN_COUNT];
 	for (int i = 0; i < VR_BTN_COUNT; ++i) {
 		int cur = vr->buttonAction[i];
-		if (cur < 0 || cur >= VR_ACT_COUNT) cur = VR_ACT_NONE;
+		// VR_ACT_SCREENSHOT (the disabled promo action) has no label, so clamp it (and anything past)
+		// to None -- covers installs that persisted button_b=Screenshot while it was enabled.
+		if (cur < 0 || cur >= VR_ACT_SCREENSHOT) cur = VR_ACT_NONE;
 		btn_w[i] = new w_select(cur, vr_action_labels);
 		table->dual_add(btn_w[i]->label(vr_button_labels[i]), d);
 		table->dual_add(btn_w[i], d);

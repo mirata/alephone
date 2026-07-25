@@ -223,6 +223,10 @@ void calculate_destination_frame(short size, bool high_resolution, Rect *frame);
 // LP addition: a routine for dumping the screen contents into a file.
 // May need to be modified for pass-through video cards like the older 3dfx ones.
 void dump_screen();
+#ifdef HAVE_OPENGL
+// Capture a region of the currently-bound GL framebuffer to a PNG (used by the VR eye-loop). See shell.cpp.
+void dump_screen_region(int x, int y, int w, int h);
+#endif
 
 // For getting and setting tunnel-vision mode
 bool GetTunnelVision();

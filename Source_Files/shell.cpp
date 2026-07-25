@@ -579,6 +579,10 @@ void initialize_application(void)
 //	initialize_fonts();
 #if defined(__ANDROID__)
 	vr_force_optimal_sound();   // Quest audio: stereo + 3D + HRTF, before the sound engine reads prefs
+	// PROMO/DEBUG (DISABLED -- was: pin B to the screenshot action when unbound). Commented out with the
+	// rest of the screenshot promo feature; uncomment to re-enable. See [[promo-temp-changes]].
+	// if (VR_Settings()->buttonAction[VR_BTN_B] == VR_ACT_NONE)
+	// 	VR_Settings()->buttonAction[VR_BTN_B] = VR_ACT_SCREENSHOT;
 #endif
 	SoundManager::instance()->Initialize(*sound_preferences);
 	initialize_marathon_music_handler();
@@ -1695,6 +1699,64 @@ void dump_screen(void)
 	SDL_FreeSurface(t);
 #endif
 }
+
+#ifdef HAVE_OPENGL
+// Capture a rectangular region of the CURRENTLY BOUND GL framebuffer to a PNG in the Screenshots
+// folder (same naming as dump_screen). Used by the VR path to grab one eye's render target directly
+// (a clean, undistorted image), unlike dump_screen which reads the default framebuffer + window size.
+// Reads GL_RGBA (the GLES-guaranteed readback format) and saves opaque (alpha ignored).
+void dump_screen_region(int x, int y, int w, int h)
+{
+	if (w <= 0 || h <= 0) return;
+
+	// Pick a non-colliding filename, matching dump_screen's scheme.
+	FileSpecifier file;
+	int i = 0;
+	do {
+		char name[256];
+		const char* suffix;
+#if defined (HAVE_SDL_IMAGE) && defined (HAVE_PNG)
+		suffix = "png";
+#else
+		suffix = "bmp";
+#endif
+		if (get_game_state() == _game_in_progress)
+			sprintf(name, "%s_%04d.%s", to_alnum(static_world->level_name).c_str(), i, suffix);
+		else
+			sprintf(name, "Screenshot_%04d.%s", i, suffix);
+		file = screenshots_dir + name;
+		i++;
+	} while (file.Exists());
+
+	// 32bpp surface with Amask=0 -> the read-back alpha byte is treated as padding, image saved opaque.
+	SDL_Surface *t = SDL_CreateRGBSurface(SDL_SWSURFACE, w, h, 32,
+#if SDL_BYTEORDER == SDL_LIL_ENDIAN
+		0x000000ff, 0x0000ff00, 0x00ff0000, 0);
+#else
+		0x00ff0000, 0x0000ff00, 0x000000ff, 0);
+#endif
+	if (!t) return;
+
+	void *pixels = malloc((size_t)w * h * 4);
+	if (!pixels) { SDL_FreeSurface(t); return; }
+
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	glPixelStorei(GL_PACK_ALIGNMENT, 4);
+
+	// glReadPixels is bottom-up; flip into the surface.
+	for (int yy = 0; yy < h; yy++)
+		memcpy((uint8 *)t->pixels + t->pitch * yy, (uint8 *)pixels + (size_t)w * 4 * (h - yy - 1), (size_t)w * 4);
+	free(pixels);
+
+#if defined (HAVE_SDL_IMAGE) && defined (HAVE_PNG)
+	IMG_SavePNG(t, file.GetPath());
+#else
+	SDL_SaveBMP(t, file.GetPath());
+#endif
+	SDL_FreeSurface(t);
+}
+#endif // HAVE_OPENGL
 
 static bool _ParseMMLDirectory(DirectorySpecifier& dir, bool load_menu_mml_only)
 {

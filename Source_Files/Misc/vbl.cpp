@@ -1448,6 +1448,7 @@ uint32 parse_keymap(void)
 				const bool aRc   = VR_ActionHeld(VR_ACT_RECENTER);
 				const bool aInvP = VR_ActionHeld(VR_ACT_INVENTORY_PREV);
 				const bool aInvN = VR_ActionHeld(VR_ACT_INVENTORY_NEXT);
+				// const bool aShot = VR_ActionHeld(VR_ACT_SCREENSHOT); // screenshot promo feature DISABLED
 				if (aNext && !prevNext) flags |= _cycle_weapons_forward;
 				if (aPrev && !prevPrev) flags |= _cycle_weapons_backward;
 				if (aMap  && !prevMap)  flags |= _toggle_map;
@@ -1465,6 +1466,7 @@ uint32 parse_keymap(void)
 				// inventory-left/right keys in shell.cpp -- call it directly on the button edge.
 				if (aInvP && !prevInvP && player_controlling_game()) scroll_inventory(-1);
 				if (aInvN && !prevInvN && player_controlling_game()) scroll_inventory(1);
+				// Screenshot promo feature DISABLED (was: if (aShot && !prevShot) VR_RequestScreenshot();)
 				prevNext = aNext; prevPrev = aPrev; prevMap = aMap; prevRc = aRc;
 				prevInvP = aInvP; prevInvN = aInvN;
 			}

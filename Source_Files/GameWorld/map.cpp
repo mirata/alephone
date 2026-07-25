@@ -1034,7 +1034,20 @@ void get_object_shape_and_transfer_mode(
 	
 	/* get correct base shape */
 	// LP change: made long-distance friendly
-	theta= arctangent(int32(object->location.x) - int32(camera_location->x), int32(object->location.y) - int32(camera_location->y)) - object->facing;
+	// VR: pick the discrete rotation-sprite (N/NE/E/...) from the shared HEAD-CENTRE, not the per-eye
+	// origin. The two eye positions straddle the 45deg FACING boundaries, so a per-eye camera_location
+	// makes each eye choose a different sprite near a boundary (visible stereo mismatch). Using one
+	// head-centre point for the angle bucket makes both eyes agree; billboard placement/depth below
+	// still uses the true per-eye view, so parallax is unaffected. See VR_SetSpriteViewOrigin.
+	world_point3d view_origin = *camera_location;
+#if defined(__ANDROID__)
+	{
+		world_point3d shared;
+		if (VR_IsActive() && VR_GetSpriteViewOrigin(&shared))
+			view_origin = shared;
+	}
+#endif
+	theta= arctangent(int32(object->location.x) - int32(view_origin.x), int32(object->location.y) - int32(view_origin.y)) - object->facing;
 	switch (animation->number_of_views)
 	{
 		case _unanimated:

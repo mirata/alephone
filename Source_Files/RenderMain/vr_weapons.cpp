@@ -18,6 +18,7 @@ static const std::map<std::string, short> kWeaponNames = {
 };
 
 static std::set<short> s_leftHandedWeapons;
+static std::set<short> s_noTwoHandedWeapons;
 static std::map<short, float> s_casingFwdOffsets;
 static std::map<short, float> s_spreadScales;
 
@@ -43,6 +44,7 @@ static short resolve_weapon_index(const InfoTree& child)
 void reset_mml_vr_weapons()
 {
 	s_leftHandedWeapons.clear();
+	s_noTwoHandedWeapons.clear();
 	s_casingFwdOffsets.clear();
 	s_spreadScales.clear();
 }
@@ -54,6 +56,12 @@ void parse_mml_vr_weapons(const InfoTree& root)
 		short index = resolve_weapon_index(child);
 		if (index >= 0)
 			s_leftHandedWeapons.insert(index);
+	}
+	for (const InfoTree& child : root.children_named("no_two_handed_weapon"))
+	{
+		short index = resolve_weapon_index(child);
+		if (index >= 0)
+			s_noTwoHandedWeapons.insert(index);
 	}
 	for (const InfoTree& child : root.children_named("vr_casing"))
 	{
@@ -81,6 +89,11 @@ void parse_mml_vr_weapons(const InfoTree& root)
 bool VR_IsWeaponNaturallyLeftHanded(short weapon_type)
 {
 	return s_leftHandedWeapons.count(weapon_type) > 0;
+}
+
+bool VR_IsWeaponTwoHandedDisabled(short weapon_type)
+{
+	return s_noTwoHandedWeapons.count(weapon_type) > 0;
 }
 
 float VR_GetWeaponCasingFwdOffset(short weapon_type)

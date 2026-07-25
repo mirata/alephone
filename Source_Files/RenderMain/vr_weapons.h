@@ -20,6 +20,10 @@
 // free 1:1 aim, so that baked-in spread makes such weapons feel useless. A scale < 1.0
 // tightens the spread (0.5 = half the spread), 1.0 = unchanged (default), 0.0 = pinpoint.
 //
+// <no_two_handed_weapon> disables the two-handed (bring-the-hands-together) grip for a weapon.
+// Pistol-style one-handers (magnum, fusion pistol) don't read well two-handed, so this keeps them
+// single-handed even when the hands are close.
+//
 // Attributes (all elements use name OR index to identify the weapon):
 //   name="pistol"          engine weapon name string (see mapping in .cpp)
 //   index="N"              engine weapon-type constant (0=fist, 1=pistol, 3=assault_rifle, ...)
@@ -37,6 +41,9 @@ void parse_mml_vr_weapons(const InfoTree& root);
 
 // Returns true if weapon_type (engine index) was declared left-handed in MML.
 bool VR_IsWeaponNaturallyLeftHanded(short weapon_type);
+
+// Returns true if weapon_type had two-handed grip disabled in MML (<no_two_handed_weapon>).
+bool VR_IsWeaponTwoHandedDisabled(short weapon_type);
 
 // Returns the casing spawn forward offset in metres (0 if not configured in MML).
 float VR_GetWeaponCasingFwdOffset(short weapon_type);

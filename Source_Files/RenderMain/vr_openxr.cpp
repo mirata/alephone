@@ -29,6 +29,7 @@
 #include <cmath>
 
 #include "vr_openxr.h"
+#include "world.h"           // world_point3d (sprite-view-origin API)
 #include "Logging.h"         // logWarning -> persistent on-device log (panel-placement diagnostic)
 #include "sdl_fonts.h"       // font_info (on-screen keyboard label rendering)
 #include "screen_drawing.h"  // draw_text / text_width
@@ -534,7 +535,7 @@ namespace {
 		/* showAimGizmos    */ 0,     // controller aim diagnostic gizmos (OFF; debug-only, flip to 1 to show)
 		/* buttonAction     */ {      // default button map (matches the old hardcoded stopgap)
 			VR_ACT_ACTION_USE,       //   A          -> Action / Use
-			VR_ACT_NONE,             //   B          -> unbound (free for the user to assign)
+			VR_ACT_NONE,             //   B          -> unbound (screenshot promo feature disabled)
 			VR_ACT_PREV_WEAPON,      //   X          -> Previous Weapon
 			VR_ACT_NEXT_WEAPON,      //   Y          -> Next Weapon
 			VR_ACT_RUN,              //   Move-click -> Run (toggle)
@@ -704,6 +705,7 @@ namespace {
 	float       s_moveX = 0, s_moveY = 0, s_turnX = 0, s_turnY = 0;   // routed (handedness/switch-sticks applied)
 	bool        s_fire = false, s_altFire = false, s_action = false;
 	bool        s_isDualWield = false;
+	bool        s_twoHandedDisabled = false;   // current weapon opts out of two-handed grip (MML)
 	bool        s_offHandHasWeapon = true;
 	bool        s_gripAltFireEnabled = true;
 	bool        s_bBtn = false, s_xBtn = false, s_yBtn = false;
@@ -1334,6 +1336,34 @@ extern "C" bool VR_TakeSystemRecenter(void)
 {
 	if (!s_systemRecenterPending) return false;
 	s_systemRecenterPending = false;
+	return true;
+}
+
+// Screenshot one-shot flag (VR_ACT_SCREENSHOT): requested from the input tick, consumed once by the
+// render eye-loop. See vr_openxr.h.
+static bool s_screenshotRequested = false;
+extern "C" void VR_RequestScreenshot(void) { s_screenshotRequested = true; }
+extern "C" bool VR_TakeScreenshotIfRequested(void)
+{
+	if (!s_screenshotRequested) return false;
+	s_screenshotRequested = false;
+	return true;
+}
+
+// Shared head-centre reference for discrete sprite-view selection (see vr_openxr.h /
+// get_object_shape_and_transfer_mode). Set to base_origin each stereo frame so BOTH eyes bucket the
+// N/NE/E/... sprite from the same point -> no per-eye sprite mismatch at the 45deg view boundaries.
+static bool          s_spriteViewOriginValid = false;
+static world_point3d s_spriteViewOrigin = {0, 0, 0};
+extern "C" void VR_SetSpriteViewOrigin(const world_point3d* o)
+{
+	if (o) { s_spriteViewOrigin = *o; s_spriteViewOriginValid = true; }
+	else   { s_spriteViewOriginValid = false; }
+}
+extern "C" bool VR_GetSpriteViewOrigin(world_point3d* out)
+{
+	if (!s_spriteViewOriginValid || !out) return false;
+	*out = s_spriteViewOrigin;
 	return true;
 }
 
@@ -2000,12 +2030,14 @@ extern "C" bool VR_GetAimOrientStage(int hand, float right3[3], float up3[3])
 }
 
 extern "C" void VR_SetIsDualWield(bool dual) { s_isDualWield = dual; }
+extern "C" void VR_SetTwoHandedDisabled(bool disabled) { s_twoHandedDisabled = disabled; }
 extern "C" void VR_SetOffHandHasWeapon(bool has) { s_offHandHasWeapon = has; }
 extern "C" void VR_SetGripAltFireEnabled(bool en) { s_gripAltFireEnabled = en; }
 
 extern "C" bool VR_IsTwoHandedActive()
 {
 	if (s_isDualWield) return false;   // dual-wield uses both hands independently
+	if (s_twoHandedDisabled) return false;   // weapon opted out of two-handed grip (MML no_two_handed_weapon)
 	if (!s_twoHandedLatched) return false;   // latched on grip edge; see VR_BeginFrame
 	const int domHand = s_settings.dominantHand ? 0 : 1;
 	const int offHand = 1 - domHand;
@@ -2665,6 +2697,9 @@ extern "C" bool VR_GetPointerGrip(void) { return false; }
 extern "C" bool VR_GetAimPoseStage(int, float*, float*) { return false; }
 extern "C" bool VR_GetAimOrientStage(int, float*, float*) { return false; }
 extern "C" void VR_SetIsDualWield(bool) {}
+extern "C" void VR_SetTwoHandedDisabled(bool) {}
+extern "C" void VR_SetSpriteViewOrigin(const world_point3d*) {}
+extern "C" bool VR_GetSpriteViewOrigin(world_point3d*) { return false; }
 extern "C" void VR_SetOffHandHasWeapon(bool) {}
 extern "C" void VR_SetGripAltFireEnabled(bool) {}
 extern "C" bool VR_IsTwoHandedActive() { return false; }

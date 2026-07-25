@@ -4,6 +4,9 @@
 #include "Logging.h"
 #include "alephversion.h"
 #include <SDL2/SDL_main.h>
+#if defined(__ANDROID__)
+#include <unistd.h>   // _exit (force a clean process teardown on VR quit)
+#endif
 
 int main(int argc, char** argv)
 {
@@ -83,6 +86,21 @@ int main(int argc, char** argv)
 	{
 
 	}
+
+#if defined(__ANDROID__)
+	// Quest: the app quit (main loop exited on _quit_game). Android keeps the process CACHED after
+	// SDL_main returns rather than killing it, so all our process-scoped native state survives -- most
+	// importantly the OpenXR instance/session and the GLOBAL ref to the now-finished Activity that the
+	// runtime uses to track lifecycle (VR_InitOpenXR's `if (s_active) return true;` reuse guard +
+	// s_activityGlobal). On a fast relaunch Android reuses that cached process, so VR_InitOpenXR
+	// short-circuits onto the STALE instance bound to the DEAD activity -> the session never gains
+	// focus and the first launch appears to "not launch"; the process then dies and the 2nd launch
+	// gets a fresh process that works. Force a full teardown here so EVERY launch starts clean.
+	// _exit (not exit/return): terminate immediately without running C++ static destructors or atexit,
+	// which could hang/double-free against SDL/OpenXR state we've already torn down. (Android logging
+	// is flushed on every write, so nothing is lost by skipping the normal teardown.)
+	_exit(code);
+#endif
 
 	return code;
 }

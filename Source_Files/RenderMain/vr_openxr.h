@@ -12,6 +12,8 @@
 extern "C" {
 #endif
 
+struct world_point3d;   // forward decl for the sprite-view-origin API below (defined in world.h)
+
 // Create the OpenXR instance + system. Call once SDL video is initialised (the GL context need not
 // exist yet -- the session is created lazily on the first frame). Returns true if VR is available.
 bool VR_InitOpenXR(void);
@@ -47,6 +49,7 @@ enum {
 	VR_ACT_RECENTER,
 	VR_ACT_INVENTORY_PREV,   // scroll the inventory panel back one item
 	VR_ACT_INVENTORY_NEXT,   // scroll the inventory panel forward one item
+	VR_ACT_SCREENSHOT,       // capture a clean single-eye screenshot to the Screenshots folder
 	VR_ACT_COUNT
 };
 
@@ -229,6 +232,13 @@ bool VR_GetTurnStickClick(void);       // press of the turn thumbstick -- the OP
 // actions (weapon cycle / map / recenter) is done tick-side by the caller.
 bool VR_ActionHeld(int action);
 
+// Screenshot request (VR_ACT_SCREENSHOT). The input tick calls VR_RequestScreenshot() on the button
+// edge; the render eye-loop calls VR_TakeScreenshotIfRequested() once per frame and, if true, reads
+// one eye's framebuffer to a PNG (a clean, undistorted capture -- unlike the compositor grab). A
+// simple cross-file one-shot flag.
+void VR_RequestScreenshot(void);
+bool VR_TakeScreenshotIfRequested(void);
+
 // Increment 1: render one head-tracked stereo test frame (a colored room) to the headset and
 // submit it. Drives the OpenXR session lifecycle internally. Returns true if a VR frame was
 // presented (the caller should then skip SDL_GL_SwapWindow). Returns false if VR isn't ready yet.
@@ -319,6 +329,15 @@ bool VR_GetAimOrientStage(int hand, float right3[3], float up3[3]);
 // Inform the VR layer whether dual-wield is active this frame. Two-handed steadying is
 // suppressed while dual-wielding (each hand independently holds its own weapon).
 void VR_SetIsDualWield(bool dual);
+// Inform the VR layer whether the current weapon opted out of two-handed grip (MML
+// <no_two_handed_weapon>, e.g. pistol/fusion pistol). When true, VR_IsTwoHandedActive() stays false.
+void VR_SetTwoHandedDisabled(bool disabled);
+// Shared head-centre reference for DISCRETE sprite-view (N/NE/E/...) selection. The stereo eye loop
+// sets it to the head-centre origin each frame so both eyes pick the same creature-rotation sprite
+// (per-eye origins otherwise straddle the 45deg view boundaries -> different sprite per eye). Pass
+// NULL to clear (non-VR/overhead-map paths). get_object_shape_and_transfer_mode consults it.
+void VR_SetSpriteViewOrigin(const struct world_point3d* o);
+bool VR_GetSpriteViewOrigin(struct world_point3d* out);
 // True if the off-hand actually has a weapon sprite this frame (false when a dual-wield type
 // is selected but only one weapon remains, so the off-hand trigger is suppressed).
 void VR_SetOffHandHasWeapon(bool has);
