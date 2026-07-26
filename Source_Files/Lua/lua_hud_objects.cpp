@@ -807,11 +807,16 @@ Lua_Font *Lua_Font::Push(lua_State *L, FontSpecifier *fs)
 	return t;
 }
 
+// Global multiplier on ALL Lua HUD text. Folded into every font's effective scale so both rendering
+// (HUD_Lua_Class::draw_text -> glScalef) and layout math (font:measure_text) enlarge together, keeping
+// alignment consistent. Sourced from the VR "HUD Text Scale" preference; 1.0 = unchanged (default).
+float g_lua_hud_font_scale = 1.0f;
+
 float Lua_Font::Scale(lua_State *L, int index)
 {
 	Lua_Font *t = static_cast<Lua_Font *>(Instance(L, index));
 	if (!t) luaL_typerror(L, index, Lua_Font_Name);
-	return t->m_font_scale;
+	return t->m_font_scale * g_lua_hud_font_scale;
 }
 
 void Lua_Font::SetScale(lua_State *L, int index, float new_scale)

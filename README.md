@@ -1,4 +1,12 @@
-# Aleph One
+# Aleph One — Meta Quest VR
+
+> **⚠️ This is the `questvr` branch — an experimental Meta Quest / Horizon OS VR port of Aleph One.**
+> It adds a stereoscopic, head-tracked, room-scale VR renderer and OpenXR input on top of upstream
+> Aleph One, and builds as a native Android `.apk` for the Quest 2 / 3 / 3S / Pro. The desktop
+> (Windows / macOS / Linux) builds still work unchanged — all VR code is `#if defined(__ANDROID__)`
+> guarded. If you want the standard, non-VR game, use the [upstream repository](https://github.com/Aleph-One-Marathon/alephone).
+>
+> **Jump to:** [Build the Quest VR APK](#meta-quest-vr-build-this-branch)
 
 Aleph One is the open source continuation of Bungie™’s _Marathon® 2_ and _Marathon Infinity_ game engines. Aleph One plays _Marathon_, _Marathon 2_, _Marathon Infinity_, and third-party content on a variety of platforms.
 
@@ -12,7 +20,138 @@ To download ready-to-run versions of all three _Marathon_ games for macOS,
 Windows, and Linux Flatpak, visit
 [alephone.lhowon.org](https://alephone.lhowon.org)
 
-# Build from source
+# Meta Quest VR build (this branch)
+
+The VR build produces a native Android `.apk` for the Quest. It reuses the same engine and the same
+[vcpkg](https://github.com/microsoft/vcpkg) dependencies as the desktop build, cross-compiled for
+`arm64-v8a`, driven by Gradle + CMake. These instructions are for a **Windows** host (the port is
+developed on Windows 11 with PowerShell), but the Gradle build works from any host with the Android
+toolchain installed.
+
+## Prerequisites
+
+1. **Android Studio** — https://developer.android.com/studio. It bundles a JDK (used below as
+   `JAVA_HOME`) and the SDK Manager. Using the SDK Manager, install:
+   - SDK Platform **android-35**
+   - **NDK (Side by side)** version **30.0.14904198** (must match `ndkVersion` in `android/app/build.gradle`)
+   - **CMake** (AGP fetches its own bundled 3.22.1, so any recent version is fine)
+   - **Android SDK Platform-Tools** (gives you `adb`) and **Build-Tools**
+2. **vcpkg** — clone it (a short, space-free path is recommended, e.g. `C:\Projects\vcpkg`):
+   ```powershell
+   git clone https://github.com/microsoft/vcpkg.git C:\Projects\vcpkg
+   C:\Projects\vcpkg\bootstrap-vcpkg.bat
+   ```
+3. **Clone this repo with submodules** (scenario data lives in submodules):
+   ```powershell
+   git clone --recurse-submodules -b questvr https://github.com/<your-fork>/alephone.git
+   ```
+
+## Build the Android dependencies (one-time)
+
+The build reads the arm64-android dependencies from `android/jni/vcpkg_installed`, which is **not**
+checked in, so build them once with vcpkg. The `arm64-android` triplet reads `ANDROID_NDK_HOME`:
+
+```powershell
+$env:ANDROID_NDK_HOME = "$env:LOCALAPPDATA\Android\Sdk\ndk\30.0.14904198"
+& C:\Projects\vcpkg\vcpkg.exe install --triplet arm64-android --x-install-root=C:\Projects\alephone\android\jni\vcpkg_installed
+```
+
+This is a long first run (Boost + the SDL2 family are built from source). It only needs to be redone
+when a dependency changes. If your vcpkg lives somewhere other than `C:/Projects/vcpkg`, pass its
+location to Gradle with `-PVCPKG_ROOT=<path>` on the build commands below.
+
+## Build the APK
+
+From the `android/` directory, point `JAVA_HOME` at Android Studio's bundled JDK and build the `dev`
+flavor's debug APK:
+
+```powershell
+$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
+cd C:\Projects\alephone\android
+.\gradlew.bat :app:assembleDevDebug
+```
+
+The resulting APK is:
+
+```
+android\app\build\outputs\apk\dev\debug\app-dev-debug.apk
+```
+
+### Product flavors
+
+The project ships one engine as several apps via Gradle **product flavors** (dimension `product`):
+
+| Flavor | applicationId | Data | Build task |
+|---|---|---|---|
+| `dev` | `org.alephone` | none (push a scenario over `adb`) | `:app:assembleDevDebug` |
+| `marathon` | `org.alephone.marathon` | _Marathon_ bundled in the APK | `:app:assembleMarathonRelease` |
+| `marathon2` | `org.alephone.marathon2` | _Marathon 2_ bundled in the APK | `:app:assembleMarathon2Release` |
+| `infinity` | `org.alephone.infinity` | _Marathon Infinity_ bundled in the APK | `:app:assembleInfinityRelease` |
+
+The `dev` flavor is the everyday development build — it bundles no game data, so you push a scenario
+folder over `adb` (see the deploy script below). The three branded flavors are self-contained,
+store-installable apps that bundle their base data + scenario inside the APK at build time from
+`data/Scenarios/`.
+
+### Signed release APKs
+
+Release builds are signed if `android/keystore.properties` exists (copy
+`android/keystore.properties.template`, fill it in, and generate the keystore per that file). Without
+it, release builds simply come out unsigned rather than failing. When uploading to the Meta Horizon
+Store, **bump `versionCode` in `android/app/build.gradle` before every upload** — the store rejects any
+APK whose `versionCode` isn't strictly higher than the last one on that listing.
+
+## Install & run on a Quest
+
+1. Enable **Developer Mode** on the headset (Meta Horizon mobile app → your headset → Developer Mode;
+   requires a free Meta developer account / organization), connect over USB-C, and accept the on-headset
+   USB-debugging prompt.
+2. Confirm the device is visible and install:
+   ```powershell
+   $adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
+   & $adb devices
+   & $adb install -r android\app\build\outputs\apk\dev\debug\app-dev-debug.apk
+   ```
+3. **Put the headset on to give the app focus** — it only runs (and renders) once focused. Launched via
+   `adb` without donning the headset, it stays paused.
+
+### One-step deploy (recommended)
+
+`android/deploy.ps1` does the whole loop — build, install, sync a scenario's data to the device
+verbatim, force-stop, and relaunch:
+
+```powershell
+pwsh android\deploy.ps1                          # build, install, sync "Marathon" (M1), launch
+pwsh android\deploy.ps1 -Scenario "Marathon 2"
+pwsh android\deploy.ps1 -SkipBuild               # install + sync + launch, no rebuild
+pwsh android\deploy.ps1 -NoData                  # code-only redeploy (leave device data alone)
+pwsh android\deploy.ps1 -Base                    # also push base data (do once on a fresh device)
+```
+
+Scenario data comes from `data/Scenarios/<name>` (populated by the submodule checkout, or download it
+from the [Aleph One Scenarios](https://alephone.lhowon.org/scenarios.html) page).
+
+## Debugging
+
+The VR code logs under the `adb logcat` tag **`A1VR`**, and the engine also writes a browsable log file
+on the device:
+
+```powershell
+$adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
+& $adb logcat -c                                 # clear before launch
+& $adb logcat -d -s A1VR | Select-Object -Last 40
+& $adb shell cat '/sdcard/Android/data/org.alephone/files/Aleph One Log.txt'
+```
+
+For deeper background on the port's build system and phased plan, see
+[`docs/ANDROID_BUILD.md`](docs/ANDROID_BUILD.md).
+
+---
+
+# Build from source (desktop)
+
+The following are the upstream instructions for the desktop (non-VR) builds. All VR additions are
+`__ANDROID__`-guarded, so these continue to work as they do upstream.
 
 ## CI status
 

@@ -526,9 +526,10 @@ namespace {
 		/* dominantHand    */ 0,      // right-handed
 		/* switchSticks    */ 0,
 		/* aimPitchAdjust  */ -20.0f, // aim pose sits ~20deg above a held-gun barrel; tilt down
-		/* hudDistanceM    */ 0.8f,   // head-locked HUD plane distance
-		/* hudSizeM        */ 0.55f,  // head-locked HUD plane height (width follows natural aspect)
+		/* hudDistanceM    */ 1.0f,   // head-locked HUD plane distance
+		/* hudSizeM        */ 1.45f,  // head-locked HUD plane height (width follows natural aspect) -- Max tier
 		/* hudTiltDeg      */ 30.0f,  // degrees the HUD bottom-anchor is pitched down from horizontal
+		/* hudTextScale    */ 1.0f,   // global Lua HUD text multiplier (1.0 = unchanged; >1 enlarges HUD text)
 		/* mapPlayerUp     */ 1,      // overhead map rotation: 0=north-up, 1=player-facing-up (default on for VR)
 		/* teleportDistortion */ 1,   // horizontal-stretch/vertical-compress warp on teleport (may cause nausea)
 		/* showLaserSight   */ 0,
@@ -1702,6 +1703,10 @@ extern "C" void VR_PresentHudEye(int eye)
 	float U[3] = {  hm[4],  hm[5],  hm[6] };   // local +Y (up)
 	float F[3] = { -hm[8], -hm[9], -hm[10] };  // local -Z (forward)
 
+	// hudDistanceM places the panel and drives ONLY the stereo depth (vergence). Apparent (angular) size
+	// is held constant as distance changes because the panel's physical extent scales with D (see hh/hw
+	// below): move it closer/further and the ONLY thing that changes is the per-eye disparity, i.e. how
+	// deep it sits. Apparent size is set independently by the HUD Size setting.
 	const float D = s_settings.hudDistanceM;
 	// Bottom-anchor: pitch the forward direction DOWN by hudTiltDeg so the HUD bottom sits in the lower
 	// field of view. 0° = eye level, 30° = lower-dashboard look. Configurable in VR Options.
@@ -1710,7 +1715,14 @@ extern "C" void VR_PresentHudEye(int eye)
 	const float Fb[3]     = { F[0]*cp - U[0]*sp, F[1]*cp - U[1]*sp, F[2]*cp - U[2]*sp };
 	const float bottom[3] = { hp[0]+Fb[0]*D, hp[1]+Fb[1]*D, hp[2]+Fb[2]*D };  // bottom-centre anchor
 
-	const float hh     = 0.5f * s_settings.hudSizeM;        // half-height; grows up from the anchor
+	// Half-height scales with D so apparent size is distance-independent: hudSizeM is the panel height as
+	// a FRACTION of the HUD distance (angular size = 2*atan(hudSizeM/2)). Bigger hudSizeM = bigger on
+	// screen; distance no longer affects it.
+	// Uniform trim so the corner readouts (health / oxygen / ammo) pull in toward centre where they're
+	// easier to read, instead of sitting out in the periphery. This scales BOTH axes equally -> no
+	// squash; the HUD art keeps its aspect and just sits a touch smaller/more central. 1.0 = untrimmed.
+	const float kHudTrim = 0.88f;
+	const float hh     = 0.5f * s_settings.hudSizeM * D * kHudTrim;  // half-height; grows up from anchor
 	const float aspect = (float)kHudW/(float)kHudH;
 	const float hw     = hh * aspect;                        // natural aspect (no cap = no squash)
 	const float C[3]   = { bottom[0]+U[0]*hh, bottom[1]+U[1]*hh, bottom[2]+U[2]*hh };

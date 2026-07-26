@@ -373,9 +373,15 @@ void HUD_Lua_Class::draw_text(FontSpecifier *font, const char *text,
 #ifdef HAVE_OPENGL
 	if (m_opengl)
 	{
+		// Anchor the baseline where it would sit at the HUD's own (un-globally-scaled) font size, then
+		// scale the glyphs around it. This makes the global HUD-text enlargement grow UPWARD from a fixed
+		// baseline (bottom-left) instead of pushing the baseline down into the section below -- reducing
+		// overlap. At g_lua_hud_font_scale == 1 this is identical to the original (baseline = y+Height*scale).
+		extern float g_lua_hud_font_scale;
+		const float baseScale = (g_lua_hud_font_scale > 0.f) ? (scale / g_lua_hud_font_scale) : scale;
 		glMatrixMode(GL_MODELVIEW);
 		glPushMatrix();
-		glTranslatef(x, y + (font->Height * scale), 0);
+		glTranslatef(x, y + (font->Height * baseScale), 0);
         glScalef(scale, scale, 1.0);
 		glColor4f(r, g, b, a);
 		font->OGL_Render(text);

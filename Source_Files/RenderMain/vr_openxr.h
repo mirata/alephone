@@ -76,11 +76,15 @@ typedef struct {
 	                        //     1 = swap so the DOMINANT hand moves and the off-hand turns.
 	float aimPitchAdjust;   // degrees added to the controller aim pitch (the OpenXR aim pose sits higher
 	                        //   than a held-gun barrel; negative tilts the ray DOWN). QZD's vr_weaponRotate.
-	float hudDistanceM;     // distance of the head-locked HUD plane in metres (bigger = HUD further out)
-	float hudSizeM;         // height of the head-locked HUD plane in metres (width follows HUD aspect);
-	                        //   acts as the VR "screen size" for the HUD so elements can be pushed wider.
+	float hudDistanceM;     // distance of the head-locked HUD plane in metres. Apparent size is held
+	                        //   constant across distance (physical extent scales with it), so this drives
+	                        //   ONLY the stereo depth/vergence -- how deep the HUD sits.
+	float hudSizeM;         // HUD plane height as a FRACTION of hudDistanceM (width follows HUD aspect).
+	                        //   Sets the APPARENT (angular) size directly; independent of distance.
 	float hudTiltDeg;       // degrees the HUD bottom-anchor is pitched down from horizontal (0 = eye level,
 	                        //   30 = lower dashboard look, negative = above horizontal)
+	float hudTextScale;     // global multiplier on all Lua HUD text (drives g_lua_hud_font_scale). 1.0 =
+	                        //   unchanged; >1 enlarges HUD text (ammo counts etc.) for readability.
 	int   mapPlayerUp;      // 1 = rotate the overhead map so the player's facing direction is always at the top
 	int   teleportDistortion; // 1 = apply horizontal-stretch/vertical-compress warp during teleport fold effect
 	int   showLaserSight;   // 1 = draw the laser-sight dot at the controller aim point; default 0 (off)

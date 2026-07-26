@@ -1082,14 +1082,26 @@ static const float vr_screen_distance_values[] = { 1.5f, 2.0f, 2.5f, 3.0f, 4.0f 
 static const char *vr_screen_height_labels[] = { "1.5 m", "2.0 m", "2.5 m", "3.0 m", NULL };
 static const float vr_screen_height_values[] = { 1.5f, 2.0f, 2.5f, 3.0f };
 
-static const char *vr_hud_distance_labels[] = { "0.5 m", "0.65 m", "0.8 m", "1.0 m", "1.2 m", NULL };
-static const float vr_hud_distance_values[] = { 0.5f, 0.65f, 0.8f, 1.0f, 1.2f };
+static const char *vr_hud_distance_labels[] = { "0.8 m", "1.0 m", "1.2 m", "1.5 m", NULL };
+static const float vr_hud_distance_values[] = { 0.8f, 1.0f, 1.2f, 1.5f };
 
-static const char *vr_hud_size_labels[] = { "Small", "Medium", "Large", "Huge", NULL };
-static const float vr_hud_size_values[] = { 0.3f, 0.4f, 0.55f, 0.75f };
+// Panel height as a FRACTION of the HUD distance -> sets APPARENT (angular) size directly and stays
+// constant as Distance changes (Distance only affects stereo depth; see VR_PresentHudEye). Bigger =
+// larger on screen. Values happen to equal the old metre-heights at the 1.0 m default distance.
+static const char *vr_hud_size_labels[] = { "Small", "Normal", "Large", "Huge", "Max", NULL };
+static const float vr_hud_size_values[] = { 0.55f, 0.70f, 0.90f, 1.15f, 1.45f };
 
-static const char *vr_hud_tilt_labels[] = { "0° (Eye Level)", "15°", "30° (Dashboard)", "45°", NULL };
-static const float vr_hud_tilt_values[] = { 0.0f, 15.0f, 30.0f, 45.0f };
+// Global multiplier on ALL Lua HUD text (applied in Lua_Font::Scale via g_lua_hud_font_scale). The
+// Enhanced/XBLA HUDs size their fonts from the render resolution and ignore hud_size_preference, so this
+// engine-side multiplier is the reliable way to enlarge HUD text (ammo counts etc.). Nothing below 1.0.
+extern float g_lua_hud_font_scale;
+static const char *vr_hud_text_scale_labels[] = { "Normal", "Large", "Huge", "Largest", NULL };
+static const float vr_hud_text_scale_values[] = { 1.0f, 1.4f, 1.8f, 2.2f };
+
+// Higher tilt pitches the HUD's bottom-anchor further DOWN -> HUD sits lower. Low angles put the panel
+// centre near eye level ("middle of screen"), so the useful band is small steps around the ~30 bottom.
+static const char *vr_hud_tilt_labels[] = { "27°", "30° (Dashboard)", "33°", "36°", "39°", NULL };
+static const float vr_hud_tilt_values[] = { 27.0f, 30.0f, 33.0f, 36.0f, 39.0f };
 
 // Manual height adjust (metres of stature) added on top of the auto-measured standing eye height. + = the
 // player sits higher in-game, - = lower. Height itself is auto-calibrated at recenter; this is a nudge.
@@ -1782,17 +1794,22 @@ static void vr_dialog(void *arg)
 	table->dual_add_row(new w_static_text("HUD"), d);
 
 	w_select *hud_dist_w = new w_select(
-		vr_closest_index(vr_hud_distance_values, 5, vr->hudDistanceM), vr_hud_distance_labels);
+		vr_closest_index(vr_hud_distance_values, 4, vr->hudDistanceM), vr_hud_distance_labels);
 	table->dual_add(hud_dist_w->label("HUD Distance"), d);
 	table->dual_add(hud_dist_w, d);
 
 	w_select *hud_size_w = new w_select(
-		vr_closest_index(vr_hud_size_values, 4, vr->hudSizeM), vr_hud_size_labels);
+		vr_closest_index(vr_hud_size_values, 5, vr->hudSizeM), vr_hud_size_labels);
 	table->dual_add(hud_size_w->label("HUD Size"), d);
 	table->dual_add(hud_size_w, d);
 
+	w_select *hud_text_scale_w = new w_select(
+		vr_closest_index(vr_hud_text_scale_values, 4, vr->hudTextScale), vr_hud_text_scale_labels);
+	table->dual_add(hud_text_scale_w->label("HUD Text Scale"), d);
+	table->dual_add(hud_text_scale_w, d);
+
 	w_select *hud_tilt_w = new w_select(
-		vr_closest_index(vr_hud_tilt_values, 4, vr->hudTiltDeg), vr_hud_tilt_labels);
+		vr_closest_index(vr_hud_tilt_values, 5, vr->hudTiltDeg), vr_hud_tilt_labels);
 	table->dual_add(hud_tilt_w->label("HUD Tilt"), d);
 	table->dual_add(hud_tilt_w, d);
 
@@ -1840,6 +1857,8 @@ static void vr_dialog(void *arg)
 		vr->hudDistanceM    = vr_hud_distance_values[hud_dist_w->get_selection()];
 		vr->hudSizeM        = vr_hud_size_values[hud_size_w->get_selection()];
 		vr->hudTiltDeg      = vr_hud_tilt_values[hud_tilt_w->get_selection()];
+		vr->hudTextScale    = vr_hud_text_scale_values[hud_text_scale_w->get_selection()];
+		g_lua_hud_font_scale = vr->hudTextScale;
 		vr->mapPlayerUp     = map_player_up_w->get_selection() ? 1 : 0;
 		vr->heightAdjustM   = vr_height_adjust_values[height_adjust_w->get_selection()];
 		vr->brightness      = vr_brightness_values[brightness_w->get_selection()];
@@ -4621,6 +4640,7 @@ InfoTree vr_preferences_tree()
 	root.put_attr("hud_distance_m", vr->hudDistanceM);
 	root.put_attr("hud_size_m", vr->hudSizeM);
 	root.put_attr("hud_tilt_deg", vr->hudTiltDeg);
+	root.put_attr("hud_text_scale", vr->hudTextScale);
 	root.put_attr("map_player_up", vr->mapPlayerUp);
 	root.put_attr("teleport_distortion", vr->teleportDistortion);
 	root.put_attr("laser_sight", vr->showLaserSight);
@@ -5721,6 +5741,8 @@ void parse_vr_preferences(InfoTree root, std::string version)
 	root.read_attr("hud_distance_m", vr->hudDistanceM);
 	root.read_attr("hud_size_m", vr->hudSizeM);
 	root.read_attr("hud_tilt_deg", vr->hudTiltDeg);
+	root.read_attr("hud_text_scale", vr->hudTextScale);
+	g_lua_hud_font_scale = vr->hudTextScale;   // apply the persisted HUD text scale at startup
 	root.read_attr("map_player_up", vr->mapPlayerUp);
 	root.read_attr("teleport_distortion", vr->teleportDistortion);
 	root.read_attr("laser_sight", vr->showLaserSight);
