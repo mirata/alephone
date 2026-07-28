@@ -527,9 +527,9 @@ namespace {
 		/* switchSticks    */ 0,
 		/* aimPitchAdjust  */ -20.0f, // aim pose sits ~20deg above a held-gun barrel; tilt down
 		/* hudDistanceM    */ 1.0f,   // head-locked HUD plane distance
-		/* hudSizeM        */ 1.45f,  // head-locked HUD plane height (width follows natural aspect) -- Max tier
+		/* hudSizeM        */ 1.15f,  // head-locked HUD plane height (width follows natural aspect) -- Huge tier
 		/* hudTiltDeg      */ 30.0f,  // degrees the HUD bottom-anchor is pitched down from horizontal
-		/* hudTextScale    */ 1.0f,   // global Lua HUD text multiplier (1.0 = unchanged; >1 enlarges HUD text)
+		/* hudTextScale    */ 1.4f,   // global Lua HUD text multiplier (1.0 = unchanged; >1 enlarges HUD text) -- Large tier
 		/* mapPlayerUp     */ 1,      // overhead map rotation: 0=north-up, 1=player-facing-up (default on for VR)
 		/* teleportDistortion */ 1,   // horizontal-stretch/vertical-compress warp on teleport (may cause nausea)
 		/* showLaserSight   */ 0,

@@ -1220,8 +1220,13 @@ bool get_weapon_display_information(
 	
 		/* Get the default width and height */
 		width= definition->idle_width;
-		height= definition->idle_height;	
+		height= definition->idle_height;
 		modify_position_for_two_weapons(player_index, *count, &width, &height);
+
+		// VR flutter baseline + default: expose the resting horizontal position and clear the fine-flutter
+		// tag for every item type (weapon/ammo/shell casing). Firing states below re-set fine_flutter.
+		data->idle_width = definition->idle_width;
+		data->fine_flutter = false;
 	
 		/* What type of item is this? */
 		if(get_weapon_data_type_for_count(player_index, *count, &type, &which_trigger, &flags))
@@ -1319,9 +1324,19 @@ bool get_weapon_display_information(
 								if(automatic_still_firing(current_player_index, which_trigger))
 								{
 									shape_index= definition->firing_shape;
-									if (definition->flags & _weapon_flutters_while_firing) 
+									if (definition->flags & _weapon_flutters_while_firing)
 									{
-										add_random_flutter(FIXED_ONE, &height, &width);
+										// VR: keep the recoil flutter but quarter its amplitude. At full scale it
+										// reads as jitter on an in-your-face in-hand model (and its vertical part
+										// leaks into the weapon-lower slide). The flat 2D sprite is unaffected.
+										// Charged-weapon shake (_weapon_charged) is a separate path and unscaled.
+										// fine_flutter tells the VR renderer to apply it as a fine 3D offset on
+										// both axes rather than leaking the vertical part into the reload slide.
+										_fixed flutter_base = FIXED_ONE;
+#if defined(__ANDROID__)
+										if (VR_IsActive()) { flutter_base = FIXED_ONE / 4; data->fine_flutter = true; }
+#endif
+										add_random_flutter(flutter_base, &height, &width);
 									}
 								} else {
 									shape_index= definition->idle_shape;
@@ -1382,7 +1397,12 @@ bool get_weapon_display_information(
 							shape_index= definition->firing_shape;
 							if (definition->flags & _weapon_flutters_while_firing)
 							{
-								add_random_flutter(FIXED_ONE, &height, &width);
+								// VR: quarter the firing flutter (see note in the _weapon_idle firing branch above).
+								_fixed flutter_base = FIXED_ONE;
+#if defined(__ANDROID__)
+								if (VR_IsActive()) { flutter_base = FIXED_ONE / 4; data->fine_flutter = true; }
+#endif
+								add_random_flutter(flutter_base, &height, &width);
 							}
 						}
 						break;

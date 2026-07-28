@@ -355,8 +355,12 @@ void OverheadMap_OGL_Class::draw_text(
 
 #if defined(__ANDROID__)
 	// VR map text tweaks: 125% larger (readable at the panel's reading distance), and annotation labels
-	// keep their ORIGIN under the map's player-up rotation while rendering the glyphs upright.
-	const float ts = VR_IsActive() ? 1.25f : 1.0f;
+	// keep their ORIGIN under the map's player-up rotation while rendering the glyphs upright. The VR
+	// "HUD Text Scale" pref (g_lua_hud_font_scale, default 1.0) rides on top of that baseline so the map
+	// title and labels enlarge together with the rest of the HUD text.
+	extern float g_lua_hud_font_scale;
+	const float hudScale = (g_lua_hud_font_scale > 0.f) ? g_lua_hud_font_scale : 1.0f;
+	const float ts = VR_IsActive() ? (1.25f * hudScale) : 1.0f;
 #else
 	const float ts = 1.0f;
 #endif
@@ -382,6 +386,12 @@ void OverheadMap_OGL_Class::draw_text(
 		glLoadIdentity();
 		glTranslatef(location.x, location.y, 0);
 	}
+
+	// Glyphs render upward from the baseline origin (top edge at y = -Ascent), so scaling about the
+	// origin grows the text above its anchor — which clips the map TITLE against the top of the map
+	// area. Push the origin down by the added ascent so the text scales about its TOP edge instead,
+	// keeping the top fixed. No-op when ts == 1 (non-VR).
+	glTranslatef(0.0f, (float)FontData.Ascent * (ts - 1.0f), 0.0f);
 
 	glScalef(ts, ts, 1.0f);
 	// Justify in the (scaled) local frame so centering matches the rendered width.

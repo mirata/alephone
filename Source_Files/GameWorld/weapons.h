@@ -105,6 +105,16 @@ struct weapon_display_information
 	// Weapon's resting vertical position (from definition); used by VR renderer to compute
 	// the reload slide-down offset relative to the weapon's actual baseline, not a hardcoded value.
 	_fixed idle_height;
+
+	// Weapon's resting horizontal position (from definition). VR pairs this with idle_height as the
+	// zero point for the in-hand recoil flutter, so the flutter's horizontal component isn't lost.
+	_fixed idle_width;
+
+	// Set only while a fluttering weapon is actively firing in VR. Tells the VR renderer to apply the
+	// engine's random flutter (baked into horizontal/vertical_position) as a FINE 3D world offset along
+	// both weapon axes, instead of leaking the vertical part into the one-sided reload slide. Leaves the
+	// charged-weapon shake (which does not set this) on its original path.
+	bool fine_flutter;
 };
 
 // SB: This needs to be accessed in lua_script.cpp

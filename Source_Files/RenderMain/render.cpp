@@ -1021,9 +1021,10 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 		const float qsy = (ps[1] - hp[1]) * W;
 		const float qz  = (ps[2] - hp[2]) * W;
 		const float rx = -qx, ry = -qz, rz = qsy;
-		const float cwx = camx + (float)(rx * cy - ry * sy);
-		const float cwy = camy + (float)(rx * sy + ry * cy);
-		const float cwz = camz + rz;
+		// Non-const: the in-hand recoil flutter (fine_flutter) nudges this anchor along the weapon axes.
+		float cwx = camx + (float)(rx * cy - ry * sy);
+		float cwy = camy + (float)(rx * sy + ry * cy);
+		float cwz = camz + rz;
 
 		// Transform stage right/up direction vectors to Marathon world space.
 		// Same mapping: (sx,sy,sz) -> (-sx,-sz,sy) then Rz(yaw)
@@ -1072,16 +1073,58 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 			const float kIdleV = float(display_data.idle_height);
 			const float kHideV = float(3 * FIXED_ONE / 2);
 			const float vpos   = float(display_data.vertical_position);
+			// Fixed(vertical_position) -> world units, using the same scale as the reload slide so a given
+			// engine delta moves the gun the same distance whether it's flutter or a genuine lower.
+			const float fixedToWorld = hh * 4.0f / (kHideV - kIdleV);
 
-			if (vpos >= kHideV) { s_lowerFrac[hand] = 1.0f; vrWeaponIdx++; continue; }  // fully stowed → hide
-			// Track the engine's lowering directly: vertical_position ramps from idle_height (weapon at
-			// the hand) up toward kHideV (holstered) during reload / weapon-switch, so descentFrac maps
-			// straight to how far below the hand to draw the gun. No per-tick decay smoothing (the old
-			// version stalled in VR: the idle bob is zeroed so vpos is perfectly constant at idle, and its
-			// decay gate `vpos != prev` then never fired, freezing the gun below the hand). The engine
-			// already ramps vertical_position smoothly, so direct tracking is smooth on its own.
-			s_lowerFrac[hand] = (vpos > kIdleV) ? (vpos - kIdleV) / (kHideV - kIdleV) : 0.0f;
-			cwz_slid = cwz - s_lowerFrac[hand] * hh * 4.0f;
+			if (display_data.fine_flutter) {
+				// In-hand recoil flutter (firing). The engine baked a small per-tick random shake into
+				// horizontal/vertical_position (quarter-amplitude in VR, and lerped between ticks). Apply it
+				// as a FINE world-space offset along BOTH weapon axes — unlike the 2D HUD we keep the
+				// horizontal component, and float world units give far finer increments than the one-sided
+				// slide. Firing is never a lowering state, so the slide stays disengaged.
+				// The flutter must NOT reuse the holster-drop scale (hh*4 is a large absolute distance, so
+				// even a small fraction of it reads as a violent shake on an in-your-face model). Peg it to a
+				// small dedicated fraction instead — tune kFlutterScale to taste.
+				const float kFlutterScale = 0.1f;
+				const float flutterToWorld = fixedToWorld * kFlutterScale;
+				const float ofv = (vpos - kIdleV) * flutterToWorld;               // +vpos = lower on 2D → -up
+				const float ofh = weapon_is_dual ? 0.0f
+				                : (float(display_data.horizontal_position) - float(display_data.idle_width)) * flutterToWorld;
+				cwx += ofh * wrx[0] - ofv * wup_mdl[0];
+				cwy += ofh * wrx[1] - ofv * wup_mdl[1];
+				cwz += ofh * wrx[2] - ofv * wup_mdl[2];
+				s_lowerFrac[hand] = 0.0f;
+				cwz_slid = cwz;
+			} else {
+				if (vpos >= kHideV) { s_lowerFrac[hand] = 1.0f; vrWeaponIdx++; continue; }  // fully stowed → hide
+				// Track the engine's lowering directly: vertical_position ramps from idle_height (weapon at
+				// the hand) up toward kHideV (holstered) during reload / weapon-switch, so descentFrac maps
+				// straight to how far below the hand to draw the gun. No per-tick decay smoothing (the old
+				// version stalled in VR: the idle bob is zeroed so vpos is perfectly constant at idle, and its
+				// decay gate `vpos != prev` then never fired, freezing the gun below the hand). The engine
+				// already ramps vertical_position smoothly, so direct tracking is smooth on its own.
+				s_lowerFrac[hand] = (vpos > kIdleV) ? (vpos - kIdleV) / (kHideV - kIdleV) : 0.0f;
+				cwz_slid = cwz - s_lowerFrac[hand] * hh * 4.0f;
+			}
+		}
+
+		// Arm-drop rotation: as the weapon lowers, pitch the whole weapon forward/down about
+		// its right axis (wrx) so it reads as the arm dropping at the wrist, not just a vertical
+		// slide. Rotate the model basis (wfwd_mdl/wup_mdl) in place about the hand anchor; the
+		// sprite quad below uses wup_mdl too, so it tilts to match. Scales with s_lowerFrac so it
+		// eases in with the descent and unwinds as the weapon rises back to idle.
+		if (s_lowerFrac[hand] > 0.0f) {
+			const float kLowerPitchDeg = 50.0f;  // max forward pitch at full descent
+			const float ang = s_lowerFrac[hand] * kLowerPitchDeg * 0.01745329252f;  // deg->rad
+			const float cs = cosf(ang), sn = sinf(ang);
+			float nf[3], nu[3];
+			for (int i = 0; i < 3; ++i) {
+				nf[i] = wfwd_mdl[i] * cs - wup_mdl[i] * sn;  // forward tilts toward -up (muzzle down)
+				nu[i] = wfwd_mdl[i] * sn + wup_mdl[i] * cs;
+			}
+			wfwd_mdl[0] = nf[0]; wfwd_mdl[1] = nf[1]; wfwd_mdl[2] = nf[2];
+			wup_mdl[0]  = nu[0]; wup_mdl[1]  = nu[1]; wup_mdl[2]  = nu[2];
 		}
 
 		// Quad corners in world space. Use wup_mdl (cross(wfwd_eff, wrx)) so the sprite
@@ -1221,6 +1264,19 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 			wup_mdl[0] = wfwd_mdl[1]*wrx[2] - wfwd_mdl[2]*wrx[1];
 			wup_mdl[1] = wfwd_mdl[2]*wrx[0] - wfwd_mdl[0]*wrx[2];
 			wup_mdl[2] = wfwd_mdl[0]*wrx[1] - wfwd_mdl[1]*wrx[0];
+			// Match the arm-drop pitch from the live path so a cached hold doesn't pop upright.
+			const float cachedLower = s_lowerFrac[s_cachedWpnHand];
+			if (cachedLower > 0.0f) {
+				const float ang = cachedLower * 50.0f * 0.01745329252f;
+				const float cs = cosf(ang), sn = sinf(ang);
+				float nf[3], nu[3];
+				for (int i = 0; i < 3; ++i) {
+					nf[i] = wfwd_mdl[i] * cs - wup_mdl[i] * sn;
+					nu[i] = wfwd_mdl[i] * sn + wup_mdl[i] * cs;
+				}
+				wfwd_mdl[0]=nf[0]; wfwd_mdl[1]=nf[1]; wfwd_mdl[2]=nf[2];
+				wup_mdl[0]=nu[0];  wup_mdl[1]=nu[1];  wup_mdl[2]=nu[2];
+			}
 			rectangle_definition rect;
 			rect.ambient_shade = (short)(s_cachedWpnAmbient * float(FIXED_ONE));
 			OGL_RenderVRWeaponModel(rect, s_cachedWpnColl, s_cachedWpnClut,
