@@ -1073,9 +1073,6 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 			const float kIdleV = float(display_data.idle_height);
 			const float kHideV = float(3 * FIXED_ONE / 2);
 			const float vpos   = float(display_data.vertical_position);
-			// Fixed(vertical_position) -> world units, using the same scale as the reload slide so a given
-			// engine delta moves the gun the same distance whether it's flutter or a genuine lower.
-			const float fixedToWorld = hh * 4.0f / (kHideV - kIdleV);
 
 			if (display_data.fine_flutter) {
 				// In-hand recoil flutter (firing). The engine baked a small per-tick random shake into
@@ -1083,14 +1080,24 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 				// as a FINE world-space offset along BOTH weapon axes — unlike the 2D HUD we keep the
 				// horizontal component, and float world units give far finer increments than the one-sided
 				// slide. Firing is never a lowering state, so the slide stays disengaged.
-				// The flutter must NOT reuse the holster-drop scale (hh*4 is a large absolute distance, so
-				// even a small fraction of it reads as a violent shake on an in-your-face model). Peg it to a
-				// small dedicated fraction instead — tune kFlutterScale to taste.
-				const float kFlutterScale = 0.1f;
-				const float flutterToWorld = fixedToWorld * kFlutterScale;
+				//
+				// Scale is DERIVED from the 2D path, not the holster drop: position_sprite_axis draws a
+				// _position_center weapon with its centre at screen_h*(vertical_position/FIXED_ONE) and a
+				// sprite height of world_h*screen_h/WORLD_ONE, so a vertical_position delta D shifts the
+				// weapon by D/FIXED_ONE of the screen — a fixed fraction of the weapon whatever its size.
+				// Mapping that same fraction onto the model's world height (2*hh) cancels world_h and leaves
+				// D * spriteScaleM * W / FIXED_ONE. This matches the 2D shake as a fraction of the gun for
+				// every weapon (the old hh*4/(kHideV-kIdleV) scale grew with sprite size, so big sprites like
+				// the assault rifle shook violently). The VR quarter-amplitude flutter then reads as ~1/4 of
+				// the 2D recoil shake, consistently.
+				const float flutterToWorld = spriteScaleM * W / float(FIXED_ONE);
 				const float ofv = (vpos - kIdleV) * flutterToWorld;               // +vpos = lower on 2D → -up
+				// The engine flutters width at 1/4 the height amplitude (>>6 vs >>4); faithful to the 2D
+				// sprite but ~1mm in VR, so it looks like pure up/down. Boost horizontal to parity so the
+				// recoil reads as a 3D shake. kHorizFlutterBoost=1 restores the native 2D ratio.
+				const float kHorizFlutterBoost = 4.0f;
 				const float ofh = weapon_is_dual ? 0.0f
-				                : (float(display_data.horizontal_position) - float(display_data.idle_width)) * flutterToWorld;
+				                : (float(display_data.horizontal_position) - float(display_data.idle_width)) * flutterToWorld * kHorizFlutterBoost;
 				cwx += ofh * wrx[0] - ofv * wup_mdl[0];
 				cwy += ofh * wrx[1] - ofv * wup_mdl[1];
 				cwz += ofh * wrx[2] - ofv * wup_mdl[2];
