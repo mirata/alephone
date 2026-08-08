@@ -24,6 +24,7 @@
 #include "Plugins.h"
 
 #include <algorithm>
+#include <set>
 
 #include "alephversion.h"
 #include "FileHandler.h"
@@ -639,8 +640,15 @@ void Plugins::enumerate() {
 	}
 #endif
 	
+	// A directory can legitimately appear more than once in data_search_path -- on Android the
+	// default-data and local-data paths both resolve to the same external app dir -- which would
+	// otherwise enumerate (and list, in the plugins dialog) every plugin twice. Scan each distinct
+	// Plugins directory only once.
+	std::set<std::string> scanned_plugin_dirs;
 	for (std::vector<DirectorySpecifier>::const_iterator it = data_search_path.begin(); it != data_search_path.end(); ++it) {
 		DirectorySpecifier path = *it + "Plugins";
+		if (!scanned_plugin_dirs.insert(path.GetPath()).second)
+			continue;
 		loader.ParseDirectory(path);
 	}
 	std::sort(m_plugins.begin(), m_plugins.end());

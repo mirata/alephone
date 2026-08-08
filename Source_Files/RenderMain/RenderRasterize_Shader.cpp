@@ -512,6 +512,10 @@ std::unique_ptr<TextureManager> RenderRasterize_Shader::setupWallTexture(const s
 	TMgr->SetupTextureMatrix();
 	
 	if (TMgr->TextureType == OGL_Txtr_Landscape && opts) {
+		// Substitute (.dds) skies are full-sphere panoramas mapped with the horizon below v=0, so the
+		// visible sky lives in the wrap region (v<0) and the v in [0,1] band is the part that mirrors
+		// high up. Flag them so landscape.frag inverts its fill: show the panorama, cap the mirrored top.
+		s->setFloat(Shader::U_LandscapeSubstitute, TMgr->IsSubstituted() ? 1.0f : 0.0f);
 		if (opts->SphereMap)
 		{
 			s->setFloat(Shader::U_OffsetX, opts->Azimuth * TWO_PI * FullCircleReciprocal);
@@ -522,7 +526,7 @@ std::unique_ptr<TextureManager> RenderRasterize_Shader::setupWallTexture(const s
 			double HorizScale = double(1 << opts->HorizExp);
 			s->setFloat(Shader::U_ScaleX, HorizScale * (npotTextures ? 1.0 : TexScale) * Radian2Circle);
 			s->setFloat(Shader::U_OffsetX, HorizScale * (0.25 + opts->Azimuth * FullCircleReciprocal));
-			
+
 			short AdjustedVertExp = opts->VertExp + opts->OGL_AspRatExp;
 			double VertScale = (AdjustedVertExp >= 0) ? double(1 << AdjustedVertExp)
 		                       : 1/double(1 << (-AdjustedVertExp));

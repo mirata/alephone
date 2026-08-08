@@ -1374,7 +1374,7 @@ void TextureManager::PlaceTexture(const ImageDescriptor *Image, bool normal_map)
 				glCompressedTexImage2DARB(GL_TEXTURE_2D, 0, internalFormat, Image->GetWidth(), Image->GetHeight(), 0, Image->GetMipMapSize(0), Image->GetBuffer());
 			}
 			break;
-			
+
 		default:
 			// Shouldn't happen
 			assert(false);
@@ -1383,7 +1383,7 @@ void TextureManager::PlaceTexture(const ImageDescriptor *Image, bool normal_map)
 		assert(false);
 #endif
 	}
-	
+
 	// Set texture-mapping features
 	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, TxtrTypeInfo.NearFilter);

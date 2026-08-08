@@ -1,6 +1,5 @@
 R"(
 
-uniform mat4 landscapeInverseMatrix;
 varying vec3 relDir;
 varying vec4 vertexColor;
 varying float cosPitch;
@@ -15,7 +14,7 @@ void main(void) {
 #ifndef DISABLE_CLIP_VERTEX
 	gl_ClipVertex = gl_ModelViewMatrix * gl_Vertex;
 #endif
-	relDir = (landscapeInverseMatrix * gl_Vertex).xyz;
+	relDir = (gl_ModelViewMatrix * gl_Vertex).xyz;
 	vertexColor = gl_Color;
 	
 	cosYaw = cos(yaw);

@@ -77,6 +77,7 @@ public:
 		U_VpY,
 		U_VpW,
 		U_VpH,
+		U_LandscapeSubstitute,
 		NUMBER_OF_UNIFORM_LOCATIONS
 	};
 

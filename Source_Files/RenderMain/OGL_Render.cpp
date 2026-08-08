@@ -3608,6 +3608,7 @@ bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3])
 #if defined(__ANDROID__)
 		g_vrStaticTime += 16.7f;
 		a1ffStaticMode(1, g_vrStaticTime);
+
 		glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 		a1ffStaticMode(0, 0.0f);
 #else

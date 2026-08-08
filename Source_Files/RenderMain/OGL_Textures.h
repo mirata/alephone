@@ -241,6 +241,7 @@ public:
 	// and whether the textures are blended rather than all-or-nothing crisp-edged
 	int GetTextureType() {return TextureType;}	
 	bool IsGlowMapped() {return IsGlowing;}
+	bool IsSubstituted() {return (TxtrOptsPtr && TxtrOptsPtr->Substitution);}
 	bool IsBlended() {return (TxtrOptsPtr->OpacityType != OGL_OpacType_Crisp);}
 	bool VoidVisible() {return (TxtrOptsPtr->VoidVisible);}
 	short NormalBlend() {return (TxtrOptsPtr->NormalBlend) + ((NormalImage.get() && NormalImage.get()->IsPremultiplied() && TxtrOptsPtr->NormalBlend < OGL_FIRST_PREMULT_ALPHA) ? OGL_FIRST_PREMULT_ALPHA : 0); }

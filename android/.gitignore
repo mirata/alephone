@@ -17,3 +17,6 @@ local.properties
 keystore.properties
 *.keystore
 *.jks
+
+# Meta Horizon Store upload secrets (per-app app-secret) — NEVER commit
+store.properties

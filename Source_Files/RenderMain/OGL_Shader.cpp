@@ -94,7 +94,8 @@ const char* Shader::_uniform_names[NUMBER_OF_UNIFORM_LOCATIONS] =
 	"vpX",
 	"vpY",
 	"vpW",
-	"vpH"
+	"vpH",
+	"landscapeSubstitute"
 };
 
 const char* Shader::_shader_names[NUMBER_OF_SHADER_TYPES] = 

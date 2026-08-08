@@ -1,0 +1,16 @@
+# Meta Horizon Store upload secrets for the three branded Quest apps.
+# COPY this file to `store.properties` (same directory) and fill in the real app-secrets.
+# `store.properties` is gitignored — the app-secrets are credentials and must NEVER be committed.
+#
+# Where to get each value:
+#   Meta Horizon Developer Dashboard -> your app -> API (App Secret).
+#   The numeric App IDs are NOT secret and are already baked into deploy-store.ps1:
+#     marathon  = 1916477862362986
+#     marathon2 = 1903718786972227
+#     infinity  = 1916480205696085
+#
+# Only the three app-secrets below are secret. Key names must match exactly.
+
+secret.marathon=CHANGE_ME
+secret.marathon2=CHANGE_ME
+secret.infinity=CHANGE_ME
