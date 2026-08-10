@@ -2737,15 +2737,13 @@ public:
 		network_table->add(latency_placer, true);
 
 		// Host this game with the VR netcode extension (full-fidelity VR strafe/aim/pose over the wire;
-		// refuses stock/legacy clients). A flat PC can host it for VR players. In the same section as
-		// "Advertise Game on Internet" and DISABLED while that is on -- the internet metaserver/dedicated
-		// servers don't understand the extended format yet, so VR is direct/local-hub only (NetGather
-		// also force-disables it then). See docs/VR_NETCODE.md.
+		// refuses stock/legacy clients). A flat PC can host it for VR players. Compatible with "Advertise
+		// Game on Internet" (that's discovery only -- joiners connect directly to us). It is ONLY
+		// incompatible with "Use Dedicated Server" (a remote hub relays the per-tick packets and can't
+		// carry the VR block), so it's disabled while that is on -- kept in lockstep by the dedicated-
+		// server toggle callback below and enforced authoritatively in NetGather. See docs/VR_NETCODE.md.
 		w_toggle *vr_netcode_w = new w_toggle(network_preferences->use_vr_netcode);
-		vr_netcode_w->set_enabled(advertise_on_metaserver_w->get_selection() == 0);
-		advertise_on_metaserver_w->set_selection_changed_callback([vr_netcode_w](w_select* w) {
-			vr_netcode_w->set_enabled(w->get_selection() == 0);
-		});
+		vr_netcode_w->set_enabled(!network_preferences->use_remote_hub);
 		// add_row (not add) for the spacer: add() fills a single cell and would leave the following
 		// dual_add pair straddling two rows with a null cell -> crash in table_placer::place().
 		network_table->add_row(new w_spacer(), true);
@@ -2948,6 +2946,9 @@ public:
 				m_useMetaserverWidget->deactivate();
 				m_useUpnpWidget->set_value(false);
 				m_useUpnpWidget->deactivate();
+				// A remote/dedicated hub can't relay the per-tick VR block -> VR netcode off + locked.
+				m_useVRNetcodeWidget->set_value(false);
+				m_useVRNetcodeWidget->deactivate();
 			}
 			else
 			{
@@ -2955,6 +2956,8 @@ public:
 #ifdef HAVE_MINIUPNPC
 				m_useUpnpWidget->activate();
 #endif
+				// Local hub -> VR netcode is available again (works with or without metaserver advertising).
+				m_useVRNetcodeWidget->activate();
 			}
 		});
 	}

@@ -853,14 +853,31 @@ static void handleCapabilitiesMessage(CapabilitiesMessage* capabilitiesMessage,
 	}
 }
 
-// Whether THIS machine runs the VR netcode extension for the current game. The gatherer/server uses
-// its own host preference; a joiner uses what the gatherer advertised (captured above). Consulted
-// once at game start by StarGameProtocol::Sync so hub, spokes and the renderer all agree. See
+// SINGLE SOURCE OF TRUTH for "may this host run the VR netcode extension?" Consulted by BOTH the
+// gatherer's kVR advertisement (NetGather) and the server's own activation (NetVRNetcodeActive) -- they
+// MUST agree, or the host activates VR while joiners stay legacy and the hub mis-parses every spoke's
+// per-tick flags (reads a VR block that isn't there) -> ticks stall, game hangs on a black screen with
+// players stuck "ready" (the 2026-08-10 metaserver-host bug).
+//
+// The only true incompatibility is a REMOTE/dedicated hub (use_remote_hub): it relays the per-tick
+// packets and can't carry the extra VR block. Merely ADVERTISING on the metaserver is fine -- that's
+// discovery only; joiners still connect DIRECTLY to us, so the wire is the same as a LAN game. So the
+// gate is host-pref-on AND local-hub; it does NOT care about advertise_on_metaserver. See
 // docs/VR_NETCODE.md.
+static bool vr_netcode_host_eligible()
+{
+	return network_preferences
+		&& network_preferences->use_vr_netcode
+		&& !network_preferences->use_remote_hub;
+}
+
+// Whether THIS machine runs the VR netcode extension for the current game. The gatherer/server uses its
+// own host eligibility; a joiner uses what the gatherer advertised (captured above). Consulted once at
+// game start by StarGameProtocol::Sync so hub, spokes and the renderer all agree. See docs/VR_NETCODE.md.
 bool NetVRNetcodeActive(bool isServer)
 {
 	if (isServer)
-		return network_preferences && network_preferences->use_vr_netcode;
+		return vr_netcode_host_eligible();
 	return sGathererAdvertisedVR;
 }
 
@@ -1484,17 +1501,14 @@ bool NetGather(
 {
         resuming_saved_game = resuming_game;
 
-	// As the gatherer, advertise the VR netcode extension only if the host preference is on -- AND never
-	// for an internet game (advertised on the metaserver, or routed through a remote dedicated server),
-	// since that infrastructure doesn't understand the extended packet format yet: a remote hub can't
-	// relay the per-tick VR blocks, and advertising would just refuse the stock clients that try to
-	// join. So VR is direct/local-hub only. Joiners read this to decide legacy vs VR, and it drives our
-	// refusal of non-VR clients. Off = a legacy game any client can join. See docs/VR_NETCODE.md.
+	// As the gatherer, advertise the VR netcode extension when we're eligible to host it (host pref on +
+	// LOCAL hub). Metaserver advertising is fine (discovery only -- joiners connect directly to us); only
+	// a remote/dedicated hub is incompatible (can't relay the per-tick VR block). Joiners read this to
+	// decide legacy vs VR, and it drives our refusal of non-VR clients. Off = a legacy game any client can
+	// join. MUST use the same predicate as NetVRNetcodeActive (see vr_netcode_host_eligible). Note: a
+	// VR game advertised publicly will refuse stock clients that try to join -- intended. See VR_NETCODE.md.
 	my_capabilities[Capabilities::kVR] =
-		(network_preferences->use_vr_netcode
-		 && !network_preferences->advertise_on_metaserver
-		 && !network_preferences->use_remote_hub)
-			? Capabilities::kVRVersion : 0;
+		vr_netcode_host_eligible() ? Capabilities::kVRVersion : 0;
 
 	NetInitializeTopology(game_data, game_data_size, player_data, player_data_size);
 	NetInitializeSessionIdentifier();
