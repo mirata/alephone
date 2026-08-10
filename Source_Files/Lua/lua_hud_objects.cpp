@@ -43,6 +43,7 @@ LUA_HUD_OBJECTS.CPP
 #include "render.h"
 #include "Image_Blitter.h"
 #include "OGL_Blitter.h"
+#include "vr_openxr.h"   // VR_IsActive / VR_Settings -> Player.vr_left_handed for lefty HUD mirroring
 #include "fades.h"
 #include "OGL_Faders.h"
 #include "Shape_Blitter.h"
@@ -334,6 +335,12 @@ static int Lua_Image_Get_Rotation(lua_State *L)
 	return 1;
 }
 
+static int Lua_Image_Get_Mirror(lua_State *L)
+{
+	lua_pushboolean(L, Lua_Image::Object(L, 1)->mirror_horizontal);
+	return 1;
+}
+
 static int Lua_Image_Get_Crop_Rect(lua_State *L)
 {
 	Lua_Image_Crop_Rect::Push(L, Lua_Image::Index(L, 1));
@@ -359,6 +366,7 @@ const luaL_Reg Lua_Image_Get[] = {
 {"unscaled_height", Lua_Image_Get_Unscaled_Height},
 {"tint_color", Lua_Image_Get_Tint},
 {"rotation", Lua_Image_Get_Rotation},
+{"mirror", Lua_Image_Get_Mirror},
 {"crop_rect", Lua_Image_Get_Crop_Rect},
 {"rescale", L_TableFunction<Lua_Image_Rescale>},
 {"draw", L_TableFunction<Lua_Image_Draw>},
@@ -380,9 +388,16 @@ static int Lua_Image_Set_Rotation(lua_State *L)
 	return 0;
 }
 
+static int Lua_Image_Set_Mirror(lua_State *L)
+{
+	Lua_Image::Object(L, 1)->mirror_horizontal = lua_toboolean(L, 2);
+	return 0;
+}
+
 const luaL_Reg Lua_Image_Set[] = {
 {"tint_color", Lua_Image_Set_Tint},
 {"rotation", Lua_Image_Set_Rotation},
+{"mirror", Lua_Image_Set_Mirror},
 {0, 0}
 };
 
@@ -1330,10 +1345,13 @@ int16 Lua_HUDPlayer_Weapon_Trigger::WeaponIndex(lua_State *L, int index)
 
 static int Lua_HUDPlayer_Weapon_Trigger_Get_Rounds(lua_State *L)
 {
-	short rounds = get_player_weapon_ammo_count(
-                                                current_player_index, 
-                                                Lua_HUDPlayer_Weapon_Trigger::WeaponIndex(L, 1),
-                                                Lua_HUDPlayer_Weapon_Trigger::Index(L, 1));
+	int16 weapon_index = Lua_HUDPlayer_Weapon_Trigger::WeaponIndex(L, 1);
+	// The trigger's screen position (bullet_display) stays put; only the round COUNT is swapped for a
+	// left-handed VR player dual-wielding, so each readout matches the hand holding that gun. Identity
+	// for everyone else. See vr_hud_display_trigger.
+	short count_trigger = vr_hud_display_trigger(current_player_index, weapon_index,
+	                                             Lua_HUDPlayer_Weapon_Trigger::Index(L, 1));
+	short rounds = get_player_weapon_ammo_count(current_player_index, weapon_index, count_trigger);
 	lua_pushnumber(L, rounds);
 	return 1;
 }
@@ -1360,8 +1378,13 @@ static int Lua_HUDPlayer_Weapon_Trigger_Get_Ammo_Type(lua_State *L)
 
 static int Lua_HUDPlayer_Weapon_Trigger_Get_Weapon_Drawn(lua_State *L)
 {
+	// NOTE: intentionally NOT mirrored for lefty VR dual-wield (unlike .rounds). On the shipped HUDs
+	// weapon_drawn only selects the ACTIVE vs IDLE version of a single COMBINED dual-weapon sprite
+	// (img.dualPistol / img.dualPistolIdle) that already depicts both guns -- there is no left/right
+	// slot to swap. Driving that shared image off the opposite trigger just corrupts the active/idle
+	// state (a lone pistol read as an idle second gun -> "both drawn"). Report the true state.
 	bool t = get_player_weapon_drawn(
-                                      current_player_index, 
+                                      current_player_index,
                                       Lua_HUDPlayer_Weapon_Trigger::WeaponIndex(L, 1),
                                       Lua_HUDPlayer_Weapon_Trigger::Index(L, 1));
 	lua_pushboolean(L, t);
@@ -2161,6 +2184,15 @@ static int Lua_HUDPlayer_Get_Run_Key(lua_State* L)
 	return 1;
 }
 
+// True only when running in VR with left-handed dominance selected. HUDs use this to horizontally
+// mirror hand-specific art (e.g. flip the pistol graphic so it reads for the left hand). False on
+// desktop and for right-handers.
+static int Lua_HUDPlayer_Get_VR_Left_Handed(lua_State* L)
+{
+	lua_pushboolean(L, VR_IsActive() && VR_Settings()->dominantHand == 1);
+	return 1;
+}
+
 const luaL_Reg Lua_HUDPlayer_Get[] = {
 {"color", Lua_HUDPlayer_Get_Color},
 {"dead", Lua_HUDPlayer_Get_Dead},
@@ -2184,6 +2216,7 @@ const luaL_Reg Lua_HUDPlayer_Get[] = {
 {"texture_palette", Lua_HUDPlayer_Get_Texture_Palette},
 {"respawn_duration", Lua_HUDPlayer_Get_Respawn_Duration},
 {"run_key", Lua_HUDPlayer_Get_Run_Key},
+{"vr_left_handed", Lua_HUDPlayer_Get_VR_Left_Handed},
 {0, 0}
 };
 

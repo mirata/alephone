@@ -1057,10 +1057,36 @@ short get_player_weapon_ammo_count(
 		case NONE:
 		default:
 			rounds_loaded = NONE;
-			break;		
+			break;
 	}
-	
+
 	return rounds_loaded;
+}
+
+// VR HUD helper (display only -- never call from gameplay/firing). A two-fisted weapon's two guns are
+// rendered one per hand: primary -> dominant hand, secondary -> off hand (see render_vr_weapon_sprites_3d).
+// The HUD's two ammo readouts sit at FIXED screen positions laid out for a right-hander (primary on the
+// side of the dominant/right hand). For a LEFT-handed VR player that mapping is mirrored -- the gun in
+// the left hand is the primary, but its ammo would show on the right -- which is exactly the confusion a
+// lefty reports with dual pistols/shotguns. So, only for a left-handed VR player holding a genuinely
+// dual-wielded (BOTH guns in hand) two-fisted weapon, swap which trigger each readout reads its ROUNDS
+// from, so each count lines up with the hand actually holding that gun. The single-gun case is left
+// alone on purpose: the HUD's single-vs-dual ART is item-count driven, and a lone gun's readout is
+// unambiguous, so mirroring there added confusion (see the reverted weapon_drawn attempt 2026-08-10).
+// Everyone else (right-handers, non-VR) is unaffected.
+short vr_hud_display_trigger(
+	short player_index,
+	short which_weapon,
+	short which_trigger)
+{
+	if (!VR_IsActive() || VR_Settings()->dominantHand != 1) return which_trigger;  // 1 = left-handed
+	if (which_weapon < 0 || which_weapon >= short(NUMBER_OF_WEAPONS)) return which_trigger;
+	struct weapon_definition *definition = get_weapon_definition(which_weapon);
+	if (definition->weapon_class != _twofisted_pistol_class) return which_trigger;
+	// Only when both guns are actually held -- a lone gun keeps its natural readout position.
+	struct player_data *player = get_player_data(player_index);
+	if (player->items[definition->item_type] < 2) return which_trigger;
+	return (which_trigger == _primary_weapon) ? _secondary_weapon : _primary_weapon;
 }
 
 short get_player_weapon_ammo_maximum(

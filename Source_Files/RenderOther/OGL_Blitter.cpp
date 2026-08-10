@@ -236,12 +236,22 @@ void OGL_Blitter::Draw(const Image_Rect& dst, const Image_Rect& raw_src)
 	GLdouble y_scale = dst.h / (GLdouble) src.h;
 	
 	bool rotating = (rotation > 0.1 || rotation < -0.1);
-	if (rotating)
+	// Horizontal mirror (VR lefty HUD): flip about the destination centre. Composited via the same
+	// modelview push as rotation so it works regardless of the image's internal tiling. Winding is
+	// reversed by the -1 x-scale, so drop back-face culling for the flipped draw.
+	bool mirroring = mirror_horizontal;
+	if (rotating || mirroring)
 	{
 		glMatrixMode(GL_MODELVIEW);
 		glPushMatrix();
 		glTranslatef((dst.x + dst.w/2.0), (dst.y + dst.h/2.0), 0.0);
-		glRotatef(rotation, 0.0, 0.0, 1.0);
+		if (rotating)
+			glRotatef(rotation, 0.0, 0.0, 1.0);
+		if (mirroring)
+		{
+			glDisable(GL_CULL_FACE);
+			glScalef(-1.0, 1.0, 1.0);
+		}
 		glTranslatef(-(dst.x + dst.w/2.0), -(dst.y + dst.h/2.0), 0.0);
 	}
 	
@@ -276,7 +286,7 @@ void OGL_Blitter::Draw(const Image_Rect& dst, const Image_Rect& raw_src)
 							   VMin, UMin, VMax, UMax);
 	}
 	
-	if (rotating)
+	if (rotating || mirroring)
 		glPopMatrix();
 	glPopAttrib();
 }

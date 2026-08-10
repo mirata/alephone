@@ -24,17 +24,29 @@
 // Pistol-style one-handers (magnum, fusion pistol) don't read well two-handed, so this keeps them
 // single-handed even when the hands are close.
 //
+// <two_handed_offset> rotates a weapon's MODEL and AIM (together) while the two-handed grip is
+// engaged, to correct grips that don't lie along the barrel. Two independent Euler angles, degrees:
+//   pitch  tilts the muzzle up(+)/down(-) — e.g. the pistol reads best pointing ~30 up two-handed.
+//   yaw    swings the muzzle sideways — e.g. the flamethrower's second handle sits 90 to the side,
+//          so the inter-hand vector is 90 off the barrel and must be yawed back onto it.
+// The yaw (the horizontal offset) is AUTO-MIRRORED for left-handed players, because the model is
+// X-flipped and the off-hand handle ends up on the opposite side. Pitch is symmetric and never
+// flips. If the sign points the wrong way on your model, just negate the value in MML.
+//
 // Attributes (all elements use name OR index to identify the weapon):
 //   name="pistol"          engine weapon name string (see mapping in .cpp)
 //   index="N"              engine weapon-type constant (0=fist, 1=pistol, 3=assault_rifle, ...)
-//   fwd_offset="0.08"      (vr_casing)  metres forward along weapon aim direction (default 0)
-//   scale="0.5"            (vr_spread)  spread multiplier applied in VR (default 1.0)
+//   fwd_offset="0.08"      (vr_casing)        metres forward along weapon aim direction (default 0)
+//   scale="0.5"            (vr_spread)        spread multiplier applied in VR (default 1.0)
+//   pitch="30" yaw="0"     (two_handed_offset) degrees (default 0); see above
 //
 // Example:
 //   <vr_weapons>
 //     <left_handed_weapon name="missile_launcher"/>
 //     <vr_casing name="assault_rifle" fwd_offset="0.08"/>
 //     <vr_spread name="pistol" scale="0.5"/>
+//     <two_handed_offset name="pistol" pitch="30"/>
+//     <two_handed_offset name="flamethrower" yaw="90"/>
 //   </vr_weapons>
 void reset_mml_vr_weapons();
 void parse_mml_vr_weapons(const InfoTree& root);
@@ -50,3 +62,8 @@ float VR_GetWeaponCasingFwdOffset(short weapon_type);
 
 // Returns the VR spread multiplier for weapon_type (1.0 if not configured in MML).
 float VR_GetWeaponSpreadScale(short weapon_type);
+
+// Writes the two-handed model/aim angle offset for weapon_type (degrees) into *pitch/*yaw.
+// Both are set to 0 when the weapon has no <two_handed_offset> entry. The caller pushes these to
+// the VR layer every frame (VR_SetTwoHandedOffset), which applies the handedness mirroring.
+void VR_GetWeaponTwoHandedOffset(short weapon_type, float* pitch_deg, float* yaw_deg);

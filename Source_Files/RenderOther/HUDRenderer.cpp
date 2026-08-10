@@ -607,12 +607,12 @@ void HUD_Class::draw_ammo_display_in_panel(short trigger_id)
 		current_weapon_data= weapon_interface_definitions+desired_weapon;
 		current_ammo_data= &current_weapon_data->ammo_data[trigger_id];
 
-		if(trigger_id==_primary_interface_ammo)
-		{
-			ammunition_count= get_player_weapon_ammo_count(current_player_index, desired_weapon, _primary_weapon);
-		} else {
-			ammunition_count= get_player_weapon_ammo_count(current_player_index, desired_weapon, _secondary_weapon);
-		}
+		// This panel sits at a fixed screen position; pick which trigger's count it shows. For a
+		// left-handed VR player dual-wielding, vr_hud_display_trigger swaps primary<->secondary so
+		// the count lines up with the hand holding that gun (identity for everyone else).
+		short count_trigger= (trigger_id==_primary_interface_ammo) ? _primary_weapon : _secondary_weapon;
+		count_trigger= vr_hud_display_trigger(current_player_index, desired_weapon, count_trigger);
+		ammunition_count= get_player_weapon_ammo_count(current_player_index, desired_weapon, count_trigger);
 		
 		/* IF we have ammo for this trigger.. */
 		if(current_ammo_data->type!=_unused_interface_data && ammunition_count!=NONE)

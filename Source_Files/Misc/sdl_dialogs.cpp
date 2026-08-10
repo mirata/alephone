@@ -35,6 +35,7 @@
 #include "sdl_dialogs.h"
 #include "sdl_fonts.h"
 #include "sdl_widgets.h"
+#include "vr_openxr.h"   // VR_DismissKeyboardField (VR on-screen keyboard "hide" key)
 
 #include "shape_descriptors.h"
 #include "screen_drawing.h"
@@ -1896,6 +1897,22 @@ void dialog::deactivate_currently_active_widget()
 	}
 }
 
+// VR on-screen keyboard "hide" key: blur the focused text field. set_active(false) stops SDL text
+// input and fires VR_KeyboardDismiss, so the keyboard hides; the field stays in the dialog and can be
+// re-focused with another tap. No-op if the active widget isn't a text entry.
+void dialog::deactivate_text_input()
+{
+	if (active_widget && active_widget->is_text_entry())
+		deactivate_currently_active_widget();
+}
+
+// C bridge for the VR keyboard (lives in RenderMain, no dialog access). Blurs the top dialog's field.
+extern "C" void VR_DismissKeyboardField(void)
+{
+	if (top_dialog)
+		top_dialog->deactivate_text_input();
+}
+
 
 /*
  *  Activate widget
@@ -2272,7 +2289,13 @@ void dialog::start(bool play_sound)
 	// Make sure nobody tries re-entrancy with us
 	assert(!done);
 
-	initial_text_input = SDL_IsTextInputActive();
+	// Remember whether text input was *inherited* from an outer context (e.g. a parent dialog with a
+	// focused text field), so finish() can restore it. Dialogs that pre-activate their own text entry
+	// in the constructor (network gather/join/lobby chat boxes) turn SDL text input on before we get
+	// here; that is self-induced, not inherited, so don't count it -- otherwise finish() would leave
+	// text input stuck on after the dialog closes, and the VR on-screen keyboard would never dismiss.
+	initial_text_input = SDL_IsTextInputActive() &&
+		!(active_widget && active_widget->is_text_entry());
 
 	// Set new active dialog
 	parent_dialog = top_dialog;

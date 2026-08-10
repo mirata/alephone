@@ -318,6 +318,9 @@ int      VR_ScreenLayerHeight(void);
 enum { VR_KB_ALPHA = 0, VR_KB_NUMERIC = 1, VR_KB_IP = 2 };
 void VR_SetKeyboardInputHint(int hint);   // a text field gained focus: show the keyboard with this layout
 void VR_KeyboardDismiss(void);            // a text field lost focus / dialog closed: hide the keyboard
+// The on-screen keyboard's "hide" key blurs the focused text field so the keyboard dismisses (and a
+// later tap on the field can bring it back). Implemented in the dialog layer, which owns widget focus.
+void VR_DismissKeyboardField(void);
 
 // Controller aim pose this frame, in STAGE space (metres, Y-up): origin (pos3) + unit forward (fwd3,
 // the controller's -Z). hand 0=left, 1=right. Returns false if the pose isn't tracked. Used to draw
@@ -336,6 +339,11 @@ void VR_SetIsDualWield(bool dual);
 // Inform the VR layer whether the current weapon opted out of two-handed grip (MML
 // <no_two_handed_weapon>, e.g. pistol/fusion pistol). When true, VR_IsTwoHandedActive() stays false.
 void VR_SetTwoHandedDisabled(bool disabled);
+// Per-weapon two-handed angle offset (degrees), pushed each frame from the render seam (0,0 for
+// weapons without an MML <two_handed_offset>). Rotates the two-handed forward returned by
+// VR_GetTwoHandedFwdStage — so BOTH the weapon model and the firing aim pick it up. pitch tilts the
+// muzzle up(+)/down(-); yaw swings it sideways and is auto-mirrored for left-handed players.
+void VR_SetTwoHandedOffset(float pitch_deg, float yaw_deg);
 // Shared head-centre reference for DISCRETE sprite-view (N/NE/E/...) selection. The stereo eye loop
 // sets it to the head-centre origin each frame so both eyes pick the same creature-rotation sprite
 // (per-eye origins otherwise straddle the 45deg view boundaries -> different sprite per eye). Pass

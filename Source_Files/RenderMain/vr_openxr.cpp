@@ -707,6 +707,8 @@ namespace {
 	bool        s_fire = false, s_altFire = false, s_action = false;
 	bool        s_isDualWield = false;
 	bool        s_twoHandedDisabled = false;   // current weapon opts out of two-handed grip (MML)
+	float       s_twoHandedPitchDeg = 0.f;     // per-weapon two-handed muzzle pitch offset (MML), degrees
+	float       s_twoHandedYawDeg   = 0.f;     // per-weapon two-handed muzzle yaw offset (MML), degrees
 	bool        s_offHandHasWeapon = true;
 	bool        s_gripAltFireEnabled = true;
 	bool        s_bBtn = false, s_xBtn = false, s_yBtn = false;
@@ -2043,6 +2045,7 @@ extern "C" bool VR_GetAimOrientStage(int hand, float right3[3], float up3[3])
 
 extern "C" void VR_SetIsDualWield(bool dual) { s_isDualWield = dual; }
 extern "C" void VR_SetTwoHandedDisabled(bool disabled) { s_twoHandedDisabled = disabled; }
+extern "C" void VR_SetTwoHandedOffset(float pitch_deg, float yaw_deg) { s_twoHandedPitchDeg = pitch_deg; s_twoHandedYawDeg = yaw_deg; }
 extern "C" void VR_SetOffHandHasWeapon(bool has) { s_offHandHasWeapon = has; }
 extern "C" void VR_SetGripAltFireEnabled(bool en) { s_gripAltFireEnabled = en; }
 
@@ -2062,6 +2065,53 @@ extern "C" bool VR_IsTwoHandedActive()
 // caused a 180 "faces backwards" flip when the dominant controller rotated past perpendicular) and no
 // separation switch. Positions come from twoHandPositions, which (matching QZD) uses the AIM-pose
 // origins. Falls back to the dominant aim forward only when the hand positions are unavailable.
+// Per-weapon two-handed angle offset (MML <two_handed_offset>). Rotates the two-handed forward by the
+// configured pitch (about the frame's right axis -> muzzle up/down) and yaw (about world-up -> sideways
+// swing), so grips that don't lie along the barrel still aim/model correctly (pistol points up, the
+// flamethrower's 90-side handle swings back onto the barrel). The yaw is mirrored for left-handed
+// players (the model is X-flipped, so the off-hand handle sits on the opposite side); pitch is
+// symmetric and never flips. Identity when both offsets are 0, so unconfigured weapons are unchanged.
+static void applyTwoHandedOffset(float fwd[3])
+{
+	if (s_twoHandedPitchDeg == 0.f && s_twoHandedYawDeg == 0.f) return;
+
+	const float d2r = 3.14159265358979f / 180.0f;
+	const float pitch = s_twoHandedPitchDeg * d2r;
+	// Left-handed: the horizontal (side) offset mirrors with the X-flipped model.
+	const float yaw   = (s_settings.dominantHand ? -s_twoHandedYawDeg : s_twoHandedYawDeg) * d2r;
+
+	auto cross = [](const float a[3], const float b[3], float o[3]) {
+		o[0]=a[1]*b[2]-a[2]*b[1]; o[1]=a[2]*b[0]-a[0]*b[2]; o[2]=a[0]*b[1]-a[1]*b[0];
+	};
+	auto norm = [](float v[3]) {
+		const float l = std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);
+		if (l > 1e-6f) { v[0]/=l; v[1]/=l; v[2]/=l; }
+	};
+	// Rotate v about unit axis k by angle (Rodrigues).
+	auto rot = [&](float v[3], const float k[3], float ang) {
+		const float c = std::cos(ang), s = std::sin(ang);
+		float kv[3]; cross(k, v, kv);
+		const float kd = (k[0]*v[0]+k[1]*v[1]+k[2]*v[2]) * (1.0f - c);
+		v[0] = v[0]*c + kv[0]*s + k[0]*kd;
+		v[1] = v[1]*c + kv[1]*s + k[1]*kd;
+		v[2] = v[2]*c + kv[2]*s + k[2]*kd;
+	};
+
+	const float up0[3] = { 0.f, 1.f, 0.f };   // stage up (Y-up)
+	float right[3]; cross(fwd, up0, right);
+	if (std::sqrt(right[0]*right[0]+right[1]*right[1]+right[2]*right[2]) < 1e-4f) {
+		// Forward ~vertical -> cross with up degenerates; fall back to stage X for a stable pitch axis.
+		right[0]=1.f; right[1]=0.f; right[2]=0.f;
+	} else {
+		norm(right);
+	}
+	// Yaw about world-up first (carry the right axis), then pitch about the (updated) right axis.
+	rot(fwd,   up0, yaw);
+	rot(right, up0, yaw);
+	rot(fwd,   right, pitch);
+	norm(fwd);
+}
+
 extern "C" bool VR_GetTwoHandedFwdStage(float fwd3[3])
 {
 	const int domHand = s_settings.dominantHand ? 0 : 1;
@@ -2073,12 +2123,15 @@ extern "C" bool VR_GetTwoHandedFwdStage(float fwd3[3])
 		const float l = std::sqrt(ih[0]*ih[0] + ih[1]*ih[1] + ih[2]*ih[2]);
 		if (l > 1e-5f) {
 			fwd3[0] = ih[0]/l; fwd3[1] = ih[1]/l; fwd3[2] = ih[2]/l;
+			applyTwoHandedOffset(fwd3);
 			return true;
 		}
 	}
 	// No usable inter-hand vector -> dominant controller's own aim forward.
 	float domPos[3];
-	return VR_GetAimPoseStage(domHand, domPos, fwd3);
+	if (!VR_GetAimPoseStage(domHand, domPos, fwd3)) return false;
+	applyTwoHandedOffset(fwd3);
+	return true;
 }
 
 // Diagnostic accessor: per-hand grip tracking state + linear speed (m/s), for logging occlusion /
@@ -2165,7 +2218,7 @@ extern "C" bool VR_HasFocus(void) { return s_sessionState == XR_SESSION_STATE_FO
 // (VR_PresentScreenLayer only runs for menu/loading frames), so this is strictly menu-time input.
 namespace {
 	enum { KB_ALPHA = 0, KB_NUMERIC = 1, KB_IP = 2 };
-	enum KbAct { KA_CHAR, KA_BKSP, KA_ENTER, KA_SHIFT, KA_SYMBOLS, KA_LEFT, KA_RIGHT, KA_SPACE };
+	enum KbAct { KA_CHAR, KA_BKSP, KA_ENTER, KA_SHIFT, KA_SYMBOLS, KA_LEFT, KA_RIGHT, KA_SPACE, KA_HIDE };
 	struct KbKey { float x, y, w, h; KbAct act; char lo, hi; const char* label; };
 
 	constexpr int kKbW = 1024, kKbH = 512;   // keyboard texture size (px)
@@ -2194,11 +2247,16 @@ namespace {
 	struct KbPtr { bool active; float u, v; int key; };
 	KbPtr s_kbPtr[2] = {};
 
-	// Visibility follows SDL's text-input state, which the dialog layer manages authoritatively across
-	// every transition: focus a text field -> SDL_StartTextInput; switch/leave a field or close the
-	// dialog (dialog::finish) -> SDL_StopTextInput. So the keyboard shows/hides in lockstep with focus
-	// without us tracking teardown ourselves. VR_SetKeyboardInputHint only picks the layout.
-	bool kbVisible() { return SDL_IsTextInputActive() == SDL_TRUE; }
+	// Visibility follows SDL's text-input state, which the dialog layer manages across every transition:
+	// focus a text field -> SDL_StartTextInput; switch/leave a field or close the dialog
+	// (dialog::finish) -> SDL_StopTextInput. VR_SetKeyboardInputHint picks the layout on focus.
+	//
+	// We AND that with an explicit focus flag as a second guard: SDL text input can be left stale by a
+	// dialog that pre-activates its own text field (network gather/join/lobby chat), and if that ever
+	// slips through, requiring BOTH signals keeps a stale flag from resurrecting the keyboard over a
+	// menu that has no focused field. s_kbFocusActive is set on focus, cleared on blur / explicit hide.
+	bool s_kbFocusActive = false;
+	bool kbVisible() { return s_kbFocusActive && SDL_IsTextInputActive() == SDL_TRUE; }
 
 	void kbAddKey(float x, float y, float w, float h, KbAct act, char lo, char hi, const char* label) {
 		if (s_kbKeyCount < (int)(sizeof s_kbKeys / sizeof s_kbKeys[0]))
@@ -2231,13 +2289,14 @@ namespace {
 			}
 			const float y4 = 4*rh;
 			kbAddKey(0.00f, y4, 0.15f, rh, KA_SYMBOLS, 0, 0, s_kbSymbols ? "ABC" : "?123");
-			kbAddKey(0.15f, y4, 0.45f, rh, KA_SPACE, ' ', ' ', "space");
+			kbAddKey(0.15f, y4, 0.15f, rh, KA_HIDE,  0, 0, "hide");
+			kbAddKey(0.30f, y4, 0.30f, rh, KA_SPACE, ' ', ' ', "space");
 			kbAddKey(0.60f, y4, 0.10f, rh, KA_CHAR, '.', '.', nullptr);
 			kbAddKey(0.70f, y4, 0.10f, rh, KA_LEFT,  0, 0, "<");
 			kbAddKey(0.80f, y4, 0.10f, rh, KA_RIGHT, 0, 0, ">");
 			kbAddKey(0.90f, y4, 0.10f, rh, KA_ENTER, 0, 0, "OK");
 		} else {
-			const float rh = 1.0f / 4.0f, cw = 0.25f;
+			const float rh = 1.0f / 5.0f, cw = 0.25f;   // 5 rows: 3 digit rows, an entry row, a hide bar
 			kbAddCharRow("123", 0*rh, rh, 0.0f, cw); kbAddKey(0.75f, 0*rh, cw, rh, KA_BKSP,  0, 0, "<-");
 			kbAddCharRow("456", 1*rh, rh, 0.0f, cw); kbAddKey(0.75f, 1*rh, cw, rh, KA_LEFT,  0, 0, "<");
 			kbAddCharRow("789", 2*rh, rh, 0.0f, cw); kbAddKey(0.75f, 2*rh, cw, rh, KA_RIGHT, 0, 0, ">");
@@ -2250,6 +2309,7 @@ namespace {
 				kbAddKey(0.00f, 3*rh, 0.75f, rh, KA_CHAR, '0', '0', nullptr);
 				kbAddKey(0.75f, 3*rh, 0.25f, rh, KA_ENTER, 0, 0, "OK");
 			}
+			kbAddKey(0.0f, 4*rh, 1.0f, rh, KA_HIDE, 0, 0, "hide keyboard");
 		}
 	}
 	void kbEnsureLayout() {
@@ -2395,6 +2455,7 @@ namespace {
 			case KA_RIGHT:   kbPushKey(SDLK_RIGHT);     break;
 			case KA_SHIFT:   s_kbShift = !s_kbShift;    break;
 			case KA_SYMBOLS: s_kbSymbols = !s_kbSymbols; s_kbShift = false; break;
+			case KA_HIDE:    VR_DismissKeyboardField();  break;   // blur the field -> keyboard hides
 		}
 	}
 	// Per-menu-frame keyboard update: place (once), ray-cast both hands, drive hover/click, and
@@ -2475,11 +2536,12 @@ namespace {
 extern "C" void VR_SetKeyboardInputHint(int hint) {
 	int m = (hint == VR_KB_NUMERIC) ? KB_NUMERIC : (hint == VR_KB_IP) ? KB_IP : KB_ALPHA;
 	if (m != s_kbMode) { s_kbMode = m; s_kbShift = false; s_kbSymbols = false; }
+	s_kbFocusActive = true;   // a text field is focused: allow the keyboard to show
 }
 
-// Retained for the widget blur hook; visibility is driven by SDL_IsTextInputActive() so this is a
-// no-op, but it documents the focus-lost transition and keeps the desktop stub symmetric.
-extern "C" void VR_KeyboardDismiss(void) {}
+// Widget blur hook (field lost focus / dialog closed). Clears the explicit focus guard so the keyboard
+// hides even if SDL's global text-input flag is momentarily left stale by the dialog layer.
+extern "C" void VR_KeyboardDismiss(void) { s_kbFocusActive = false; }
 
 extern "C" void VR_PresentScreenLayer(void)
 {
@@ -2710,6 +2772,7 @@ extern "C" bool VR_GetAimPoseStage(int, float*, float*) { return false; }
 extern "C" bool VR_GetAimOrientStage(int, float*, float*) { return false; }
 extern "C" void VR_SetIsDualWield(bool) {}
 extern "C" void VR_SetTwoHandedDisabled(bool) {}
+extern "C" void VR_SetTwoHandedOffset(float, float) {}
 extern "C" void VR_SetSpriteViewOrigin(const world_point3d*) {}
 extern "C" bool VR_GetSpriteViewOrigin(world_point3d*) { return false; }
 extern "C" void VR_SetOffHandHasWeapon(bool) {}

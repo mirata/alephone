@@ -216,6 +216,11 @@ bool weapon_type_is_marathon_1(short weapon_type);
 /* This is pinned to the maximum I think I can hold.. */
 short get_player_weapon_ammo_count(short player_index, short which_weapon, short which_trigger);
 
+/* VR HUD display-only: for a left-handed VR player dual-wielding a two-fisted weapon, maps a HUD ammo
+   readout's trigger to the one held in the matching hand (swaps primary<->secondary). Identity for
+   everyone else. Never use for gameplay/firing -- display counts only. */
+short vr_hud_display_trigger(short player_index, short which_weapon, short which_trigger);
+
 short get_player_weapon_ammo_maximum(short player_index, short which_weapon, short which_trigger);
 int16 get_player_weapon_ammo_type(short player_index, short which_weapon, short which_trigger);
 bool get_player_weapon_drawn(short player_index, short which_weapon, short which_trigger);

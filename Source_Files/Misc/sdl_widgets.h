@@ -104,6 +104,9 @@ public:
 
 	// Widget selectable?  (ZZZ change to use enabled by default)
 	virtual bool is_selectable(void) const {return enabled; /* was "true" */ }
+
+	// Does this widget accept typed text (drives SDL text input / the VR on-screen keyboard)?
+	virtual bool is_text_entry(void) const { return false; }
         
         // ZZZ: Get/set ID - see dialog::get_widget_by_id()
         short	get_identifier() const {return identifier;}
@@ -476,6 +479,8 @@ public:
 	void draw(SDL_Surface *s) const;
 	void event(SDL_Event &e);
 	void click(int, int);
+
+	bool is_text_entry(void) const { return true; }
 
 	void set_text(const char *text);
 	const char *get_text(void) {return buf;}

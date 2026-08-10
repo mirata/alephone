@@ -70,7 +70,11 @@ public:
 	// rotate the output image about the center of destination rect
 	// (in degrees clockwise)
 	float rotation;
-	
+
+	// mirror the output image horizontally about the center of the destination rect.
+	// Currently honored by the OGL blitter only (the VR HUD path); the software blitter ignores it.
+	bool mirror_horizontal = false;
+
 	// set default cropping rectangle
 	Image_Rect crop_rect;
 	

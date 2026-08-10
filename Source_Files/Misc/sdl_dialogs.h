@@ -241,6 +241,10 @@ public:
 
 	void activate_widget(widget *w);
 
+	// VR on-screen keyboard "hide" key: blur the active widget if it's a text field. Deactivating
+	// (rather than just SDL_StopTextInput) lets a later tap on the same field re-activate it.
+	void deactivate_text_input();
+
 private:
 	SDL_Surface *get_surface(void) const;
 	void update(SDL_Rect r) const;

@@ -786,6 +786,15 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 	// Pistol-style one-handers (magnum, fusion pistol) opt out of two-handed grip via MML
 	// (<no_two_handed_weapon>); keep them single-handed even when the hands come together.
 	VR_SetTwoHandedDisabled(VR_IsWeaponTwoHandedDisabled(weap_type));
+	// Per-weapon two-handed angle offset (MML <two_handed_offset>): rotates BOTH the weapon model and
+	// the firing aim while the two-handed grip is engaged, for grips that don't lie along the barrel
+	// (pistol points up; the flamethrower's side handle swings the aim back onto the barrel). Pushed
+	// every frame so a weapon with no entry resets it to 0. The VR layer mirrors the yaw for lefties.
+	{
+		float thPitch = 0.f, thYaw = 0.f;
+		VR_GetWeaponTwoHandedOffset(weap_type, &thPitch, &thYaw);
+		VR_SetTwoHandedOffset(thPitch, thYaw);
+	}
 	// Suppress grip-based secondary fire for weapons whose secondary is identical to primary.
 	VR_SetGripAltFireEnabled(weap_type != _weapon_fist && weap_type != _weapon_pistol);
 
