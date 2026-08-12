@@ -306,10 +306,18 @@ void Console::activate_input(std::function<void (const std::string&)> callback,
 void Console::deactivate_input() {
 	m_buffer.clear();
 	m_displayBuffer.clear();
-	
+
 	m_callback = nullptr;
 	m_active = false;
 	SDL_StopTextInput();
+}
+
+// C accessor for the VR renderer: vr_openxr.cpp draws the in-game console line but MUST NOT include
+// Console.h (it pulls in preferences.h -> OGL_Setup.h -> the GLES fixed-function shim, whose macros
+// would hijack that file's shader GL calls and black out VR rendering). Declared in vr_openxr.h.
+extern "C" const char* VR_GetConsoleLine(void)
+{
+	return Console::instance()->input_active() ? Console::instance()->displayBuffer().c_str() : "";
 }
 
 int Console::cursor_position() {

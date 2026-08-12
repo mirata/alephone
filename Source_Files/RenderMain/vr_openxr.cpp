@@ -34,6 +34,10 @@
 #include "sdl_fonts.h"       // font_info (on-screen keyboard label rendering)
 #include "screen_drawing.h"  // draw_text / text_width
 #include "sdl_dialogs.h"     // get_theme_font / DEFAULT_WIDGET
+// NB: do NOT #include "Console.h" here -- it drags in preferences.h -> OGL_Setup.h -> OGL_Headers.h ->
+// gl_es_compat.h, whose `#define glEnable a1es_enable` (etc.) macros would hijack this file's
+// shader-based GL calls into fixed-function emulation and BLACK-OUT all VR rendering. Get the console
+// line through the thin C accessor VR_GetConsoleLine() (declared in vr_openxr.h, defined in Console.cpp).
 
 #define A1VR_LOG(...) __android_log_print(ANDROID_LOG_INFO, "A1VR", __VA_ARGS__)
 #define XR_CHECK(call) do { XrResult _r = (call); if (XR_FAILED(_r)) A1VR_LOG("%s -> %d", #call, _r); } while (0)
@@ -705,6 +709,10 @@ namespace {
 	bool        s_stickClick[2] = {false, false};   // raw per-hand thumbstick press
 	float       s_moveX = 0, s_moveY = 0, s_turnX = 0, s_turnY = 0;   // routed (handedness/switch-sticks applied)
 	bool        s_fire = false, s_altFire = false, s_action = false;
+	// Set when the in-game console keyboard closes via its OK key (the trigger that clicked OK is still
+	// held); suppresses fire until that trigger is RELEASED, so tapping OK doesn't also shoot. Cleared in
+	// VR_BeginFrame once both triggers go low. See VR_InGameKeyboardActive.
+	bool        s_kbFireLockout = false;
 	bool        s_isDualWield = false;
 	bool        s_twoHandedDisabled = false;   // current weapon opts out of two-handed grip (MML)
 	float       s_twoHandedPitchDeg = 0.f;     // per-weapon two-handed muzzle pitch offset (MML), degrees
@@ -849,8 +857,10 @@ namespace {
 		const int turnIdx = VR_Settings()->switchSticks ? offIdx : domIdx;
 		s_moveX = s_stickX[moveIdx]; s_moveY = s_stickY[moveIdx];
 		s_turnX = s_stickX[turnIdx]; s_turnY = s_stickY[turnIdx];
-		s_fire    = s_trigger[domIdx] > 0.5f;
-		s_altFire = s_trigger[offIdx] > 0.5f;
+		// Clear the post-console-OK fire lockout once BOTH triggers are released (so the next real pull fires).
+		if (s_kbFireLockout && s_trigger[domIdx] <= 0.5f && s_trigger[offIdx] <= 0.5f) s_kbFireLockout = false;
+		s_fire    = (s_trigger[domIdx] > 0.5f) && !s_kbFireLockout;
+		s_altFire = (s_trigger[offIdx] > 0.5f) && !s_kbFireLockout;
 
 		XrActionStateBoolean b = { XR_TYPE_ACTION_STATE_BOOLEAN };
 		gi.action = s_actionAction;  xrGetActionStateBoolean(s_session, &gi, &b); s_action = b.currentState;
@@ -1448,9 +1458,13 @@ extern "C" void VR_GetHeadOffsetInterp(float t, float* wx, float* wy)
 	if (wx) *wx = ox;
 	if (wy) *wy = oy;
 }
-extern "C" bool VR_GetFire(void)               { return s_fire; }
+// Live lockout check (not just the s_fire latched in VR_BeginFrame): the keyboard-close that sets the
+// lockout happens LATER in the same tick (vbl's VR_InGameKeyboardActive, before it reads VR_GetFire),
+// so the latched s_fire is still the pre-lockout value on the transition frame -- re-test here.
+extern "C" bool VR_GetFire(void)               { return s_fire && !s_kbFireLockout; }
 extern "C" bool VR_GetSecondaryFire(void)
 {
+	if (s_kbFireLockout) return false;   // don't fire on the trigger that just clicked the console OK key
 	const int domIdx = s_settings.dominantHand ? 0 : 1;
 	const int offIdx = 1 - domIdx;
 	// Off-hand trigger always fires secondary. In dual-wield this fires the second weapon;
@@ -2436,6 +2450,7 @@ namespace {
 	}
 	void kbPress(int i) {
 		if (i < 0 || i >= s_kbKeyCount) return;
+		VR_PlayKeyClick();   // audible click so you can tell a key registered (esp. the in-game console)
 		const KbKey& k = s_kbKeys[i];
 		switch (k.act) {
 			case KA_CHAR: {
@@ -2529,6 +2544,104 @@ namespace {
 		glDisable(GL_BLEND);
 		glBindVertexArray(0);
 	}
+
+	// ---- in-game console placement + text strip ----
+	// The menu keyboard hangs under the (eye-level, far) menu panel -- too high/far for an in-game
+	// console. Place a small UNDRAWN virtual panel low + close in front of the head so the keyboard
+	// sits in the lower field of view within easy controller reach. Keyboard geometry then follows via
+	// kbPlace (it hangs just under this virtual panel).
+	void placeConsolePanel() {
+		float hp[3] = { s_stageFromHead.position.x, s_stageFromHead.position.y, s_stageFromHead.position.z };
+		float hf[3]; poseFwd(s_stageFromHead, hf); hf[1]=0; vnorm(hf);
+		if (hf[0]==0 && hf[2]==0) { hf[2]=-1; }
+		const float kConD    = 0.85f;   // metres in front of the head (laser-operated, so reach is moot)
+		const float kConDrop = 0.42f;   // metres below eye level (keyboard sits in the lower FOV)
+		s_panelC[0]=hp[0]+hf[0]*kConD; s_panelC[1]=hp[1]-kConDrop; s_panelC[2]=hp[2]+hf[2]*kConD;
+		s_panelN[0]=-hf[0]; s_panelN[1]=0; s_panelN[2]=-hf[2];      // vertical, faces the head
+		const float up[3]={0,1,0};
+		vcross(up, s_panelN, s_panelR); vnorm(s_panelR);
+		vcross(s_panelN, s_panelR, s_panelU); vnorm(s_panelU);
+		// Match the menu keyboard's APPARENT size so the console keyboard doesn't feel smaller than the
+		// one in Preferences: the menu panel is (0.5*screenHeightM) tall * aspect wide at screenDistanceM;
+		// reproduce that angular half-width at our distance kConD. Scales with the screenHeightM pref.
+		const float menuHalfW = 0.5f * s_settings.screenHeightM * (float)kScreenW / (float)kScreenH;
+		s_panelHalfW = menuHalfW * (kConD / s_settings.screenDistanceM);
+		s_panelHalfH = 0.05f;   // keyboard top hangs just below this (undrawn) panel centre
+		s_panelPlaced = true;
+	}
+
+	// A thin world-locked strip that shows the console line (Console::displayBuffer). Drawn VERTICAL
+	// (panel basis, NOT the keyboard's reclined basis) directly above the keyboard's top edge, so it
+	// stays put with the keyboard instead of following the head like the HUD.
+	// Smaller texture width => the fixed-size theme font is MAGNIFIED more when the strip is stretched to
+	// its world width (font world size = font_px * 2*s_conHalfW / kConW), i.e. the console line reads a lot
+	// bigger than the keyboard key labels. kConW must still fit a typical line (proportional font ~9px/char
+	// => ~55 chars at 512); longer lines clip on the right.
+	constexpr int kConW = 512, kConH = 72;
+	GLuint       s_conTex  = 0;
+	SDL_Surface* s_conSurf = nullptr;
+	float        s_conHalfW = 0.40f, s_conHalfH = 0.05f;
+
+	void conRebuild() {
+		if (!s_conSurf) s_conSurf = SDL_CreateRGBSurfaceWithFormat(0, kConW, kConH, 32, SDL_PIXELFORMAT_ABGR8888);
+		if (!s_conSurf) return;
+		SDL_PixelFormat* fmt = s_conSurf->format;
+		uint16 style = 0;
+		font_info* font = get_theme_font(DEFAULT_WIDGET, style);
+		SDL_FillRect(s_conSurf, nullptr, SDL_MapRGBA(fmt, 18, 20, 26, 220));
+		const char* text = VR_GetConsoleLine();
+		if (font && text[0]) {
+			int ty = (kConH + font->get_ascent() - font->get_descent()) / 2;
+			draw_text(s_conSurf, text, 12, ty, SDL_MapRGB(fmt, 235, 236, 242), font, style);
+		}
+		if (!s_conTex) {
+			glGenTextures(1, &s_conTex);
+			glBindTexture(GL_TEXTURE_2D, s_conTex);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kConW, kConH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		}
+		glBindTexture(GL_TEXTURE_2D, s_conTex);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+		const int pitch = s_conSurf->pitch;                 // flip rows (GL bottom-origin), like kbRebuild
+		static unsigned char* flip = nullptr; static int flipCap = 0;
+		if (flipCap < pitch*kConH) { free(flip); flip = (unsigned char*)malloc((size_t)pitch*kConH); flipCap = pitch*kConH; }
+		if (flip) {
+			const unsigned char* src = (const unsigned char*)s_conSurf->pixels;
+			for (int y=0; y<kConH; ++y) memcpy(flip+(size_t)y*pitch, src+(size_t)(kConH-1-y)*pitch, pitch);
+			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kConW, kConH, GL_RGBA, GL_UNSIGNED_BYTE, flip);
+		} else {
+			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kConW, kConH, GL_RGBA, GL_UNSIGNED_BYTE, s_conSurf->pixels);
+		}
+		s_conHalfW = s_kbHalfW * 1.15f;   // a touch wider than the keyboard so the bigger text has room
+		s_conHalfH = s_conHalfW * (float)kConH / (float)kConW;
+	}
+
+	void conDrawEye(const float* vp) {
+		if (!s_kbPlaced || !s_conTex) return;
+		const float hw = s_conHalfW, hh = s_conHalfH;
+		float topKb[3]; for (int i=0;i<3;++i) topKb[i] = s_kbC[i] + s_kbU[i]*s_kbHalfH;   // reclined kb top edge
+		float conC[3];  for (int i=0;i<3;++i) conC[i]  = topKb[i] + s_panelU[i]*(0.05f + hh); // vertical, above it
+		float model[16] = {
+			s_panelR[0]*hw, s_panelR[1]*hw, s_panelR[2]*hw, 0,
+			s_panelU[0]*hh, s_panelU[1]*hh, s_panelU[2]*hh, 0,
+			s_panelN[0],    s_panelN[1],    s_panelN[2],    0,
+			conC[0],        conC[1],        conC[2],        1 };
+		float mvp[16]; mat_mul(mvp, vp, model);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glUseProgram(s_quadProg);
+		glUniformMatrix4fv(s_quadMVPLoc, 1, GL_FALSE, mvp);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, s_conTex);
+		glUniform1i(s_quadTexLoc, 0);
+		glBindVertexArray(s_quadVAO);
+		glDrawArrays(GL_TRIANGLES, 0, 6);
+		glDisable(GL_BLEND);
+		glBindVertexArray(0);
+	}
 }
 
 // Report which keyboard layout the focused text field wants (called by the text-entry widget on
@@ -2542,6 +2655,64 @@ extern "C" void VR_SetKeyboardInputHint(int hint) {
 // Widget blur hook (field lost focus / dialog closed). Clears the explicit focus guard so the keyboard
 // hides even if SDL's global text-input flag is momentarily left stale by the dialog layer.
 extern "C" void VR_KeyboardDismiss(void) { s_kbFocusActive = false; }
+
+// ---- In-game console keyboard --------------------------------------------------------------------
+// The menu keyboard (above) is driven + drawn by VR_PresentScreenLayer, which only runs for 2D menu
+// frames. The in-game console needs the SAME keyboard during the 3D frame, so these entry points drive
+// and draw it from the render seam (screen.cpp update, render.cpp eye loop). It reuses the whole
+// keyboard implementation, anchored to a world-locked panel (placePanel) placed in front of the head.
+namespace { bool s_inGameKb = false; bool s_conPanelPlaced = false; }
+
+extern "C" void VR_SetInGameKeyboard(bool on)
+{
+	if (on) {
+		s_inGameKb = true;
+		s_kbFocusActive = true;    // paired with the console's SDL text input -> kbVisible() true
+		s_kbMode = KB_ALPHA; s_kbShift = false; s_kbSymbols = false;
+		s_kbPlaced = false;        // re-place under a fresh anchor
+		s_conPanelPlaced = false;  // force placeConsolePanel() once, in front of the current head
+	} else {
+		s_inGameKb = false;
+		s_kbFocusActive = false;
+		s_kbPlaced = false;
+	}
+}
+
+extern "C" bool VR_InGameKeyboardActive(void)
+{
+	// Self-clear if the console dropped SDL text input (e.g. the keyboard's OK key submitted the line,
+	// or the line was entered), so callers stop suppressing game input and drawing the keyboard. If a
+	// trigger is still held (it just clicked OK), latch the fire lockout so releasing it doesn't shoot.
+	if (s_inGameKb && SDL_IsTextInputActive() != SDL_TRUE) {
+		s_inGameKb = false; s_kbFocusActive = false;
+		if (s_trigger[0] > 0.5f || s_trigger[1] > 0.5f) s_kbFireLockout = true;
+	}
+	return s_inGameKb;
+}
+
+extern "C" void VR_UpdateInGameKeyboard(void)
+{
+	if (!VR_InGameKeyboardActive() || !s_headPoseValid) return;
+	// Place the panel ONCE (own flag): s_panelPlaced gets reset every world frame by
+	// VR_MarkWorldFramePresented (for the menu re-anchor), which would otherwise re-run placeConsolePanel
+	// each frame relative to the CURRENT head -> the console strip would follow the head. s_kbPlaced isn't
+	// reset, which is why the keyboard itself stayed put but the strip (panel basis) didn't.
+	if (!s_conPanelPlaced) { placeConsolePanel(); s_conPanelPlaced = true; }
+	kbUpdate();                                // gates on kbVisible() (s_kbFocusActive && SDL text input)
+	conRebuild();                              // refresh the console text strip
+}
+
+extern "C" void VR_DrawInGameKeyboardEye(int eye)
+{
+	if (!VR_InGameKeyboardActive() || eye < 0 || eye >= kEyes) return;
+	float proj[16];
+	VR_GetEyeProjection(eye, proj, 0.05f, 50.0f);
+	float stageFromEye[16]; mat_from_pose(stageFromEye, s_stageFromEye[eye]);
+	float eyeFromStage[16]; mat_rigid_inverse(eyeFromStage, stageFromEye);
+	float vp[16]; mat_mul(vp, proj, eyeFromStage);
+	kbDrawEye(vp);
+	conDrawEye(vp);   // console text strip, vertical, above the keyboard
+}
 
 extern "C" void VR_PresentScreenLayer(void)
 {

@@ -67,6 +67,10 @@ extern "C" bool VR_GetPointerClick(void) { return false; }
 extern "C" bool VR_GetPointerGrip(void) { return false; }
 extern "C" void VR_SetKeyboardInputHint(int) {}
 extern "C" void VR_KeyboardDismiss(void) {}
+extern "C" void VR_SetInGameKeyboard(bool) {}
+extern "C" bool VR_InGameKeyboardActive(void) { return false; }
+extern "C" void VR_UpdateInGameKeyboard(void) {}
+extern "C" void VR_DrawInGameKeyboardEye(int) {}
 extern "C" bool VR_GetAimPoseStage(int, float*, float*) { return false; }
 extern "C" bool VR_GetAimOrientStage(int, float*, float*) { return false; }
 extern "C" void VR_SetIsDualWield(bool) {}

@@ -1045,6 +1045,15 @@ static const char *gamma_labels[9] = {
 	"Darkest", "Darker", "Dark", "Normal", "Light", "Really Light", "Even Lighter", "Lightest", NULL
 };
 
+// VR reuses the SHARED "Brightness" preference (screen_mode.gamma_level) -- same control as the flat
+// path. The VR renderer can't use the SDL gamma table (no window), so it honors gamma_level as a shader
+// brightness multiply instead: DEFAULT_GAMMA_LEVEL ("Normal") = 1.0 (unchanged), each step +/-0.2.
+static float vr_brightness_from_gamma(int gamma_level)
+{
+	float b = 1.0f + (gamma_level - DEFAULT_GAMMA_LEVEL) * 0.2f;
+	return b < 0.2f ? 0.2f : (b > 2.0f ? 2.0f : b);
+}
+
 static const char* renderer_labels[] = {
 	"Software", "OpenGL", NULL
 };
@@ -1108,8 +1117,6 @@ static const float vr_hud_tilt_values[] = { 27.0f, 30.0f, 33.0f, 36.0f, 39.0f };
 static const char *vr_height_adjust_labels[] = { "-20 cm", "-10 cm", "Default", "+10 cm", "+20 cm", NULL };
 static const float vr_height_adjust_values[] = { -0.20f, -0.10f, 0.0f, 0.10f, 0.20f };
 
-static const char *vr_brightness_labels[] = { "50%", "60%", "70%", "80%", "90%", "100%", NULL };
-static const float vr_brightness_values[] = { 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f };
 
 // Controller button remapping. The label at index N is the action whose VR_ACT_* value == N, so a
 // w_select's selection index IS the stored action value (no lookup needed). Order MUST match the
@@ -1117,7 +1124,9 @@ static const float vr_brightness_values[] = { 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f
 static const char *vr_action_labels[] = {
 	"None", "Primary Fire", "Secondary Fire", "Action / Use",
 	"Next Weapon", "Prev Weapon", "Run", "Toggle Map", "Recenter View",
-	"Prev Item", "Next Item", /* "Screenshot" -- promo feature disabled */ NULL
+	// Index 11 = VR_ACT_SCREENSHOT (promo feature currently inert -- kept for label/enum alignment so
+	// index 12 = VR_ACT_CONSOLE lands correctly; a null-terminated w_select list can't have gaps).
+	"Prev Item", "Next Item", "Screenshot", "Console", NULL
 };
 // The six bindable buttons, in VR_BTN_* order. The menu label per button.
 static const char *vr_button_labels[] = {
@@ -1832,8 +1841,9 @@ static void vr_dialog(void *arg)
 	table->dual_add(height_adjust_w->label("Height Adjust"), d);
 	table->dual_add(height_adjust_w, d);
 
-	w_select *brightness_w = new w_select(
-		vr_closest_index(vr_brightness_values, 6, vr->brightness), vr_brightness_labels);
+	w_select_popup *brightness_w = new w_select_popup();   // shared "Brightness" pref (gamma_level)
+	brightness_w->set_labels(build_stringvector_from_cstring_array(gamma_labels));
+	brightness_w->set_selection(graphics_preferences->screen_mode.gamma_level);
 	table->dual_add(brightness_w->label("Brightness"), d);
 	table->dual_add(brightness_w, d);
 
@@ -1861,7 +1871,8 @@ static void vr_dialog(void *arg)
 		g_lua_hud_font_scale = vr->hudTextScale;
 		vr->mapPlayerUp     = map_player_up_w->get_selection() ? 1 : 0;
 		vr->heightAdjustM   = vr_height_adjust_values[height_adjust_w->get_selection()];
-		vr->brightness      = vr_brightness_values[brightness_w->get_selection()];
+		graphics_preferences->screen_mode.gamma_level = static_cast<short>(brightness_w->get_selection());
+		vr->brightness      = vr_brightness_from_gamma(graphics_preferences->screen_mode.gamma_level);
 
 		write_preferences();
 	}
@@ -1937,6 +1948,14 @@ static void vr_graphics_dialog(void *arg)
 	table->dual_add(map_w->label("Overlay Map"), d);
 	table->dual_add(map_w, d);
 
+	// World brightness -- the one PC-graphics option that isn't fixed in VR. Surfaced here so it lives
+	// with the graphics settings (also present in the VR comfort dialog). Binds to VR_Settings().
+	w_select_popup *brightness_w = new w_select_popup();   // shared "Brightness" pref (gamma_level)
+	brightness_w->set_labels(build_stringvector_from_cstring_array(gamma_labels));
+	brightness_w->set_selection(graphics_preferences->screen_mode.gamma_level);
+	table->dual_add(brightness_w->label("Brightness"), d);
+	table->dual_add(brightness_w, d);
+
 	placer->add(table, true);
 	placer->add(new w_spacer(), true);
 	placer->dual_add(new w_button("RENDERING OPTIONS", vr_rendering_options, &d), d);
@@ -1979,6 +1998,15 @@ static void vr_graphics_dialog(void *arg)
 			change_screen_mode(&graphics_preferences->screen_mode, true);
 			clear_screen(true);
 			if (parent) { parent->layout(); parent->draw(); }
+		}
+
+		// VR world brightness -- persisted independently (renderer reads VR_Settings() live), so it
+		// doesn't force the heavy graphics/MML reload above.
+		short gamma = static_cast<short>(brightness_w->get_selection());
+		if (gamma != graphics_preferences->screen_mode.gamma_level) {
+			graphics_preferences->screen_mode.gamma_level = gamma;
+			VR_Settings()->brightness = vr_brightness_from_gamma(gamma);
+			write_preferences();
 		}
 	}
 }
@@ -5733,7 +5761,9 @@ void parse_vr_preferences(InfoTree root, std::string version)
 	root.read_attr("height_adjust_m", vr->heightAdjustM);
 	root.read_attr("snap_turn", vr->snapTurn);
 	root.read_attr("turn_degrees", vr->turnDegrees);
-	root.read_attr("brightness", vr->brightness);
+	// VR brightness is DERIVED from the shared "Brightness" pref (screen_mode.gamma_level, read above),
+	// not a separate value -- one brightness setting for both the flat and VR paths.
+	vr->brightness = vr_brightness_from_gamma(graphics_preferences->screen_mode.gamma_level);
 	root.read_attr("room_scale", vr->roomScale);
 	root.read_attr("dominant_hand", vr->dominantHand);
 	root.read_attr("switch_sticks", vr->switchSticks);

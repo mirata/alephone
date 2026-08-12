@@ -456,6 +456,21 @@ void initialize_application(void)
 		data_search_path.push_back(local_data_dir);
 	}
 
+	// De-duplicate the search path (keep first occurrence). On Android the default-data dir and the
+	// local-data dir resolve to the SAME external files directory, so it lands in the list twice -- which
+	// made every file appear TWICE in the environment file choosers (solo scripts, maps, ...) and could
+	// double-load base MML/plugins. The kept-first order preserves the earlier dsp_insert/delete markers.
+	{
+		std::vector<DirectorySpecifier> unique_paths;
+		for (const auto& dir : data_search_path) {
+			bool dup = false;
+			for (const auto& seen : unique_paths)
+				if (std::string(seen.GetPath()) == dir.GetPath()) { dup = true; break; }
+			if (!dup) unique_paths.push_back(dir);
+		}
+		data_search_path.swap(unique_paths);
+	}
+
 	// Setup resource manager
 	initialize_resources();
 
@@ -694,6 +709,13 @@ bool network_game_quit_confirm(void)
 	return d.run() == 0;
 }
 
+// UI click for the VR on-screen keyboard (keypress feedback). Kept here (not in vr_openxr.cpp) so the
+// VR renderer needn't include the interface/sound headers. See VR_PlayKeyClick decl in vr_openxr.h.
+extern "C" void VR_PlayKeyClick(void)
+{
+	PlayInterfaceButtonSound(Sound_ButtonSuccess());
+}
+
 // ZZZ: moved level-numbers widget into sdl_widgets for a wider audience.
 
 const int32 AllPlayableLevels = _single_player_entry_point | _multiplayer_carnage_entry_point | _multiplayer_cooperative_entry_point | _kill_the_man_with_the_ball_entry_point | _king_of_hill_entry_point | _rugby_entry_point | _capture_the_flag_entry_point;
@@ -801,6 +823,38 @@ void main_event_loop(void)
 			// Quit menu item: pauses, shows the "quit without saving?" dialog, resumes or closes).
 			if (VR_TakeMenuButton() && game_state == _game_in_progress) {
 				do_menu_item_command(mGame, iQuitGame, false);
+			}
+
+			// Bound console button (VR_ACT_CONSOLE) -> toggle the in-game console + on-screen keyboard.
+			// Mirrors the desktop _key_activate_console behaviour (chat in netgames, Lua console in solo),
+			// and shows/hides our floating VR keyboard alongside it. Press again to dismiss both.
+			{
+				static bool s_vrConsolePrev = false;
+				const bool consoleBtn = (game_state == _game_in_progress) && VR_ActionHeld(VR_ACT_CONSOLE);
+				if (consoleBtn && !s_vrConsolePrev) {
+					if (Console::instance()->input_active()) {
+						Console::instance()->abort();          // cancel -> stops SDL text input
+						VR_SetInGameKeyboard(false);
+					} else {
+						bool opened = false;
+						if (game_is_networked) {
+#if !defined(DISABLE_NETWORKING)
+							Console::instance()->activate_input(InGameChatCallbacks::SendChatMessage, InGameChatCallbacks::prompt());
+							opened = true;
+#endif
+						} else if (Console::instance()->use_lua_console()) {
+							Console::instance()->activate_input(ExecuteLuaString, ">");
+							opened = true;
+						}
+						if (opened) {
+							VR_SetInGameKeyboard(true);        // sets layout + focus, places the keyboard
+							PlayInterfaceButtonSound(Sound_ButtonSuccess());
+						} else {
+							PlayInterfaceButtonSound(Sound_ButtonFailure());
+						}
+					}
+				}
+				s_vrConsolePrev = consoleBtn;
 			}
 		}
 #endif

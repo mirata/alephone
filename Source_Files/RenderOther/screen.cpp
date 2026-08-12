@@ -1779,6 +1779,9 @@ void render_screen(short ticks_elapsed)
 			OGL_PushVRHudTextProjection(VR_HudLayerWidth(), VR_HudLayerHeight(), kVRMsgOffsetX, kVRMsgOffsetY);
 			DisplayMessages(world_pixels);
 			OGL_PopVRHudTextProjection();
+			// NOTE: the console input line is NOT drawn here -- in VR it's a world-locked strip anchored
+			// above the keyboard (vr_openxr.cpp conDrawEye), so it stays put with the keyboard rather than
+			// following the head like these messages.
 		}
 
 		// Map overlay: when the player has the map open, render it into the map FBO.

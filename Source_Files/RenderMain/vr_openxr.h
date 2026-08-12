@@ -50,6 +50,7 @@ enum {
 	VR_ACT_INVENTORY_PREV,   // scroll the inventory panel back one item
 	VR_ACT_INVENTORY_NEXT,   // scroll the inventory panel forward one item
 	VR_ACT_SCREENSHOT,       // capture a clean single-eye screenshot to the Screenshots folder
+	VR_ACT_CONSOLE,          // toggle the in-game console (+ the on-screen keyboard) for chat / lua commands
 	VR_ACT_COUNT
 };
 
@@ -318,6 +319,23 @@ int      VR_ScreenLayerHeight(void);
 enum { VR_KB_ALPHA = 0, VR_KB_NUMERIC = 1, VR_KB_IP = 2 };
 void VR_SetKeyboardInputHint(int hint);   // a text field gained focus: show the keyboard with this layout
 void VR_KeyboardDismiss(void);            // a text field lost focus / dialog closed: hide the keyboard
+
+// ---- In-game console keyboard (VR) ----
+// Unlike the menu keyboard (drawn by VR_PresentScreenLayer, anchored to the world-locked menu panel),
+// the in-game console keyboard must be driven + drawn during the 3D frame. Toggled with the bound
+// VR_ACT_CONSOLE button (shell.cpp): on -> place a world-locked anchor in front of the head so the
+// keyboard machinery has a panel to hang under. Update once per 3D frame; draw in the per-eye loop.
+void VR_SetInGameKeyboard(bool on);       // console opened/closed in-game: show/hide the floating keyboard
+bool VR_InGameKeyboardActive(void);       // true while the in-game keyboard is up (SDL text input still on)
+void VR_UpdateInGameKeyboard(void);       // per-3D-frame: place/hover/click (call before render_view)
+void VR_DrawInGameKeyboardEye(int eye);   // per-eye: composite the keyboard into eye `eye` (in the eye loop)
+// Current console display line ("" if the console isn't open). Defined in Console.cpp so vr_openxr.cpp
+// can render the console text strip WITHOUT including Console.h (which would pull the GLES shim in and
+// break VR rendering -- see the note at the top of vr_openxr.cpp).
+const char* VR_GetConsoleLine(void);
+// Play the UI click sound (keyboard keypress feedback). Defined in shell.cpp so vr_openxr.cpp needn't
+// include the sound/interface headers (same shim-include hazard as VR_GetConsoleLine).
+void VR_PlayKeyClick(void);
 // The on-screen keyboard's "hide" key blurs the focused text field so the keyboard dismisses (and a
 // later tap on the field can bring it back). Implemented in the dialog layer, which owns widget focus.
 void VR_DismissKeyboardField(void);

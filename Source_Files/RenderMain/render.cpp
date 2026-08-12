@@ -1541,6 +1541,9 @@ void render_view(
 					// eyes, so a creature near a 45deg view boundary doesn't show a different sprite per
 					// eye (get_object_shape_and_transfer_mode consults it). Cleared after the loop.
 					VR_SetSpriteViewOrigin(&base_origin);
+					// In-game console keyboard: place/hover/click once (this frame's head + controller
+					// poses are latched by VR_BeginFrame above), then each eye draws it below.
+					VR_UpdateInGameKeyboard();
 					for (int eye = 0; eye < 2; ++eye)
 					{
 						// render_flags is a global flat array; the outer build_render_tree call
@@ -1596,6 +1599,7 @@ void render_view(
 						RasPtr->End();
 						VR_PresentHudEye(eye);
 						VR_PresentMapEye(eye);
+						VR_DrawInGameKeyboardEye(eye);   // console keyboard (world-locked), over everything
 						// VR screenshot promo feature DISABLED. Was: capture ONE eye's fully-composited
 						// framebuffer to a clean PNG when VR_TakeScreenshotIfRequested(). Uncomment (with
 						// the trigger/binding sites) to re-enable. See [[promo-temp-changes]].

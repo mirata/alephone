@@ -1350,7 +1350,11 @@ uint32 parse_keymap(void)
 			//     on/off flag with a DELIBERATE-push deadzone (there is no analog-strafe wire channel,
 			//     so incidental off-axis drift of a forward push mustn't fire a full-speed sidestep).
 			float netAnalogForward = 0.0f;   // NETPLAY ONLY -- encoded into ABSOLUTE_POSITION further down
-			if (game_is_networked)
+			// While the in-game console keyboard is up, freeze locomotion/turn/fire so the trigger clicks
+			// keys (not fires) and the world-locked keyboard doesn't swing out of view. The console button
+			// (VR_ACT_CONSOLE, shell.cpp) still toggles it closed.
+			const bool kbActive = VR_InGameKeyboardActive();
+			if (!kbActive && game_is_networked)
 			{
 				float analogStrafe = 0;
 				VR_GetAnalogMove(&analogStrafe, &netAnalogForward);
@@ -1387,7 +1391,7 @@ uint32 parse_keymap(void)
 				if (headStrafeWU < -kHeadStrafeWU) flags |= _sidestepping_left;
 				else if (headStrafeWU > kHeadStrafeWU) flags |= _sidestepping_right;
 			}
-			else
+			else if (!kbActive)
 			{
 				float mx = 0, my = 0;
 				VR_GetMove(&mx, &my);
@@ -1397,15 +1401,16 @@ uint32 parse_keymap(void)
 				if (mx < -dead) flags |= _sidestepping_left;
 				else if (mx >  dead) flags |= _sidestepping_right;
 			}
-			VR_UpdateTurn(tx, 1.0f / 30.0f);   // ~TICKS_PER_SECOND; no continuous _turning_* flags
+			if (!kbActive) VR_UpdateTurn(tx, 1.0f / 30.0f);   // ~TICKS_PER_SECOND; no continuous _turning_* flags
 			// Fire always comes from the triggers; the button map can ADD extra fire buttons on top.
-			if (VR_GetFire()          || VR_ActionHeld(VR_ACT_PRIMARY_FIRE))   flags |= _left_trigger_state;
-			if (VR_GetSecondaryFire() || VR_ActionHeld(VR_ACT_SECONDARY_FIRE)) flags |= _right_trigger_state;
+			// (Suppressed while the console keyboard is up so the trigger clicks keys instead.)
+			if (!kbActive && (VR_GetFire()          || VR_ActionHeld(VR_ACT_PRIMARY_FIRE)))   flags |= _left_trigger_state;
+			if (!kbActive && (VR_GetSecondaryFire() || VR_ActionHeld(VR_ACT_SECONDARY_FIRE))) flags |= _right_trigger_state;
 			// Fist punch: when fists are equipped, thrusting a hand forward fast punches with that hand
 			// (in addition to the trigger). Dominant hand -> primary trigger, off-hand -> secondary, so
 			// dual fists punch independently along where each hand points. Gated to fists so a thrust
 			// while holding another weapon doesn't fire it.
-			if (player_weapon_is_fist(local_player_index)) {
+			if (!kbActive && player_weapon_is_fist(local_player_index)) {
 				if (VR_GetPrimaryPunch())   flags |= _left_trigger_state;
 				if (VR_GetSecondaryPunch()) flags |= _right_trigger_state;
 			}
@@ -1413,8 +1418,8 @@ uint32 parse_keymap(void)
 			// (A -> Action/Use, a stick-click -> Run by default). Run is injected as the raw
 			// _run_dont_walk flag BEFORE the run/walk-toggle post-processing below, so it honors the
 			// _inputmod_run_key_toggle pref (toggle vs hold) exactly like the keyboard run key.
-			if (VR_ActionHeld(VR_ACT_ACTION_USE)) flags |= _action_trigger_state;
-			if (VR_ActionHeld(VR_ACT_RUN))        flags |= _run_dont_walk;
+			if (!kbActive && VR_ActionHeld(VR_ACT_ACTION_USE)) flags |= _action_trigger_state;
+			if (!kbActive && VR_ActionHeld(VR_ACT_RUN))        flags |= _run_dont_walk;
 			// NETPLAY forward speed: encode the analog magnitude into action_flags' ABSOLUTE_POSITION
 			// field (netAnalogForward is nonzero only in the networked branch above), so the speed
 			// travels over the wire and every client -- including a stock kStar-6 peer, which already
@@ -1439,6 +1444,8 @@ uint32 parse_keymap(void)
 			// detected here (tick-aligned) off VR_ActionHeld so a press = one event regardless of which
 			// button (or how many) is bound to it. In-game only: build_terminal_action_flags overwrites
 			// `flags` when in a terminal, and recenter is a view op, not a flag.
+			// Suppressed while the console keyboard is up (would cycle weapons / recenter the keyboard).
+			if (!kbActive)
 			{
 				static bool prevNext = false, prevPrev = false, prevMap = false, prevRc = false;
 				static bool prevInvP = false, prevInvN = false;
