@@ -1765,6 +1765,20 @@ void render_screen(short ticks_elapsed)
 				Rect dr = MakeRect(HUD_DestRect);
 				OGL_DrawHUD(dr, ticks_elapsed);
 			}
+
+			// Engine on-screen messages (screen_printf: "Game saved", oxygen warnings, chat, script
+			// text). On flat displays DisplayMessages draws these over the world; in VR the world frame
+			// is already submitted by the time it would run (and into the discarded default framebuffer),
+			// so render them HERE, into the head-locked HUD FBO, which VR_PresentHudEye composites into
+			// both eyes. OGL_Push/PopVRHudTextProjection points OGL_RenderText's screen projection at the
+			// FBO's pixel space for the draw. The surface arg is only used by the software path.
+			// The offsets nudge the messages from the FBO top-left (out of view) down+right into the
+			// visible lower-centre of the head-locked HUD. Tunable -- adjust to taste on device.
+			const int kVRMsgOffsetX = 220;   // FBO px right (FBO = VR_HudLayerWidth() = 1280 wide)
+			const int kVRMsgOffsetY = 340;   // FBO px down  (FBO = VR_HudLayerHeight() = 1024 tall)
+			OGL_PushVRHudTextProjection(VR_HudLayerWidth(), VR_HudLayerHeight(), kVRMsgOffsetX, kVRMsgOffsetY);
+			DisplayMessages(world_pixels);
+			OGL_PopVRHudTextProjection();
 		}
 
 		// Map overlay: when the player has the map open, render it into the map FBO.

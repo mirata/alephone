@@ -122,6 +122,13 @@ bool OGL_RenderText(short BaseX, short BaseY, const char *Text, unsigned char r 
 // Render cursor for Lua/chat console
 bool OGL_RenderTextCursor(const SDL_Rect& rect, unsigned char r = 0xff, unsigned char g = 0xff, unsigned char b = 0xff);
 
+// VR: bracket a screen-text draw (OGL_RenderText via DisplayMessages) that targets the head-locked HUD
+// FBO instead of the screen, so engine messages ("Game saved", etc.) show in VR. Point the cached
+// screen projection at the FBO's pixel space (top-left origin) then restore it. Caller binds the FBO +
+// sets its viewport. See screen.cpp's VR HUD-layer block.
+void OGL_PushVRHudTextProjection(int width, int height, int offsetX, int offsetY);
+void OGL_PopVRHudTextProjection(void);
+
 // Render rectangles (set color beforehand)
 void OGL_RenderRect(float x, float y, float w, float h);
 void OGL_RenderRect(const SDL_Rect& rect);

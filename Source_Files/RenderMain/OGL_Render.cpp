@@ -836,6 +836,39 @@ bool OGL_SetWindow(Rect &ScreenBounds, Rect &ViewBounds, bool UseBackBuffer)
 	return true;
 }
 
+// --- VR: screen-text projection for the head-locked HUD FBO ---------------------------------------
+// The engine's on-screen messages (screen_printf: "Game saved", oxygen warnings, chat, ...) draw via
+// OGL_RenderText, which uses the cached Screen_2_Clip (Projection_Screen). In VR the world frame is
+// already submitted by the time those run, so we instead render them INTO the head-locked HUD FBO
+// (composited by VR_PresentHudEye). These helpers point Screen_2_Clip at that FBO's pixel space for the
+// duration of that draw, then restore it -- WITHOUT disturbing the world ViewWidth/ViewHeight/saved
+// bounds (so they're safe to bracket a HUD-FBO text pass mid-frame; unlike OGL_SetWindow). The caller
+// must have the FBO bound and its viewport set. Screen coords are top-left origin (y down), matching
+// the desktop message overlay.
+static GLdouble Saved_Screen_2_Clip_VRHud[16];
+void OGL_PushVRHudTextProjection(int width, int height, int offsetX, int offsetY)
+{
+	if (!OGL_IsActive()) return;
+	memcpy(Saved_Screen_2_Clip_VRHud, Screen_2_Clip, sizeof(Screen_2_Clip));
+	glMatrixMode(GL_PROJECTION);
+	glPushMatrix();
+	glLoadIdentity();
+	// Shift the screen origin to (offsetX, offsetY) in FBO pixels so the messages (which position
+	// themselves near the top-left) land in the visible lower-centre of the head-locked HUD dashboard
+	// instead of the FBO's top-left corner (which sits above/left of the comfortable field of view).
+	// offsetX>0 moves right, offsetY>0 moves down.
+	glOrtho(-offsetX, width - offsetX, height - offsetY, -offsetY, -1, 1);
+	glGetDoublev(GL_PROJECTION_MATRIX, Screen_2_Clip);
+	glPopMatrix();
+	ProjectionType = Projection_NONE;   // force SetProjectionType(Projection_Screen) to reload the matrix
+}
+void OGL_PopVRHudTextProjection()
+{
+	if (!OGL_IsActive()) return;
+	memcpy(Screen_2_Clip, Saved_Screen_2_Clip_VRHud, sizeof(Screen_2_Clip));
+	ProjectionType = Projection_NONE;   // next screen-projection user reloads the restored matrix
+}
+
 
 bool OGL_StartMain()
 {
@@ -3106,7 +3139,29 @@ bool OGL_TextWidth(const char* Text, int count, int& width)
 bool OGL_RenderText(short BaseX, short BaseY, const char *Text, unsigned char r, unsigned char g, unsigned char b)
 {
 	if (!OGL_IsActive()) return false;
-	
+
+#ifdef __ANDROID__
+	// GLES has no display lists (glGenLists/glNewList/glCallList are shim no-ops), and
+	// FontSpecifier::OGL_Render draws each glyph IMMEDIATELY at the current modelview position. The
+	// desktop record-into-a-list-then-replay-at-(BaseX,BaseY) approach below therefore draws the glyphs
+	// once, at the wrong time (before the projection/position are set) and never at the target -- so
+	// engine text never appeared on Quest. Here we set the screen projection + target position FIRST,
+	// then draw the glyphs directly: a black drop shadow, then the foreground colour.
+	SetProjectionType(Projection_Screen);
+	glMatrixMode(GL_MODELVIEW);
+	glPushMatrix();
+	glLoadIdentity();
+	glTranslatef(BaseX + 1.0f, BaseY + 1.0f, 0.0f);
+	glColor3f(0.0f, 0.0f, 0.0f);
+	GetOnScreenFont().OGL_Render(Text);
+	glLoadIdentity();
+	glTranslatef((float)BaseX, (float)BaseY, 0.0f);
+	SglColor3f(r/255.0f, g/255.0f, b/255.0f);
+	GetOnScreenFont().OGL_Render(Text);
+	glPopMatrix();
+	return true;
+#endif
+
 	// Create display list for the current text string;
 	// use the "standard" text-font display list (display lists can be nested)
 	GLuint TextDisplayList;
