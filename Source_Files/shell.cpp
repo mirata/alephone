@@ -662,6 +662,38 @@ bool quit_without_saving(void)
 	return d.run() == 0;
 }
 
+// VR netgame quit confirmation. Same YES/NO dialog as quit_without_saving(), but a netgame can't be
+// paused for a modal dialog the way single-player is: if the main loop stops calling update_world() the
+// star protocol stalls and every player lags/drops. So we pump update_world() from the dialog's idle
+// callback, keeping the network heartbeat alive (send/receive action flags, advance the sim) while the
+// prompt is up. We deliberately do NOT render_screen() here -- in VR the live world frame and the 2D
+// dialog panel compete for the single compositor frame each tick (see MainScreenSwap), so re-rendering
+// the world would hide the panel. The world therefore freezes visually behind the prompt while the sim
+// keeps advancing; confirming quits, cancelling resumes the live view. Added for the Quest port, where
+// the left-hand menu button is easy to hit by accident (e.g. while dead / awaiting respawn) and used to
+// drop out of the netgame with no warning at all.
+bool network_game_quit_confirm(void)
+{
+	dialog d;
+	vertical_placer *placer = new vertical_placer;
+	placer->dual_add (new w_static_text("Are you sure you wish to"), d);
+	placer->dual_add (new w_static_text("cancel the game in progress?"), d);
+	placer->add (new w_spacer(), true);
+
+	horizontal_placer *button_placer = new horizontal_placer;
+	w_button *default_button = new w_button("YES", dialog_ok, &d);
+	button_placer->dual_add (default_button, d);
+	button_placer->dual_add (new w_button("NO", dialog_cancel, &d), d);
+	d.activate_widget(default_button);
+	placer->add(button_placer, true);
+	d.set_widget_placer(placer);
+
+	// Netgame heartbeat: keep the world/network advancing while the modal prompt blocks the main loop.
+	d.set_processing_function([](dialog* /*dlg*/) { update_world(); });
+
+	return d.run() == 0;
+}
+
 // ZZZ: moved level-numbers widget into sdl_widgets for a wider audience.
 
 const int32 AllPlayableLevels = _single_player_entry_point | _multiplayer_carnage_entry_point | _multiplayer_cooperative_entry_point | _kill_the_man_with_the_ball_entry_point | _king_of_hill_entry_point | _rugby_entry_point | _capture_the_flag_entry_point;

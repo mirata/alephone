@@ -188,6 +188,7 @@ const short max_handled_recording= RECORDING_VERSION_ALEPH_ONE_1_11;
 #include "OGL_Render.h"
 #include "OGL_Blitter.h"
 #include "alephversion.h"
+#include "vr_openxr.h"   // VR_IsActive -> VR netgame quit-confirm prompt
 
 // To tell it to stop playing,
 // and also to run the end-game script
@@ -1381,9 +1382,28 @@ void do_menu_item_command(
 								}
 								break;
 							
+							case _network_player:
+#if defined(__ANDROID__)
+								// VR (Quest): the left-hand menu button is easy to hit by accident (often
+								// while dead / awaiting respawn) and would otherwise drop you from the
+								// netgame with no warning. Show the same YES/NO prompt as single-player,
+								// but keep the netgame ticking (network_game_quit_confirm pumps update_world
+								// so we don't stall/drop). Desktop netgames keep the original instant quit.
+								if (VR_IsActive())
+								{
+									pause_game();
+									show_cursor();
+									really_wants_to_quit= network_game_quit_confirm();
+									hide_cursor();
+									resume_game();
+									break;
+								}
+#endif
+								really_wants_to_quit= true;
+								break;
+
 							case _demo:
 							case _replay:
-							case _network_player:
 								really_wants_to_quit= true;
 								break;
 								

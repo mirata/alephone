@@ -392,6 +392,11 @@ void handle_save_game(void);
 bool handle_start_game(void);
 bool quit_without_saving(void);
 
+// Netgame variant of the quit-confirmation prompt (VR). Same YES/NO dialog as quit_without_saving(),
+// but pumps update_world() from its idle callback so the network keeps ticking while it's up (a modal
+// dialog that stopped the main loop would stall/drop the netgame). Returns true if the player confirms.
+bool network_game_quit_confirm(void);
+
 /* ---------- prototypes/GAME_WINDOW.C */
 void scroll_inventory(short dy);
 

@@ -1950,22 +1950,22 @@ static void give_player_initial_items(
 		process_new_item_for_reloading(player_index, player_initial_items[loop]);
 	}
 
-	// PROMO/DEBUG (TEMPORARY -- back this out later): grant every weapon + ammo on spawn for promo
-	// screenshots / level hopping. Comment out to remove the promo behavior. See [[promo-temp-changes]].
-	for (short item_type = 0; item_type < NUMBER_OF_DEFINED_ITEMS; ++item_type)
-	{
-		const short kind = get_item_kind(item_type);
-		if (kind == _weapon || kind == _weapon_powerup)
-		{
-			if (player->items[item_type] < 2) player->items[item_type] = 2; // 2 -> dual-wieldables show both
-			process_new_item_for_reloading(player_index, item_type);
-		}
-		else if (kind == _ammunition)
-		{
-			if (player->items[item_type] < 10) player->items[item_type] = 10; // plenty of clips
-			process_new_item_for_reloading(player_index, item_type);
-		}
-	}
+	// PROMO/DEBUG (TEMPORARY): grant every weapon + ammo on spawn for promo screenshots / level hopping.
+	// DISABLED 2026-08-11 (Daniel) -- re-enable by uncommenting this block. See [[promo-temp-changes]].
+	// for (short item_type = 0; item_type < NUMBER_OF_DEFINED_ITEMS; ++item_type)
+	// {
+	// 	const short kind = get_item_kind(item_type);
+	// 	if (kind == _weapon || kind == _weapon_powerup)
+	// 	{
+	// 		if (player->items[item_type] < 2) player->items[item_type] = 2; // 2 -> dual-wieldables show both
+	// 		process_new_item_for_reloading(player_index, item_type);
+	// 	}
+	// 	else if (kind == _ammunition)
+	// 	{
+	// 		if (player->items[item_type] < 10) player->items[item_type] = 10; // plenty of clips
+	// 		process_new_item_for_reloading(player_index, item_type);
+	// 	}
+	// }
 }
 
 static void remove_dead_player_items(
