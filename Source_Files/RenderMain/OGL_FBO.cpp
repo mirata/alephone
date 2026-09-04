@@ -71,6 +71,9 @@ void FBO::activate(bool clear, GLuint fboTarget) {
 		_fboTarget = fboTarget;
 		glBindFramebufferEXT(fboTarget, _fbo);
 		glPushAttrib(GL_VIEWPORT_BIT);
+#if defined(__ANDROID__)
+		glGetIntegerv(GL_VIEWPORT, _savedViewport);
+#endif
 		glViewport(0, 0, _w, _h);
 		if (_srgb)
 			glEnable(GL_FRAMEBUFFER_SRGB_EXT);
@@ -85,6 +88,9 @@ void FBO::deactivate() {
 	if (active_chain.size() && active_chain.back() == this) {
 		active_chain.pop_back();
 		glPopAttrib();
+#if defined(__ANDROID__)
+		glViewport(_savedViewport[0], _savedViewport[1], _savedViewport[2], _savedViewport[3]);
+#endif
 		
 		GLuint prev_fbo = 0;
 		bool prev_srgb = Using_sRGB;

@@ -183,7 +183,6 @@ static void plugins_dialog(void *arg);
 static void keyboard_dialog(void *arg);
 //static void texture_options_dialog(void *arg);
 #if defined(__ANDROID__)
-static void vr_dialog(void *arg);           // "VR" button: comfort / panel / HUD / world / brightness
 static void vr_controls_dialog(void *arg);  // replaces the PC CONTROLS screen in VR
 static void vr_graphics_dialog(void *arg);  // replaces the PC GRAPHICS screen in VR (HUD + rendering only)
 static void vr_sound_dialog(void *arg);     // replaces the PC SOUND screen in VR (volumes; rest forced optimal)
@@ -257,11 +256,6 @@ void handle_preferences(void)
 	w_button *w_plugins = new w_button("PLUGINS", plugins_dialog, &d);
 	d.add(w_plugins);
 
-#if defined(__ANDROID__)
-	w_button *w_vr = new w_button("VR", vr_dialog, &d);
-	d.add(w_vr);
-#endif
-
 	w_button *w_return = new w_button("RETURN", dialog_cancel, &d);
 	d.add(w_return);
 
@@ -274,9 +268,6 @@ void handle_preferences(void)
 	placer->add(w_controls);
 	placer->add(w_environment);
 	placer->add(w_plugins);
-#if defined(__ANDROID__)
-	placer->add(w_vr);
-#endif
 	placer->add(new w_spacer, true);
 	placer->add(w_return);
 
@@ -1063,14 +1054,62 @@ static const char *bobbing_view_labels[] = {
 };
 
 #if defined(__ANDROID__)
+// In VR the three-way choice collapses to two distinct behaviours: weapon bob is forced off in VR
+// regardless of this pref (weapons.cpp anchors the weapon to the physical controller), so
+// BobbingType::none and BobbingType::weapon_only are indistinguishable here. Only whether the CAMERA
+// bobs actually differs, so offer just that. Index 0 -> no camera bob, index 1 -> camera_and_weapon.
+static const char *vr_bobbing_labels[] = { "None", "Camera", NULL };
+#endif
+
+#if defined(__ANDROID__)
 // VR options menu (Quest). w_select label/value array pairs; index into the labels maps to the value
 // at the same index. The dialog finds the closest value to the current VR_Settings() field.
 static const char *vr_hand_labels[] = { "Right", "Left", NULL };
 
 static const char *vr_turn_style_labels[] = { "Smooth", "Snap", NULL };
 
+// SNAP style: degrees rotated per stick flick.
 static const char *vr_turn_amount_labels[] = { "15\xb0", "30\xb0", "45\xb0", "60\xb0", "90\xb0", NULL };
 static const float vr_turn_amount_values[] = { 15.f, 30.f, 45.f, 60.f, 90.f };
+
+// SMOOTH style: degrees/sec at full stick deflection. Default 90\xb0/s (a 180\xb0 turn in 2 s) -- slow
+// rotation is markedly easier on the stomach than fast, and the range runs down to a very gentle 45.
+static const char *vr_turn_speed_labels[] = { "45\xb0/s", "60\xb0/s", "90\xb0/s", "120\xb0/s", "160\xb0/s", NULL };
+static const float vr_turn_speed_values[] = { 45.f, 60.f, 90.f, 120.f, 160.f };
+
+// The turning row is ONE row that means either "how far per flick" (snap) or "how fast" (smooth) --
+// switching style swaps the row's label and value list in place, so only the knob that applies is on
+// screen. A dialog lays each widget out once, from whatever it holds at layout time, so both widgets
+// below have to reserve the width of the WIDEST text they will ever show: otherwise the longer set
+// overflows its rect (leaving fragments behind when it swaps back) or the shorter set drifts away from
+// the column's right margin.
+class w_swap_label : public w_label {
+public:
+	// Construct with the widest text this label will ever hold, then set_text() freely.
+	w_swap_label(const char *widest_text) : w_label(widest_text) {}
+	void draw(SDL_Surface *s) const {
+		const int state = enabled ? (active ? ACTIVE_STATE : DEFAULT_STATE) : DISABLED_STATE;
+		const int x = rect.x + rect.w - text_width(text, font, style);   // keep it right-aligned
+		draw_text(s, text, x, rect.y + font->get_ascent() + (rect.h - font->get_line_height()) / 2,
+		          get_theme_color(LABEL_WIDGET, state, FOREGROUND_COLOR), font, style);
+	}
+};
+
+class w_swap_select : public w_select {
+public:
+	w_swap_select(size_t selection, const char **labels_now, const char **labels_alt)
+		: w_select(selection, labels_now), alt(labels_alt) {}
+	int min_width() {
+		const int mine = w_select::min_width();
+		const char **saved = labels; const size_t saved_n = num_labels;
+		labels = alt; num_labels = 0; while (alt[num_labels]) ++num_labels;
+		const int other = get_largest_label_width();
+		labels = saved; num_labels = saved_n;
+		return mine > other ? mine : other;
+	}
+private:
+	const char **alt;
+};
 
 // Aim pitch calibration (degrees added to the controller aim; negative tilts the ray DOWN toward a
 // held-gun barrel angle). Labelled down-positive for the player ("20\xb0 down" = -20\xb0 stored).
@@ -1088,8 +1127,11 @@ static const float vr_punch_strength_values[] = { 1.1f, 1.6f, 2.4f };
 static const char *vr_screen_distance_labels[] = { "1.5 m", "2.0 m", "2.5 m", "3.0 m", "4.0 m", NULL };
 static const float vr_screen_distance_values[] = { 1.5f, 2.0f, 2.5f, 3.0f, 4.0f };
 
-static const char *vr_screen_height_labels[] = { "1.5 m", "2.0 m", "2.5 m", "3.0 m", NULL };
-static const float vr_screen_height_values[] = { 1.5f, 2.0f, 2.5f, 3.0f };
+// Height of the world-locked menu/terminal panel. Described rather than dimensioned: the metre value
+// means nothing without also knowing Panel Distance, whereas "how big does it look" is the thing
+// being chosen. Medium (2.0 m) is the long-standing default.
+static const char *vr_screen_height_labels[] = { "Smallest", "Small", "Medium", "Large", "Largest", NULL };
+static const float vr_screen_height_values[] = { 1.5f, 1.75f, 2.0f, 2.5f, 3.0f };
 
 static const char *vr_hud_distance_labels[] = { "0.8 m", "1.0 m", "1.2 m", "1.5 m", NULL };
 static const float vr_hud_distance_values[] = { 0.8f, 1.0f, 1.2f, 1.5f };
@@ -1126,6 +1168,10 @@ static const char *vr_action_labels[] = {
 	"Next Weapon", "Prev Weapon", "Run", "Toggle Map", "Recenter View",
 	// Index 11 = VR_ACT_SCREENSHOT (promo feature currently inert -- kept for label/enum alignment so
 	// index 12 = VR_ACT_CONSOLE lands correctly; a null-terminated w_select list can't have gaps).
+	// "2D Offset Test" (VR_ACT_DIAG2D) is deliberately NOT offered: it arms a deliberate render-glitch
+	// repro, which is no use to a player. It is the last action, so ending the list here makes it
+	// unselectable without shifting any index -- the enum value and its shell.cpp handler are untouched,
+	// so re-add the label to bring it back.
 	"Prev Item", "Next Item", "Screenshot", "Console", NULL
 };
 // The six bindable buttons, in VR_BTN_* order. The menu label per button.
@@ -1693,28 +1739,52 @@ static void vr_controls_dialog(void *arg)
 	table->dual_add(switch_sticks_w->label("Switch Thumbsticks"), d);
 	table->dual_add(switch_sticks_w, d);
 
-	w_select *turn_style_w = new w_select(vr->snapTurn ? 1 : 0, vr_turn_style_labels);
+	const bool start_snap = vr->snapTurn != 0;
+	w_select *turn_style_w = new w_select(start_snap ? 1 : 0, vr_turn_style_labels);
 	table->dual_add(turn_style_w->label("Turning"), d);
 	table->dual_add(turn_style_w, d);
 
-	w_select *turn_amount_w = new w_select(
-		vr_closest_index(vr_turn_amount_values, 5, vr->turnDegrees), vr_turn_amount_labels);
-	table->dual_add(turn_amount_w->label("Turn Amount"), d);
-	table->dual_add(turn_amount_w, d);
+	// Snap amount / smooth speed share one row (see w_swap_label above). Each style keeps its own value
+	// while the dialog is open, so flipping back and forth doesn't lose the setting you just picked.
+	int snap_index   = vr_closest_index(vr_turn_amount_values, 5, vr->turnDegrees);
+	int smooth_index = vr_closest_index(vr_turn_speed_values, 5, vr->smoothTurnSpeed);
+	w_swap_select *turn_rate_w = new w_swap_select(
+		start_snap ? snap_index : smooth_index,
+		start_snap ? vr_turn_amount_labels : vr_turn_speed_labels,
+		start_snap ? vr_turn_speed_labels  : vr_turn_amount_labels);
+	w_swap_label *turn_rate_label = new w_swap_label("Turn Amount");   // wider of the two labels
+	turn_rate_label->associate_widget(turn_rate_w);
+	turn_rate_w->associate_label(turn_rate_label);
+	if (!start_snap) turn_rate_label->set_text("Turn Speed");
+	table->dual_add(turn_rate_label, d);
+	table->dual_add(turn_rate_w, d);
+
+	turn_style_w->set_selection_changed_callback([&, turn_rate_w, turn_rate_label](w_select *w) {
+		const bool snap = w->get_selection() != 0;
+		// stash the outgoing style's value, then swap the row over to the incoming one
+		if (snap) smooth_index = static_cast<int>(turn_rate_w->get_selection());
+		else      snap_index   = static_cast<int>(turn_rate_w->get_selection());
+		turn_rate_w->set_labels(snap ? vr_turn_amount_labels : vr_turn_speed_labels);
+		turn_rate_w->set_selection(snap ? snap_index : smooth_index);
+		turn_rate_label->set_text(snap ? "Turn Amount" : "Turn Speed");
+	});
 
 	w_select *aim_pitch_w = new w_select(
 		vr_closest_index(vr_aim_pitch_values, 11, vr->aimPitchAdjust), vr_aim_pitch_labels);
 	table->dual_add(aim_pitch_w->label("Aim Pitch"), d);
 	table->dual_add(aim_pitch_w, d);
 
-	w_toggle *laser_sight_w = new w_toggle(vr->showLaserSight != 0);
-	table->dual_add(laser_sight_w->label("Laser Sight"), d);
-	table->dual_add(laser_sight_w, d);
-
 	w_select *punch_strength_w = new w_select(
 		vr_closest_index(vr_punch_strength_values, 3, vr->punchSpeed), vr_punch_strength_labels);
 	table->dual_add(punch_strength_w->label("Punch Strength"), d);
 	table->dual_add(punch_strength_w, d);
+
+	// Sits with Aim Pitch: both calibrate the player's physical body into the game (stature here,
+	// controller pose there). Rehomed from the retired VR OPTIONS dialog.
+	w_select *height_adjust_w = new w_select(
+		vr_closest_index(vr_height_adjust_values, 5, vr->heightAdjustM), vr_height_adjust_labels);
+	table->dual_add(height_adjust_w->label("Height Adjust"), d);
+	table->dual_add(height_adjust_w, d);
 
 	table->add_row(new w_spacer(), true);
 	table->dual_add_row(new w_static_text("Button Mapping"), d);
@@ -1722,9 +1792,9 @@ static void vr_controls_dialog(void *arg)
 	w_select *btn_w[VR_BTN_COUNT];
 	for (int i = 0; i < VR_BTN_COUNT; ++i) {
 		int cur = vr->buttonAction[i];
-		// VR_ACT_SCREENSHOT (the disabled promo action) has no label, so clamp it (and anything past)
-		// to None -- covers installs that persisted button_b=Screenshot while it was enabled.
-		if (cur < 0 || cur >= VR_ACT_SCREENSHOT) cur = VR_ACT_NONE;
+		// Clamp anything outside the OFFERED range (a persisted "2D Offset Test" binding, or garbage)
+		// to None, so the widget can never index past the end of the label list.
+		if (cur < 0 || cur > VR_ACT_CONSOLE) cur = VR_ACT_NONE;
 		btn_w[i] = new w_select(cur, vr_action_labels);
 		table->dual_add(btn_w[i]->label(vr_button_labels[i]), d);
 		table->dual_add(btn_w[i], d);
@@ -1748,132 +1818,15 @@ static void vr_controls_dialog(void *arg)
 		vr->dominantHand   = hand_w->get_selection();
 		vr->switchSticks   = switch_sticks_w->get_selection() ? 1 : 0;
 		vr->snapTurn       = turn_style_w->get_selection();
-		vr->turnDegrees    = vr_turn_amount_values[turn_amount_w->get_selection()];
+		if (vr->snapTurn) snap_index   = static_cast<int>(turn_rate_w->get_selection());
+		else              smooth_index = static_cast<int>(turn_rate_w->get_selection());
+		vr->turnDegrees      = vr_turn_amount_values[snap_index];
+		vr->smoothTurnSpeed  = vr_turn_speed_values[smooth_index];
 		vr->aimPitchAdjust = vr_aim_pitch_values[aim_pitch_w->get_selection()];
-		vr->showLaserSight = laser_sight_w->get_selection() ? 1 : 0;
 		vr->punchSpeed     = vr_punch_strength_values[punch_strength_w->get_selection()];
+		vr->heightAdjustM  = vr_height_adjust_values[height_adjust_w->get_selection()];
 		for (int i = 0; i < VR_BTN_COUNT; ++i)
 			vr->buttonAction[i] = btn_w[i]->get_selection();
-		write_preferences();
-	}
-}
-
-static void vr_dialog(void *arg)
-{
-	vr_settings_t *vr = VR_Settings();
-
-	dialog d;
-	vertical_placer *placer = new vertical_placer;
-	placer->dual_add(new w_title("VR OPTIONS"), d);
-	placer->add(new w_spacer(), true);
-
-	table_placer *table = new table_placer(2, get_theme_space(ITEM_WIDGET), true);
-	table->col_flags(0, placeable::kAlignRight);
-	table->col_flags(1, placeable::kAlignLeft);
-
-	// Comfort  (input / turning / aim now live under CONTROLS -> VR CONTROLS)
-	table->dual_add_row(new w_static_text("Comfort"), d);
-
-	w_toggle *bob_w = new w_toggle(vr->disableBob != 0);
-	table->dual_add(bob_w->label("Disable View Bob"), d);
-	table->dual_add(bob_w, d);
-
-	w_toggle *teleport_distortion_w = new w_toggle(vr->teleportDistortion != 0);
-	table->dual_add(teleport_distortion_w->label("Teleport Distortion"), d);
-	table->dual_add(teleport_distortion_w, d);
-
-	table->add_row(new w_spacer(), true);
-
-	// 2D screen panel
-	table->dual_add_row(new w_static_text("Menu / Terminal Panel"), d);
-
-	w_select *screen_dist_w = new w_select(
-		vr_closest_index(vr_screen_distance_values, 5, vr->screenDistanceM), vr_screen_distance_labels);
-	table->dual_add(screen_dist_w->label("Panel Distance"), d);
-	table->dual_add(screen_dist_w, d);
-
-	w_select *screen_height_w = new w_select(
-		vr_closest_index(vr_screen_height_values, 4, vr->screenHeightM), vr_screen_height_labels);
-	table->dual_add(screen_height_w->label("Panel Size"), d);
-	table->dual_add(screen_height_w, d);
-
-	table->add_row(new w_spacer(), true);
-
-	// Head-locked HUD plane
-	table->dual_add_row(new w_static_text("HUD"), d);
-
-	w_select *hud_dist_w = new w_select(
-		vr_closest_index(vr_hud_distance_values, 4, vr->hudDistanceM), vr_hud_distance_labels);
-	table->dual_add(hud_dist_w->label("HUD Distance"), d);
-	table->dual_add(hud_dist_w, d);
-
-	w_select *hud_size_w = new w_select(
-		vr_closest_index(vr_hud_size_values, 5, vr->hudSizeM), vr_hud_size_labels);
-	table->dual_add(hud_size_w->label("HUD Size"), d);
-	table->dual_add(hud_size_w, d);
-
-	w_select *hud_text_scale_w = new w_select(
-		vr_closest_index(vr_hud_text_scale_values, 4, vr->hudTextScale), vr_hud_text_scale_labels);
-	table->dual_add(hud_text_scale_w->label("HUD Text Scale"), d);
-	table->dual_add(hud_text_scale_w, d);
-
-	w_select *hud_tilt_w = new w_select(
-		vr_closest_index(vr_hud_tilt_values, 5, vr->hudTiltDeg), vr_hud_tilt_labels);
-	table->dual_add(hud_tilt_w->label("HUD Tilt"), d);
-	table->dual_add(hud_tilt_w, d);
-
-	table->add_row(new w_spacer(), true);
-
-	// Map
-	table->dual_add_row(new w_static_text("Map"), d);
-
-	w_toggle *map_player_up_w = new w_toggle(vr->mapPlayerUp != 0);
-	table->dual_add(map_player_up_w->label("Player-Up Rotation"), d);
-	table->dual_add(map_player_up_w, d);
-
-	table->add_row(new w_spacer(), true);
-
-	// World / view
-	table->dual_add_row(new w_static_text("World"), d);
-
-	w_select *height_adjust_w = new w_select(
-		vr_closest_index(vr_height_adjust_values, 5, vr->heightAdjustM), vr_height_adjust_labels);
-	table->dual_add(height_adjust_w->label("Height Adjust"), d);
-	table->dual_add(height_adjust_w, d);
-
-	w_select_popup *brightness_w = new w_select_popup();   // shared "Brightness" pref (gamma_level)
-	brightness_w->set_labels(build_stringvector_from_cstring_array(gamma_labels));
-	brightness_w->set_selection(graphics_preferences->screen_mode.gamma_level);
-	table->dual_add(brightness_w->label("Brightness"), d);
-	table->dual_add(brightness_w, d);
-
-	placer->add(table, true);
-	placer->add(new w_spacer(), true);
-
-	horizontal_placer *button_placer = new horizontal_placer;
-	button_placer->dual_add(new w_button("ACCEPT", dialog_ok, &d), d);
-	button_placer->dual_add(new w_button("CANCEL", dialog_cancel, &d), d);
-	placer->add(button_placer, true);
-
-	d.set_widget_placer(placer);
-
-	clear_screen();
-
-	if (d.run() == 0) {	// Accepted
-		vr->disableBob           = bob_w->get_selection() ? 1 : 0;
-		vr->teleportDistortion   = teleport_distortion_w->get_selection() ? 1 : 0;
-		vr->screenDistanceM = vr_screen_distance_values[screen_dist_w->get_selection()];
-		vr->screenHeightM   = vr_screen_height_values[screen_height_w->get_selection()];
-		vr->hudDistanceM    = vr_hud_distance_values[hud_dist_w->get_selection()];
-		vr->hudSizeM        = vr_hud_size_values[hud_size_w->get_selection()];
-		vr->hudTiltDeg      = vr_hud_tilt_values[hud_tilt_w->get_selection()];
-		vr->hudTextScale    = vr_hud_text_scale_values[hud_text_scale_w->get_selection()];
-		g_lua_hud_font_scale = vr->hudTextScale;
-		vr->mapPlayerUp     = map_player_up_w->get_selection() ? 1 : 0;
-		vr->heightAdjustM   = vr_height_adjust_values[height_adjust_w->get_selection()];
-		graphics_preferences->screen_mode.gamma_level = static_cast<short>(brightness_w->get_selection());
-		vr->brightness      = vr_brightness_from_gamma(graphics_preferences->screen_mode.gamma_level);
-
 		write_preferences();
 	}
 }
@@ -1893,6 +1846,7 @@ static void vr_rendering_options(void* arg)
 // limit, gamma and view-bobbing are all fixed by the VR pipeline, so they're intentionally omitted.
 static void vr_graphics_dialog(void *arg)
 {
+	vr_settings_t *vr = VR_Settings();
 	dialog *parent = (dialog *)arg;
 	dialog d;
 	vertical_placer *placer = new vertical_placer;
@@ -1938,18 +1892,87 @@ static void vr_graphics_dialog(void *arg)
 	table->dual_add(hud_scale_w, d);
 	hud_w->add_dependent_widget(hud_scale_w);
 
-	w_select_popup *term_scale_w = new w_select_popup();
-	term_scale_w->set_labels(build_stringvector_from_cstring_array(term_scale_labels));
-	term_scale_w->set_selection(graphics_preferences->screen_mode.term_scale_level);
-	table->dual_add(term_scale_w->label("Terminal Size"), d);
-	table->dual_add(term_scale_w, d);
+	// Text scale lives with the other HUD content options rather than with the plane geometry below:
+	// it changes what the HUD says, not where it sits.
+	w_select *hud_text_scale_w = new w_select(
+		vr_closest_index(vr_hud_text_scale_values, 4, vr->hudTextScale), vr_hud_text_scale_labels);
+	table->dual_add(hud_text_scale_w->label("HUD Text Scale"), d);
+	table->dual_add(hud_text_scale_w, d);
+
+	w_toggle *laser_sight_w = new w_toggle(vr->showLaserSight != 0);
+	table->dual_add(laser_sight_w->label("Laser Sight"), d);
+	table->dual_add(laser_sight_w, d);
+
+	table->add_row(new w_spacer(), true);
+
+	// Geometry of the head-locked HUD plane. Grouped under its own heading so "Size" here reads as
+	// the plane's apparent size and can't be confused with the "HUD Size" above (which is the stock
+	// hud_scale_level, sizing the HUD graphic inside the layer).
+	table->dual_add_row(new w_static_text("HUD Panel"), d);
+
+	w_select *hud_dist_w = new w_select(
+		vr_closest_index(vr_hud_distance_values, 4, vr->hudDistanceM), vr_hud_distance_labels);
+	table->dual_add(hud_dist_w->label("Distance"), d);
+	table->dual_add(hud_dist_w, d);
+
+	w_select *hud_size_w = new w_select(
+		vr_closest_index(vr_hud_size_values, 5, vr->hudSizeM), vr_hud_size_labels);
+	table->dual_add(hud_size_w->label("Size"), d);
+	table->dual_add(hud_size_w, d);
+
+	w_select *hud_tilt_w = new w_select(
+		vr_closest_index(vr_hud_tilt_values, 5, vr->hudTiltDeg), vr_hud_tilt_labels);
+	table->dual_add(hud_tilt_w->label("Tilt"), d);
+	table->dual_add(hud_tilt_w, d);
+
+	table->add_row(new w_spacer(), true);
+
+	// Geometry of the world-locked panel the menus and terminals are drawn on. (The stock
+	// "Terminal Size" -- screen_mode.term_scale_level -- is not offered in VR: it only sizes the
+	// terminal rect INSIDE the 2D layer, so it can never exceed the panel, and its default of
+	// Largest already fills it. Panel Size is the knob that actually changes how big a terminal
+	// looks in the headset.)
+	table->dual_add_row(new w_static_text("Menu / Terminal Panel"), d);
+
+	w_select *screen_dist_w = new w_select(
+		vr_closest_index(vr_screen_distance_values, 5, vr->screenDistanceM), vr_screen_distance_labels);
+	table->dual_add(screen_dist_w->label("Distance"), d);
+	table->dual_add(screen_dist_w, d);
+
+	w_select *screen_height_w = new w_select(
+		vr_closest_index(vr_screen_height_values, 5, vr->screenHeightM), vr_screen_height_labels);
+	table->dual_add(screen_height_w->label("Size"), d);
+	table->dual_add(screen_height_w, d);
+
+	table->add_row(new w_spacer(), true);
 
 	w_toggle *map_w = new w_toggle(graphics_preferences->screen_mode.translucent_map);
 	table->dual_add(map_w->label("Overlay Map"), d);
 	table->dual_add(map_w, d);
 
-	// World brightness -- the one PC-graphics option that isn't fixed in VR. Surfaced here so it lives
-	// with the graphics settings (also present in the VR comfort dialog). Binds to VR_Settings().
+	// Sits with Overlay Map: both are "how the map reads", not VR comfort.
+	w_toggle *map_player_up_w = new w_toggle(vr->mapPlayerUp != 0);
+	table->dual_add(map_player_up_w->label("Player-Up Rotation"), d);
+	table->dual_add(map_player_up_w, d);
+
+	table->add_row(new w_spacer(), true);
+
+	// In VR this shared pref is the ONLY view-bob control (the old VR-only "Disable View Bob" toggle
+	// was folded into it). bob_index maps the 3-way pref onto the 2 behaviours VR can tell apart.
+	const int bob_index =
+		(graphics_preferences->screen_mode.bobbing_type == BobbingType::camera_and_weapon) ? 1 : 0;
+	w_select *bobbing_w = new w_select(bob_index, vr_bobbing_labels);
+	table->dual_add(bobbing_w->label("View Bobbing"), d);
+	table->dual_add(bobbing_w, d);
+
+	w_toggle *teleport_distortion_w = new w_toggle(vr->teleportDistortion != 0);
+	table->dual_add(teleport_distortion_w->label("Teleport Distortion"), d);
+	table->dual_add(teleport_distortion_w, d);
+
+	// World brightness -- the one PC-graphics option that isn't fixed in VR, so it lives with the
+	// graphics settings. This is the SHARED "Brightness" pref (screen_mode.gamma_level); VR honours
+	// it as a shader multiply via vr_brightness_from_gamma since there's no SDL gamma table to set.
+	// Sole home for it in VR -- VR OPTIONS used to carry a second widget onto the same pref.
 	w_select_popup *brightness_w = new w_select_popup();   // shared "Brightness" pref (gamma_level)
 	brightness_w->set_labels(build_stringvector_from_cstring_array(gamma_labels));
 	brightness_w->set_selection(graphics_preferences->screen_mode.gamma_level);
@@ -1984,10 +2007,37 @@ static void vr_graphics_dialog(void *arg)
 		}
 		short hud_scale = static_cast<short>(hud_scale_w->get_selection());
 		if (hud_scale != graphics_preferences->screen_mode.hud_scale_level) { graphics_preferences->screen_mode.hud_scale_level = hud_scale; changed = true; }
-		short term_scale = static_cast<short>(term_scale_w->get_selection());
-		if (term_scale != graphics_preferences->screen_mode.term_scale_level) { graphics_preferences->screen_mode.term_scale_level = term_scale; changed = true; }
 		bool translucent_map = map_w->get_selection() != 0;
 		if (translucent_map != graphics_preferences->screen_mode.translucent_map) { graphics_preferences->screen_mode.translucent_map = translucent_map; changed = true; }
+
+		// VR-side display settings moved here from the VR options dialog. These live in VR_Settings()
+		// and the renderer reads them live every frame, so they don't need the heavy MML/screen-mode
+		// reload that `changed` triggers below -- only the write_preferences() at the end.
+		vr->hudDistanceM     = vr_hud_distance_values[hud_dist_w->get_selection()];
+		vr->hudSizeM         = vr_hud_size_values[hud_size_w->get_selection()];
+		vr->hudTiltDeg       = vr_hud_tilt_values[hud_tilt_w->get_selection()];
+		vr->hudTextScale     = vr_hud_text_scale_values[hud_text_scale_w->get_selection()];
+		g_lua_hud_font_scale = vr->hudTextScale;
+		vr->showLaserSight   = laser_sight_w->get_selection() ? 1 : 0;
+		vr->mapPlayerUp      = map_player_up_w->get_selection() ? 1 : 0;
+		vr->screenDistanceM  = vr_screen_distance_values[screen_dist_w->get_selection()];
+		vr->screenHeightM    = vr_screen_height_values[screen_height_w->get_selection()];
+		vr->teleportDistortion = teleport_distortion_w->get_selection() ? 1 : 0;
+
+		// Only rewrite bobbing_type when the choice actually changed: a stored "Weapon Only" behaves
+		// exactly like "None" in VR, so leave it intact rather than silently rewriting a pref this
+		// dialog can't fully represent.
+		const int new_bob = static_cast<int>(bobbing_w->get_selection());
+		if (new_bob != bob_index) {
+			graphics_preferences->screen_mode.bobbing_type =
+				new_bob ? BobbingType::camera_and_weapon : BobbingType::none;
+			changed = true;
+		}
+
+		// Unlike the HUD plane (rebuilt from s_settings every frame), the world-locked panel bakes
+		// its distance/size in at placement time and is only re-placed after a world frame -- so at
+		// a menu these would not apply until the player started the game without this.
+		VR_InvalidatePanelPlacement();
 
 		if (changed) {
 			Plugins::instance()->invalidate();
@@ -2005,9 +2055,11 @@ static void vr_graphics_dialog(void *arg)
 		short gamma = static_cast<short>(brightness_w->get_selection());
 		if (gamma != graphics_preferences->screen_mode.gamma_level) {
 			graphics_preferences->screen_mode.gamma_level = gamma;
-			VR_Settings()->brightness = vr_brightness_from_gamma(gamma);
-			write_preferences();
+			vr->brightness = vr_brightness_from_gamma(gamma);
 		}
+		// Unconditional: gamma is decided after the `changed` block above, and when nothing
+		// `changed` nothing has written the VR display settings out yet either.
+		write_preferences();
 	}
 }
 #endif // __ANDROID__
@@ -4653,13 +4705,13 @@ InfoTree vr_preferences_tree()
 {
 	InfoTree root;
 	vr_settings_t *vr = VR_Settings();
-	root.put_attr("disable_bob", vr->disableBob);
 	root.put_attr("screen_distance_m", vr->screenDistanceM);
 	root.put_attr("screen_height_m", vr->screenHeightM);
 	root.put_attr("world_scale_wum", vr->worldScaleWUM);
 	root.put_attr("height_adjust_m", vr->heightAdjustM);
 	root.put_attr("snap_turn", vr->snapTurn);
 	root.put_attr("turn_degrees", vr->turnDegrees);
+	root.put_attr("smooth_turn_speed", vr->smoothTurnSpeed);
 	root.put_attr("brightness", vr->brightness);
 	root.put_attr("room_scale", vr->roomScale);
 	root.put_attr("dominant_hand", vr->dominantHand);
@@ -4749,7 +4801,13 @@ static void default_graphics_preferences(graphics_preferences_data *preferences)
 	preferences->screen_mode.high_resolution = true;
 	preferences->screen_mode.fullscreen = true;
 	preferences->screen_mode.fix_h_not_v = true;
+#if defined(__ANDROID__)
+	// VR: camera view-bob is nauseating when the head is the camera (and weapon bob is forced off in
+	// VR anyway), so default to no bobbing. Offered under GRAPHICS for anyone who wants it back.
+	preferences->screen_mode.bobbing_type = BobbingType::none;
+#else
 	preferences->screen_mode.bobbing_type = BobbingType::camera_and_weapon;
+#endif
 	preferences->screen_mode.bit_depth = 32;
 	
 	preferences->screen_mode.draw_every_other_line= false;
@@ -5750,7 +5808,16 @@ void parse_environment_preferences(InfoTree root, std::string version)
 void parse_vr_preferences(InfoTree root, std::string version)
 {
 	vr_settings_t *vr = VR_Settings();
-	root.read_attr("disable_bob", vr->disableBob);
+	// Migration: "Disable View Bob" used to be a VR-only toggle that overrode the shared View Bobbing
+	// pref (screen_mode.bobbing_type, read above). It is now folded into that pref. Honour a legacy
+	// disable_bob=1 once, so a headset that already has the old default persisted doesn't suddenly
+	// get camera bob back. The key is no longer written, so this self-clears on the next save.
+	{
+		int legacy_disable_bob = -1;
+		root.read_attr("disable_bob", legacy_disable_bob);
+		if (legacy_disable_bob == 1)
+			graphics_preferences->screen_mode.bobbing_type = BobbingType::none;
+	}
 	root.read_attr("screen_distance_m", vr->screenDistanceM);
 	root.read_attr("screen_height_m", vr->screenHeightM);
 	root.read_attr("world_scale_wum", vr->worldScaleWUM);
@@ -5761,6 +5828,7 @@ void parse_vr_preferences(InfoTree root, std::string version)
 	root.read_attr("height_adjust_m", vr->heightAdjustM);
 	root.read_attr("snap_turn", vr->snapTurn);
 	root.read_attr("turn_degrees", vr->turnDegrees);
+	root.read_attr("smooth_turn_speed", vr->smoothTurnSpeed);
 	// VR brightness is DERIVED from the shared "Brightness" pref (screen_mode.gamma_level, read above),
 	// not a separate value -- one brightness setting for both the flat and VR paths.
 	vr->brightness = vr_brightness_from_gamma(graphics_preferences->screen_mode.gamma_level);

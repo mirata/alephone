@@ -1293,6 +1293,15 @@ uint32_t last_input_update;
 // ABSOLUTE_POSITION forward fraction the stick uses (needs the model's maximum_forward_velocity).
 extern struct physics_constants *get_physics_constants_for_model(short physics_model, uint32 action_flags);
 
+#if defined(__ANDROID__)
+// The turn thumbstick does DOUBLE DUTY in VR: X snap/smooth turns, Y zooms the overhead map while it's
+// open. Which one a push means is decided ONCE, as the stick leaves centre, and held until it recentres
+// -- judging axis dominance every tick (the old rule) misreads the diagonal that a fast flick travels
+// through, so left/right snap turns kept stepping the map zoom. One push = one meaning.
+enum { kTurnStickIdle, kTurnStickTurn, kTurnStickZoom };
+static int s_turnStickGesture = kTurnStickIdle;
+#endif
+
 uint32 parse_keymap(void)
 {
   uint32 flags = 0;
@@ -1332,6 +1341,25 @@ uint32 parse_keymap(void)
 		{
 			float tx = 0;
 			VR_GetTurn(&tx);
+			// Classify this push (see s_turnStickGesture). Zoom is only ever a candidate while the map
+			// is actually open -- with the map closed the stick's Y does nothing, so there is nothing to
+			// cross-talk with and turning must never be latched out.
+			{
+				float ty = 0;
+				VR_GetTurnY(&ty);
+				const bool map_open = !player_in_terminal_mode(local_player_index) &&
+				                      PLAYER_HAS_MAP_OPEN(local_player) && View_MapActive();
+				const float engage = 0.5f, release = 0.25f;
+				const float mag2 = tx * tx + ty * ty;
+				if (s_turnStickGesture == kTurnStickIdle) {
+					if (mag2 > engage * engage)
+						s_turnStickGesture = (!map_open || fabsf(tx) >= fabsf(ty)) ? kTurnStickTurn
+						                                                           : kTurnStickZoom;
+				} else if (mag2 < release * release) {
+					s_turnStickGesture = kTurnStickIdle;
+				}
+				if (s_turnStickGesture == kTurnStickZoom) tx = 0.0f;   // a zoom push must not also turn
+			}
 
 			// ROOM-SCALE: latch the head's physical movement since last tick as a world-unit body delta.
 			// This is the canonical once-per-tick local-input point (parse_keymap is called once per real
@@ -1647,23 +1675,19 @@ uint32 parse_keymap(void)
 #endif
 
 #if defined(__ANDROID__)
-	  // Non-dominant stick Y zooms the overhead map in/out while the map is open.
-	  // Edge-triggered like snap-turn: fires once on the first tick the stick crosses
-	  // the threshold, then re-arms when it returns to centre.
+	  // Non-dominant stick Y zooms the overhead map in/out while the map is open -- but ONLY when the
+	  // gesture latch above classified this push as a vertical one, so a snap turn can never zoom. One
+	  // step per push; re-arms when the stick recentres (which is also when the latch clears).
 	  if (VR_IsActive() && !player_in_terminal_mode(local_player_index) &&
 	      PLAYER_HAS_MAP_OPEN(local_player) && View_MapActive()) {
 		  static bool mapZoomArmed = true;
-		  float turnY = 0; VR_GetTurnY(&turnY);
-		  float turnX = 0; VR_GetTurn(&turnX);
-		  const float kFire = 0.5f, kRelease = 0.2f;
-		  // Zoom (stick Y) and snap-turn (stick X) share one thumbstick. Only zoom on a predominantly
-		  // VERTICAL push, so a left/right snap-turn -- which has some incidental diagonal Y -- can't
-		  // inadvertently change the zoom (was firing ~90% of snap-turns).
-		  const bool verticalDominant = fabsf(turnY) > fabsf(turnX);
-		  if (mapZoomArmed) {
-			  if (verticalDominant && turnY >  kFire) { zoom_overhead_map_in();  mapZoomArmed = false; }
-			  if (verticalDominant && turnY < -kFire) { zoom_overhead_map_out(); mapZoomArmed = false; }
-		  } else if (fabsf(turnY) < kRelease) {
+		  if (s_turnStickGesture == kTurnStickZoom) {
+			  if (mapZoomArmed) {
+				  float turnY = 0; VR_GetTurnY(&turnY);
+				  if (turnY > 0) zoom_overhead_map_in(); else zoom_overhead_map_out();
+				  mapZoomArmed = false;
+			  }
+		  } else if (s_turnStickGesture == kTurnStickIdle) {
 			  mapZoomArmed = true;
 		  }
 	  }

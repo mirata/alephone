@@ -41,11 +41,54 @@ private:
 	Shader *_shader_bloom;
 	GLuint _width;
 	GLuint _height;
+#if defined(__ANDROID__)
+	// VR accumulator: the successively-blurred copies are summed here at blur resolution so the
+	// eye buffer only pays for ONE full-resolution composite instead of one per pass.
+	FBO _accum;
+#endif
+
+	// Texel step for the separable blur. The shader offsets its taps by o*step in gl_TexCoord[0]
+	// space: on desktop that is a GL_TEXTURE_RECTANGLE (pixel coords, so 1 texel == 1.0), but the
+	// GLES shim maps sampler2DRect -> sampler2D, whose coords are normalised -- an offset of 1.0
+	// there is the whole texture, which is why the VR blur was a no-op (every tap clamped to the
+	// edge). Feed it 1/size on GLES.
+	float stepX() const {
+#if defined(__ANDROID__)
+		return 1.0f / float(_width);
+#else
+		return 1.0f;
+#endif
+	}
+	float stepY() const {
+#if defined(__ANDROID__)
+		return 1.0f / float(_height);
+#else
+		return 1.0f;
+#endif
+	}
+
+	// One horizontal + one vertical Gaussian pass over the swapper's current contents.
+	void blur_pass(int i) {
+		_shader_blur->enable();
+		_shader_blur->setFloat(Shader::U_OffsetX, stepX());
+		_shader_blur->setFloat(Shader::U_OffsetY, 0);
+		_shader_blur->setFloat(Shader::U_Pass, i + 1);
+		_swapper.filter(false);
+
+		_shader_blur->setFloat(Shader::U_OffsetX, 0);
+		_shader_blur->setFloat(Shader::U_OffsetY, stepY());
+		_shader_blur->setFloat(Shader::U_Pass, i + 1);
+		_swapper.filter(false);
+	}
 
 public:
 
 	Blur(GLuint w, GLuint h, Shader* s_blur, Shader* s_bloom)
-	: _swapper(w, h, Bloom_sRGB), _shader_blur(s_blur), _shader_bloom(s_bloom), _width(w), _height(h) {}
+	: _swapper(w, h, Bloom_sRGB), _shader_blur(s_blur), _shader_bloom(s_bloom), _width(w), _height(h)
+#if defined(__ANDROID__)
+	, _accum(w, h, Bloom_sRGB)
+#endif
+	{}
 
 	GLuint width() { return _width; }
 	GLuint height() { return _height; }
@@ -67,16 +110,7 @@ public:
 
 		glBlendFunc(GL_SRC_ALPHA,GL_ONE);
 		for (int i = 0; i < passes; i++) {
-			_shader_blur->enable();
-			_shader_blur->setFloat(Shader::U_OffsetX, 1);
-			_shader_blur->setFloat(Shader::U_OffsetY, 0);
-			_shader_blur->setFloat(Shader::U_Pass, i + 1);
-			_swapper.filter(false);
-
-			_shader_blur->setFloat(Shader::U_OffsetX, 0);
-			_shader_blur->setFloat(Shader::U_OffsetY, 1);
-			_shader_blur->setFloat(Shader::U_Pass, i + 1);
-			_swapper.filter(false);
+			blur_pass(i);
 
 			_shader_bloom->enable();
 			_shader_bloom->setFloat(Shader::U_Pass, i + 1);
@@ -90,6 +124,57 @@ public:
 		
 		glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
 	}
+
+#if defined(__ANDROID__)
+	// VR variant of draw(). The flat path composites with the bloom shader, which needs the scene
+	// itself bound as texture0 -- it lives in the FBOSwapper there. In VR the scene is in the eye
+	// swapchain FBO, which cannot be sampled while it is the render target, so the glow is summed
+	// into _accum at blur resolution and then added to the eye buffer with plain additive blending.
+	// (The add happens in sRGB space rather than the flat path's linear space; visually that is a
+	// slightly hotter halo, which is the usual trade for not round-tripping the eye buffer.)
+	void draw_vr(GLuint eye_fbo, GLint eye_w, GLint eye_h) {
+		int passes = _shader_bloom->passes();
+		if (passes < 0)
+			passes = 5;
+
+		// The world-brightness multiply belongs to the kGlow world pass only. Every rewritten GLES
+		// fragment shader applies it, so leaving it on would attenuate the glow once per blur pass
+		// -- ten times over the five passes below, which at any brightness under 1.0 wipes the
+		// bloom out entirely. Pin it to 1.0 for the post-processing chain.
+		a1ffSetBrightnessNeutral(GL_TRUE);
+
+		// The composites go through the shim's built-in textured program, which applies the
+		// fixed-function texture matrix -- and the world render leaves a wall/sprite matrix in it.
+		glMatrixMode(GL_TEXTURE);
+		glPushMatrix();
+		glLoadIdentity();
+
+		_accum.activate(true);   // clears to black; nested swapper activates return here
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+		for (int i = 0; i < passes; i++) {
+			blur_pass(i);
+			Shader::disable();
+			glEnable(GL_BLEND);
+			_swapper.current_contents().draw_full(true);
+		}
+		_accum.deactivate();
+
+		// Back to the eye swapchain buffer for the single full-resolution composite. FBO::deactivate
+		// rebinds framebuffer 0 when the chain empties, which in VR is not the eye buffer.
+		glBindFramebuffer(GL_FRAMEBUFFER, eye_fbo);
+		glViewport(0, 0, eye_w, eye_h);
+		Shader::disable();
+		glActiveTextureARB(GL_TEXTURE0_ARB);
+		glEnable(GL_BLEND);
+		_accum.draw_full(true);
+
+		glMatrixMode(GL_TEXTURE);
+		glPopMatrix();
+		glMatrixMode(GL_MODELVIEW);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		a1ffSetBrightnessNeutral(GL_FALSE);
+	}
+#endif
 };
 
 
@@ -112,7 +197,14 @@ void RenderRasterize_Shader::setupGL(Rasterizer_Shader_Class& Rasterizer) {
 	blur.reset();
 	if(TEST_FLAG(Get_OGL_ConfigureData().Flags, OGL_Flag_Blur)) {
 		if(s_blur && s_bloom) {
-			blur.reset(new Blur(640., 640. * graphics_preferences->screen_mode.height / graphics_preferences->screen_mode.width, s_blur, s_bloom));
+			double blur_h = 640. * graphics_preferences->screen_mode.height / graphics_preferences->screen_mode.width;
+#if defined(__ANDROID__)
+			// In VR the target is the eye swapchain, not the window: size the blur buffer to the
+			// eye aspect or the bloom is stretched relative to the image it is added to.
+			if (VR_IsActive() && VR_EyeWidth() > 0 && VR_EyeHeight() > 0)
+				blur_h = 640. * VR_EyeHeight() / VR_EyeWidth();
+#endif
+			blur.reset(new Blur(640., blur_h, s_blur, s_bloom));
 		}
 	}
 	
@@ -224,6 +316,40 @@ void RenderRasterize_Shader::render_tree() {
 		TEST_FLAG(Get_OGL_ConfigureData().Flags, OGL_Flag_Blur) &&
 		blur.get())
 	{
+#if defined(__ANDROID__)
+		if (VR_IsActive())
+		{
+			// VR bypasses the FBOSwapper entirely (Rasterizer_Shader_Class::Begin renders straight
+			// into the eye swapchain FBO), so the flat path's swapper deactivate/blend/activate
+			// dance composited the bloom into a buffer nothing ever presents AND left that buffer
+			// bound -- which is why the VR weapons, reticle and gizmos (drawn after render_tree)
+			// disappeared as soon as bloom was enabled. Composite onto the eye buffer instead and
+			// leave it bound.
+			const GLuint eye_fbo = VR_CurrentEyeFramebuffer();
+			blur->begin();
+			// landscape_bloom.frag reconstructs the view ray per pixel from gl_FragCoord, so it has
+			// to be told the framebuffer it is actually rasterising into. SetView published the EYE
+			// viewport, but the glow pass renders into the (much smaller) blur buffer -- leaving the
+			// eye's dimensions in place makes the sky glow sample a squashed corner of the sky that
+			// drifts at the wrong rate as you turn your head. The next eye's SetView restores these.
+			{
+				Shader* lb = Shader::get(Shader::S_LandscapeBloom);
+				lb->enable();
+				lb->setFloat(Shader::U_VpX, 0.0f);
+				lb->setFloat(Shader::U_VpY, 0.0f);
+				lb->setFloat(Shader::U_VpW, (float)blur->width());
+				lb->setFloat(Shader::U_VpH, (float)blur->height());
+				Shader::disable();
+			}
+			RenderRasterizerClass::render_tree(kGlow);
+			blur->end();
+			blur->draw_vr(eye_fbo, VR_EyeWidth(), VR_EyeHeight());
+			glBindFramebuffer(GL_FRAMEBUFFER, eye_fbo);
+			glViewport(0, 0, VR_EyeWidth(), VR_EyeHeight());
+		}
+		else
+#endif
+		{
 		blur->begin();
 		RenderRasterizerClass::render_tree(kGlow);
                 render_viewer_sprite_layer(kGlow);
@@ -231,6 +357,7 @@ void RenderRasterize_Shader::render_tree() {
 		RasPtr->swapper->deactivate();
 		blur->draw(*RasPtr->swapper);
 		RasPtr->swapper->activate();
+		}
 	}
 
 	glAlphaFunc(GL_GREATER, 0.5);

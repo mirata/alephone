@@ -35,6 +35,11 @@ private:
 	GLuint _fbo;
 	GLuint _depthBuffer;
 	GLuint _fboTarget;
+#if defined(__ANDROID__)
+	// glPushAttrib/glPopAttrib are no-ops in the GLES shim, so the viewport the caller had before
+	// activate() must be saved and restored explicitly or it stays clamped to this FBO's size.
+	GLint _savedViewport[4];
+#endif
 	static std::vector<FBO *> active_chain;
 	
 public:

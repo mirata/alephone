@@ -24,6 +24,7 @@
 #include "binders.h"
 #include "OGL_Setup.h"
 #include "screen.h"
+#include "vr_openxr.h"
 
 #include <functional>
 #include <sstream>
@@ -344,23 +345,35 @@ public:
 		general_table->dual_add(models_w->label("3D Models"), m_dialog);
 		general_table->dual_add(models_w, m_dialog);
 
-		w_enabling_toggle *perspective_w = new w_enabling_toggle(false);
-		general_table->dual_add(perspective_w->label("3D Perspective"), m_dialog);
+		// "3D Perspective" (OGL_Flag_MimicSW) and its companion "Tilt Sprites with Camera"
+		// (BillboardXY) are inert in VR, so the headset doesn't show them. MimicSW's frustum and
+		// pitch work in Rasterizer_Shader::SetView is overwritten wholesale by the VR block that
+		// follows it (glLoadMatrixf(vrProj)/(vrView), and vrLandscapeMatrix for the landscape UVs);
+		// its U_Pitch term is multiplied by virtual_pitch, which VR pins to 0; and the only other
+		// reader -- the sprite billboard tilt, the one place BillboardXY is used at all -- sits in a
+		// branch VR already takes an empty path through (sprites stay upright in VR by design).
+		w_enabling_toggle *perspective_w = nullptr;
+		w_toggle* billboard_w = nullptr;
+		if (!VR_IsActive())
+		{
+			perspective_w = new w_enabling_toggle(false);
+			general_table->dual_add(perspective_w->label("3D Perspective"), m_dialog);
 
-		auto billboard_placer = new horizontal_placer(get_theme_space(ITEM_WIDGET));
+			auto billboard_placer = new horizontal_placer(get_theme_space(ITEM_WIDGET));
 
-		w_toggle* billboard_w = new w_toggle(false);
-		billboard_placer->add_flags(placeable::kAlignLeft);
-		billboard_placer->dual_add(perspective_w, m_dialog);
-		billboard_placer->add_flags(placeable::kFill);
-		billboard_placer->add(new w_spacer(), true);
-		billboard_placer->dual_add(billboard_w->label("Tilt Sprites with Camera"), m_dialog);
-		billboard_placer->dual_add(billboard_w, m_dialog);
+			billboard_w = new w_toggle(false);
+			billboard_placer->add_flags(placeable::kAlignLeft);
+			billboard_placer->dual_add(perspective_w, m_dialog);
+			billboard_placer->add_flags(placeable::kFill);
+			billboard_placer->add(new w_spacer(), true);
+			billboard_placer->dual_add(billboard_w->label("Tilt Sprites with Camera"), m_dialog);
+			billboard_placer->dual_add(billboard_w, m_dialog);
 
-		perspective_w->add_dependent_widget(billboard_w);
-		billboard_w->set_enabled(!(graphics_preferences->OGL_Configure.Flags & OGL_Flag_MimicSW));
+			perspective_w->add_dependent_widget(billboard_w);
+			billboard_w->set_enabled(!(graphics_preferences->OGL_Configure.Flags & OGL_Flag_MimicSW));
 
-		general_table->add(billboard_placer, true);
+			general_table->add(billboard_placer, true);
+		}
 
 		w_toggle *blur_w = new w_toggle(false);
 		general_table->dual_add(blur_w->label("Bloom Effects"), m_dialog);
@@ -539,8 +552,10 @@ public:
 		m_3DmodelsWidget = new ToggleWidget (models_w);
 		m_blurWidget = new ToggleWidget (blur_w);
 		m_bumpWidget = new ToggleWidget (bump_w);
-		m_perspectiveWidget = new ToggleWidget (perspective_w);
-		m_billboardWidget = new ToggleWidget (billboard_w);
+		// Null when the widgets were skipped for VR; BinderSet::insert ignores null bindables, so the
+		// prefs simply keep whatever value they already had (same pattern as m_colourTheVoidWidget).
+		m_perspectiveWidget = perspective_w ? new ToggleWidget (perspective_w) : nullptr;
+		m_billboardWidget = billboard_w ? new ToggleWidget (billboard_w) : nullptr;
 
 		m_colourTheVoidWidget = 0;
 		m_voidColourWidget = 0;

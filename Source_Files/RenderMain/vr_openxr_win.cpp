@@ -4,8 +4,14 @@
 
 extern "C" bool VR_InitOpenXR(void)     { return false; }
 extern "C" bool VR_IsActive(void)       { return false; }
+extern "C" void VR_InvalidatePanelPlacement(void) {}
 extern "C" vr_settings_t* VR_Settings(void) {
-	static vr_settings_t s = { 1, 2.5f, 2.0f, 512.0f, 0.0f, 1, 30.0f, 1.0f, 0, 0, 0, -20.0f, 0.8f, 0.55f, 30.0f, 0 };
+	// Positional -- keep in step with vr_settings_t's field ORDER (vr_openxr.h). Inserting a field
+	// mid-struct without adding its value here silently shifts every value after it.
+	// screenDistanceM, screenHeightM, worldScaleWUM, heightAdjustM, snapTurn, turnDegrees,
+	// smoothTurnSpeed, brightness, roomScale, dominantHand, switchSticks, aimPitchAdjust,
+	// hudDistanceM, hudSizeM, hudTiltDeg, hudTextScale
+	static vr_settings_t s = { 2.5f, 2.0f, 512.0f, 0.0f, 1, 30.0f, 90.0f, 1.0f, 0, 0, 0, -20.0f, 0.8f, 0.55f, 30.0f, 0 };
 	return &s;
 }
 extern "C" float VR_GetYawOffset(void)   { return 0.0f; }

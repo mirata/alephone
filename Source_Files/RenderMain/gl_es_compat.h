@@ -336,6 +336,15 @@ void a1ffFrustum(GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLd
 void a1ffGetFloatv(GLenum pname, GLfloat* params);   /* intercepts the *_MATRIX queries */
 void a1ffColor4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a);
 void a1ffNormal3f(GLfloat x, GLfloat y, GLfloat z);
+/* 2D fixed-function transform guard -- see the long comment in gl_es_compat.cpp. The 2D UI assumes
+ * an identity modelview; a leaked transform draws the whole 2D image offset until a world render
+ * clears it (never, at the main menu). a1ff2DGuard() logs it and, with heal != 0, restores it. */
+#define A1FF_GUARD_HEAL   1  /* reset the modelview after reporting (deliberately unused: see the .cpp) */
+#define A1FF_GUARD_INJECT 2  /* this site is the 2D funnel -- apply the armed fault injection here */
+int  a1ffMatrixDepth(int which);                 /* 0 = modelview, 1 = projection, 2 = texture */
+void a1ffGetMatrix(int which, GLfloat* out16);
+int  a1ff2DGuard(const char* where, int flags);  /* returns nonzero if the modelview was dirty */
+void a1ff2DFaultToggle(void);                    /* arm/disarm the deliberate-offset repro */
 #ifdef __cplusplus
 }
 #endif
@@ -412,6 +421,11 @@ void a1ffTexCoordPointer(GLint size, GLenum type, GLsizei stride, const void* pt
 void a1ffClientActiveTexture(GLenum tex);
 void a1ffMultiTexCoord4f(GLenum tex, GLfloat s, GLfloat t, GLfloat r, GLfloat q);
 void a1ffGetDoublev(GLenum pname, GLdouble* params);
+/* Post-processing escape hatch. The rewritten fragment shaders all multiply their result by
+ * a1_Brightness (the VR world-brightness pref), which is right for world geometry but wrong for
+ * full-screen post passes: the bloom blur runs 10 of them, so a 0.8 brightness would attenuate the
+ * glow to 0.8^10. Turn this on around post-processing draws to pin a1_Brightness at 1.0. */
+void a1ffSetBrightnessNeutral(GLboolean on);
 #ifdef __cplusplus
 }
 #endif

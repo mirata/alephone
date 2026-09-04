@@ -537,6 +537,16 @@ void Screen::bound_screen_to_rect(SDL_Rect &r, bool in_game)
 		int virw = in_game ? window_width() : 640;
 		int virh = in_game ? window_height() : 480;
 		
+#if defined(__ANDROID__)
+		// Every 2D pass assumes an identity modelview, but nothing here ever reloads it -- only
+		// OGL_EndMain() does, at the end of a world render. A transform leaked into the modelview by
+		// some other draw path therefore offsets the whole 2D image, and (in a terminal, or at the
+		// main menu, where no world render follows) stays that way. This is the single funnel every
+		// 2D pass goes through: if the modelview is dirty HERE, the frame about to be drawn is the
+		// offset one. Deliberately reports only -- see a1ff2DGuard() in gl_es_compat.cpp.
+		a1ff2DGuard(in_game ? "bound_screen(in_game)" : "bound_screen(menu)", A1FF_GUARD_INJECT);
+#endif
+
 		float vscale = MIN(pixw / static_cast<float>(virw), pixh / static_cast<float>(virh));
 		int vpw = static_cast<int>(r.w * vscale + 0.5f);
 		int vph = static_cast<int>(r.h * vscale + 0.5f);
@@ -554,6 +564,26 @@ void Screen::bound_screen_to_rect(SDL_Rect &r, bool in_game)
 		m_ortho_rect.x = m_ortho_rect.y = 0;
 		m_ortho_rect.w = r.w;
 		m_ortho_rect.h = r.h;
+
+#if defined(__ANDROID__)
+		// Companion to the a1ff2DGuard above. Everything feeding this is a pinned VR constant
+		// (MainScreenPixel*/window_* all return the screen-layer FBO size), so the viewport and ortho a
+		// given 2D pass uses must be identical every single frame. Logged on change only: if the image
+		// ever renders offset WITHOUT the guard reporting a dirty modelview, a line here at the same
+		// moment would prove the shift came from the viewport instead, and silence rules that out.
+		{
+			static int last[2][6] = { { -1 }, { -1 } };
+			const int idx = in_game ? 1 : 0;
+			const int cur[6] = { vpx, pixh - vph - vpy, vpw, vph, r.w, r.h };
+			if (memcmp(last[idx], cur, sizeof cur) != 0)
+			{
+				memcpy(last[idx], cur, sizeof cur);
+				logWarning("2Dpass %s viewport=(%d,%d %dx%d) ortho=%dx%d pix=%dx%d vir=%dx%d",
+				           in_game ? "in_game" : "menu",
+				           cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], pixw, pixh, virw, virh);
+			}
+		}
+#endif
 	}
 #endif
 }
@@ -1301,6 +1331,27 @@ void toggle_fullscreen()
 static bool clear_next_screen = false;
 static void darken_world_window(void);
 
+#if defined(__ANDROID__)
+// The locomotion yaw offset (snap/smooth turn) reaches the RENDER through world_view->virtual_yaw, a
+// 16.16 fixed_angle -- so it can carry a fraction of an angle unit, and must. Rounding it to a whole
+// angle unit first (as this did) quantises the camera to 512 steps per circle = 0.703 deg, which snap
+// turning never notices but smooth turning does: a light stick push then steps ~14 times a second, and
+// a full-speed turn alternates between one and two steps per frame, reading as a frame-rate problem
+// rather than as quantisation. The integer world_view->yaw below is a separate thing -- the visibility
+// tree is integer by nature and 0.7 deg of cone error there is invisible.
+static float vr_yaw_offset_units(void)
+{
+	float a = VR_GetYawOffset();
+	a = fmodf(a, 512.0f);
+	if (a < 0.0f) a += 512.0f;
+	return a;
+}
+static fixed_angle vr_yaw_offset_fixed(float units)
+{
+	return (fixed_angle)(units * (float)FIXED_ONE + 0.5f);
+}
+#endif
+
 void update_world_view_camera()
 {
 	world_view->yaw = current_player->facing;
@@ -1308,13 +1359,10 @@ void update_world_view_camera()
 	world_view->maximum_depth_intensity = current_player->weapon_intensity;
 
 	world_view->origin = current_player->camera_location;
+	// VR uses this same shared pref (there used to be a separate VR "Disable View Bob" override that
+	// simply forced it): camera view-bob is nauseating when the head IS the camera, so the VR default
+	// is BobbingType::none, but the option is offered under GRAPHICS for anyone who wants it.
 	bool remove_camera_bob = graphics_preferences->screen_mode.bobbing_type != BobbingType::camera_and_weapon;
-#if defined(__ANDROID__)
-	// In VR the camera view-bob is nauseating; suppress it (the head IS the camera). Weapon bob is
-	// unaffected. Configurable via the VR preferences (VR_Settings()->disableBob).
-	if (VR_IsActive() && VR_Settings()->disableBob)
-		remove_camera_bob = true;
-#endif
 	if (remove_camera_bob)
 		world_view->origin.z -= current_player->step_height;
 	world_view->origin_polygon_index = current_player->camera_polygon_index;
@@ -1345,7 +1393,8 @@ void update_world_view_camera()
 			// set them to that same camera azimuth. The per-eye render rotates by yawOffset ONLY (head
 			// rides in via the OpenXR eye pose), so virtual_yaw = yawOffset (NOT the facing) -> no
 			// double-apply, and the render stays consistent with the simulation as the body catches up.
-			const int yawOffset = (int)(VR_GetYawOffset() + 0.5f);   // angle units, 0..511
+			const float yawOffsetF = vr_yaw_offset_units();          // angle units, continuous
+			const int yawOffset = (int)(yawOffsetF + 0.5f);          // angle units, 0..511
 			int hy = (int)(hmdYaw   >= 0 ? hmdYaw   + 0.5f : hmdYaw   - 0.5f);
 			int hp = (int)(hmdPitch >= 0 ? hmdPitch + 0.5f : hmdPitch - 0.5f);
 			// Clamp the vis-tree pitch short of 90 deg (cosine_table[128]==0 -> dtanpitch div-by-zero).
@@ -1354,7 +1403,7 @@ void update_world_view_camera()
 			else if (hp < -112) hp = -112;
 			world_view->yaw   = NORMALIZE_ANGLE(yawOffset + hy);
 			world_view->pitch = NORMALIZE_ANGLE(hp);
-			world_view->virtual_yaw = NORMALIZE_ANGLE(yawOffset) * FIXED_ONE;
+			world_view->virtual_yaw = vr_yaw_offset_fixed(yawOffsetF);
 			world_view->virtual_pitch = 0;
 		}
 	}
@@ -1518,13 +1567,14 @@ static void apply_vr_view_offsets()
 		float hmdYaw = 0, hmdPitch = 0;
 		if (VR_GetHmdYawPitch(&hmdYaw, &hmdPitch))
 		{
-			const int yawOffset = (int)(VR_GetYawOffset() + 0.5f);
+			const float yawOffsetF = vr_yaw_offset_units();
+			const int yawOffset = (int)(yawOffsetF + 0.5f);
 			int hy = (int)(hmdYaw   >= 0 ? hmdYaw   + 0.5f : hmdYaw   - 0.5f);
 			int hp = (int)(hmdPitch >= 0 ? hmdPitch + 0.5f : hmdPitch - 0.5f);
 			if (hp >  112) hp =  112; else if (hp < -112) hp = -112;
 			world_view->yaw   = NORMALIZE_ANGLE(yawOffset + hy);
 			world_view->pitch = NORMALIZE_ANGLE(hp);
-			world_view->virtual_yaw = NORMALIZE_ANGLE(yawOffset) * FIXED_ONE;
+			world_view->virtual_yaw = vr_yaw_offset_fixed(yawOffsetF);
 			world_view->virtual_pitch = 0;
 		}
 	}
@@ -1758,6 +1808,7 @@ void render_screen(short ticks_elapsed)
 			glDisable(GL_SCISSOR_TEST);
 			glClearColor(0.f, 0.f, 0.f, 0.f);
 			glClear(GL_COLOR_BUFFER_BIT);
+			a1ff2DGuard("before hud draw", 0);
 			if (LuaHUDRunning())
 				Lua_DrawHUD(ticks_elapsed);
 			else
@@ -1765,6 +1816,7 @@ void render_screen(short ticks_elapsed)
 				Rect dr = MakeRect(HUD_DestRect);
 				OGL_DrawHUD(dr, ticks_elapsed);
 			}
+			a1ff2DGuard(LuaHUDRunning() ? "after lua hud" : "after ogl hud", 0);
 
 			// Engine on-screen messages (screen_printf: "Game saved", oxygen warnings, chat, script
 			// text). On flat displays DisplayMessages draws these over the world; in VR the world frame
@@ -1779,6 +1831,7 @@ void render_screen(short ticks_elapsed)
 			OGL_PushVRHudTextProjection(VR_HudLayerWidth(), VR_HudLayerHeight(), kVRMsgOffsetX, kVRMsgOffsetY);
 			DisplayMessages(world_pixels);
 			OGL_PopVRHudTextProjection();
+			a1ff2DGuard("after hud messages", 0);
 			// NOTE: the console input line is NOT drawn here -- in VR it's a world-locked strip anchored
 			// above the keyboard (vr_openxr.cpp conDrawEye), so it stays put with the keyboard rather than
 			// following the head like these messages.
@@ -1841,15 +1894,25 @@ void render_screen(short ticks_elapsed)
 
 			screen_mode.translucent_map = prevTranslucent;
 			OGL_MapActive = prevMapActive;
+			a1ff2DGuard("after map fbo", 0);
 		}
 
 		// Restore the screen-layer FBO as the default 2D target for anything that follows.
 		glBindFramebuffer(GL_FRAMEBUFFER, VR_ScreenLayerFramebuffer());
+
+		// Checkpoint: the HUD/map FBO passes above must leave the modelview as they found it.
+		a1ff2DGuard("after vr hud/map fbo", 0);
 	}
 #endif
 
 	// Render world view
 	render_view(world_view, software_render_dest.get());
+
+#if defined(__ANDROID__)
+	// Checkpoint: OGL_EndMain() ends a world render with an identity modelview, and terminal mode
+	// (render_computer_interface) touches no GL matrices at all -- so this must be clean either way.
+	a1ff2DGuard(world_view->terminal_mode_active ? "after render_view(term)" : "after render_view", 0);
+#endif
 
     // clear Lua drawing from previous frame
     // (SDL is slower if we do this before render_view)
@@ -1934,6 +1997,9 @@ void render_screen(short ticks_elapsed)
 			}
 			Term_Blitter.nearFilter = TxtrTypeInfoList[OGL_Txtr_HUD].NearFilter;
 			Term_Blitter.Draw(TermRect);
+#if defined(__ANDROID__)
+			a1ff2DGuard("after term blit", 0);
+#endif
 		}
 
 #endif
@@ -2700,6 +2766,12 @@ void MainScreenSwap()
 	// presented the stereo world frame this tick, we're done; otherwise (menus/loading, no 3D
 	// render) present the fallback test frame so the compositor keeps receiving frames.
 	if (VR_IsActive()) {
+		// Checkpoint: all of this frame's drawing is done. A dirty modelview here means something
+		// drawn during THIS frame leaked a transform -- and (with no world render to follow, e.g. at
+		// a menu or in a terminal) that is what shifts the next 2D image. Log only; the funnel in
+		// bound_screen_to_rect does the healing.
+		a1ff2DGuard("swap", 0);
+
 		// If render_view already presented the stereo world this tick, we're done; otherwise present
 		// the 2D UI (menus/terminals/loading) from the screen-layer FBO as a flat panel.
 		if (!VR_TakeWorldFramePresented()) {

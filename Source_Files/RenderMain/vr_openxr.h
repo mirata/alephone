@@ -51,6 +51,7 @@ enum {
 	VR_ACT_INVENTORY_NEXT,   // scroll the inventory panel forward one item
 	VR_ACT_SCREENSHOT,       // capture a clean single-eye screenshot to the Screenshots folder
 	VR_ACT_CONSOLE,          // toggle the in-game console (+ the on-screen keyboard) for chat / lua commands
+	VR_ACT_DIAG2D,           // diagnostic: arm/disarm the deliberate "2D image drawn shifted" repro
 	VR_ACT_COUNT
 };
 
@@ -58,14 +59,16 @@ enum {
 // One global, sane defaults at startup. Centralises the knobs scattered across the render seam so a
 // prefs dialog can drive them without touching the renderer. Modeled on QuestZDoom's VR cvars.
 typedef struct {
-	int   disableBob;       // 1 = suppress camera view-bob (nausea); weapon bob unaffected
 	float screenDistanceM;  // distance of the 2D UI panel (menus/terminals) in metres
 	float screenHeightM;    // height of the 2D UI panel in metres (width follows its aspect)
 	float worldScaleWUM;    // Marathon world-units per metre (bigger = world feels smaller)
 	float heightAdjustM;    // manual height nudge (metres of stature; + = taller in-game). Added on top of
 	                        // the auto-measured standing eye height; 0 = no adjustment.
-	int   snapTurn;         // 1 = snap turning, 0 = smooth (locomotion comfort)
-	float turnDegrees;      // snap: degrees per snap flick; smooth: degrees/sec at full deflection
+	int   snapTurn;         // 1 = snap turning, 0 = smooth turning (locomotion comfort)
+	float turnDegrees;      // SNAP style: degrees rotated per stick flick
+	float smoothTurnSpeed;  // SMOOTH style: degrees/sec at full stick deflection (ramped linearly by how
+	                        //     far the stick is pushed past the deadzone). Kept separate from
+	                        //     turnDegrees -- different units, so each style remembers its own knob.
 	float brightness;       // world brightness multiply (1=unchanged; <1 dims the over-bright world)
 	int   roomScale;        // 1 = body follows the head's physical movement (room-scale); 0 = head is
 	                        //     a free 6DOF camera over a static body (no positional locomotion)
@@ -224,6 +227,11 @@ bool VR_GetSecondaryPunch(void);
 // weapon code tell a thrust-started fist shot (suppress the swing animation) from a trigger-started one.
 bool VR_PrimaryPunchRecent(void);
 bool VR_SecondaryPunchRecent(void);
+// Drop the cached placement of the world-locked 2D panel so it is re-placed (and re-sized) on the
+// next screen-layer frame. placePanel() bakes screenDistanceM/screenHeightM in at placement time and
+// is otherwise only re-run after a world frame, so without this a panel pref changed at a menu does
+// not apply until the player starts the game.
+void VR_InvalidatePanelPlacement(void);
 bool VR_GetAction(void);               // A button (use terminals/switches)
 bool VR_GetAdvance(void);              // A or X: advance terminal / skip cutscene
 bool VR_GetBack(void);                 // Y or B: terminal page back

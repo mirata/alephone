@@ -517,13 +517,13 @@ extern "C" bool VR_IsActive(void) { return s_active; }
 
 namespace {
 	vr_settings_t s_settings = {
-		/* disableBob      */ 1,
 		/* screenDistanceM */ 2.5f,
 		/* screenHeightM   */ 2.0f,
 		/* worldScaleWUM   */ 512.0f,
 		/* heightAdjustM   */ 0.0f,
-		/* snapTurn        */ 1,
-		/* turnDegrees     */ 30.0f,
+		/* snapTurn        */ 1,      // snap by default (most comfortable); smooth is a prefs toggle
+		/* turnDegrees     */ 30.0f,  // snap: degrees per flick
+		/* smoothTurnSpeed */ 90.0f,  // smooth: degrees/sec at full deflection (180 deg turn in 2 s)
 		/* brightness      */ 1.0f,   // neutral; real fix is the sRGB write-control below
 		/* roomScale       */ 0,      // OFF: body-follows-head conflicts with Marathon's tick/interpolation
 		                            //      (camera lurches per tick). Stable 6DOF head view + stick for now.
@@ -558,6 +558,38 @@ namespace {
 	bool  s_turnArmed = true;   // snap-turn edge latch (re-armed when the stick recentres)
 	const float kAngleUnitsPerDeg = 512.0f / 360.0f;
 
+	// SMOOTH turning is integrated per RENDERED FRAME, not per 30 Hz tick: the eye matrices read
+	// s_yawOffset live, so integrating at tick rate would step the whole world ~4 degrees at a time on a
+	// 72 Hz display -- exactly the judder that makes smooth turning nauseating. The tick (vbl.cpp) owns
+	// the "is turning allowed right now" gating (in game, console keyboard down, ...) and just LATCHES
+	// the stick here; VR_BeginFrame integrates it with the real frame dt. If the latch stops being
+	// refreshed (menu, keyboard up, game paused) it goes stale and the rotation stops on its own.
+	float s_smoothTurnStick = 0.0f;
+	int   s_smoothTurnAge   = 9999;      // frames since the last tick latch
+	const int kSmoothTurnMaxAge = 6;     // ~80 ms at 72 Hz; ticks are 30 Hz so 2-3 frames is normal
+	XrTime s_lastFrameTime = 0;          // predicted display time of the previous frame (for frame dt)
+
+	// Advance the smooth turn by one frame. No-op in snap mode, or when the tick latch has gone stale.
+	void advanceSmoothTurn(float dt)
+	{
+		if (s_settings.snapTurn) return;
+		if (s_smoothTurnAge > kSmoothTurnMaxAge) return;
+		++s_smoothTurnAge;
+
+		const float dead = 0.2f;
+		const float x = s_smoothTurnStick;
+		const float mag = x < 0 ? -x : x;
+		if (mag <= dead) return;
+		// Rescale past the deadzone so a just-off-centre push starts from zero (not from 20% speed) and
+		// full deflection still gives the configured speed.
+		float t = (mag - dead) / (1.0f - dead);
+		if (t > 1.0f) t = 1.0f;
+		const float degrees = (x < 0 ? -t : t) * s_settings.smoothTurnSpeed * dt;
+		s_yawOffset += degrees * kAngleUnitsPerDeg;
+		while (s_yawOffset >= 512.0f) s_yawOffset -= 512.0f;
+		while (s_yawOffset <  0.0f)   s_yawOffset += 512.0f;
+	}
+
 	// Yaw recenter request (set at level entry): make the player face `s_yawRecenterTarget` when the
 	// head is neutral, regardless of where the headset is pointing at spawn.
 	bool s_yawRecenterPending = false;
@@ -588,16 +620,19 @@ extern "C" void VR_UpdateTurn(float stickX, float dt)
 	// Right stick turns WITHOUT physically turning your body. Snap right (+X) = turn the view right,
 	// which in Marathon's CCW angle convention means DECREASING yaw. (Flip the sign here if turning
 	// goes the wrong way on device.)
+	(void)dt;   // smooth turning integrates on the frame clock (advanceSmoothTurn), not this tick's dt
 	if (s_settings.snapTurn) {
+		s_smoothTurnStick = 0.0f;
 		const float thresh = 0.6f, release = 0.3f;
 		if (s_turnArmed && stickX > thresh)  { s_yawOffset += s_settings.turnDegrees * kAngleUnitsPerDeg; s_turnArmed = false; }
 		else if (s_turnArmed && stickX < -thresh) { s_yawOffset -= s_settings.turnDegrees * kAngleUnitsPerDeg; s_turnArmed = false; }
 		else if (stickX > -release && stickX < release) s_turnArmed = true;
 	} else {
-		// Smooth turn: turnDegrees is deg/sec at full deflection, with a small deadzone.
-		const float dead = 0.2f;
-		if (stickX > dead || stickX < -dead)
-			s_yawOffset += stickX * s_settings.turnDegrees * kAngleUnitsPerDeg * dt;
+		// Smooth turn: just latch the stick (and keep the latch fresh). VR_BeginFrame does the actual
+		// rotation once per rendered frame so the motion is display-smooth, not 30 Hz-stepped.
+		s_smoothTurnStick = stickX;
+		s_smoothTurnAge   = 0;
+		s_turnArmed       = true;   // so switching back to snap mid-push doesn't fire a stale snap
 	}
 	// keep bounded to one turn for numeric tidiness
 	while (s_yawOffset >= 512.0f) s_yawOffset -= 512.0f;
@@ -933,6 +968,17 @@ extern "C" bool VR_BeginFrame(void)
 	XrFrameBeginInfo fbi = { XR_TYPE_FRAME_BEGIN_INFO };
 	XR_CHECK(xrBeginFrame(s_session, &fbi));
 	s_frameBegun = true;
+
+	// Frame dt from the predicted display times (this is the clock the eyes are actually rendered on),
+	// clamped so a hitch/load pause can't dump a huge rotation in one frame.
+	{
+		float dt = 0.0f;
+		if (s_lastFrameTime != 0 && s_frameState.predictedDisplayTime > s_lastFrameTime)
+			dt = (float)((double)(s_frameState.predictedDisplayTime - s_lastFrameTime) * 1e-9);
+		s_lastFrameTime = s_frameState.predictedDisplayTime;
+		if (dt > 0.1f) dt = 0.1f;
+		advanceSmoothTurn(dt);
+	}
 
 	if (s_frameState.shouldRender) {
 		XrSpaceLocation hl = { XR_TYPE_SPACE_LOCATION };
@@ -1555,6 +1601,11 @@ namespace {
 	int s_ptrClickHand = -1;  // hand locked for the current click (-1 = none)
 }
 extern "C" void VR_MarkWorldFramePresented(void) { s_worldFramePresented = true; s_panelPlaced = false; /* re-place the 2D panel next time a menu is shown */ }
+
+// Reuses the system-recenter path, which VR_PresentScreenLayer already handles: it clears both the
+// panel and the keyboard placement (the keyboard is positioned relative to the panel, so a resized
+// panel must drag it along).
+extern "C" void VR_InvalidatePanelPlacement(void) { s_panelRecenterPending = true; }
 extern "C" bool VR_TakeWorldFramePresented(void) { bool v = s_worldFramePresented; s_worldFramePresented = false; return v; }
 
 // Menu pointer: the screen-layer pixel the dominant (or any) controller ray is hitting (false = no hit).
@@ -2871,7 +2922,7 @@ extern "C" void VR_GetEyeIPDOffsetWU(int eye, float* wx, float* wy)
 extern "C" bool VR_InitOpenXR(void)     { return false; }
 extern "C" bool VR_IsActive(void)       { return false; }
 extern "C" vr_settings_t* VR_Settings(void) {
-	static vr_settings_t s = { 1, 2.5f, 2.0f, 512.0f, 0.0f, 1, 30.0f, 1.0f, 0, 0, 0, -20.0f, 0.8f, 0.55f, 30.0f, 0, 0, 0 };
+	static vr_settings_t s = { 1, 2.5f, 2.0f, 512.0f, 0.0f, 1, 30.0f, 90.0f, 1.0f, 0, 0, 0, -20.0f, 0.8f, 0.55f, 30.0f, 0, 0, 0 };
 	return &s;
 }
 extern "C" float VR_GetYawOffset(void)   { return 0.0f; }
@@ -2933,6 +2984,7 @@ extern "C" int  VR_EyeHeight(void)      { return 0; }
 extern "C" unsigned VR_CurrentEyeFramebuffer(void) { return 0; }
 extern "C" int  VR_CurrentEye(void)     { return 0; }
 extern "C" void VR_MarkWorldFramePresented(void) {}
+extern "C" void VR_InvalidatePanelPlacement(void) {}
 extern "C" bool VR_TakeWorldFramePresented(void) { return false; }
 extern "C" unsigned VR_ScreenLayerFramebuffer(void) { return 0; }
 extern "C" void VR_PresentScreenLayer(void) {}

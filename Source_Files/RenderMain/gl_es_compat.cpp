@@ -13,6 +13,9 @@
 #include <GLES3/gl3.h>
 #include <android/log.h>
 #include "vr_openxr.h"
+#include "Logging.h"   // logWarning -> the persistent on-device log file, not just logcat
+#include <dlfcn.h>     // dladdr -> name the call site that leaked a modelview transform
+#include <cstdio>
 #include <array>
 #include <vector>
 #include <unordered_map>
@@ -65,6 +68,9 @@ Mat multiply(const Mat& a, const Mat& b) {
 
 struct Stack {
     std::vector<Mat> s{ identity() };
+    // Return address of the glPushMatrix() that created each level, so an unbalanced push can name
+    // its own call site rather than just the frame stage it was noticed in. Kept in lockstep with s.
+    std::vector<const void*> ra{ nullptr };
     Mat& top() { return s.back(); }
 };
 
@@ -94,6 +100,14 @@ float g_constTexCoord[2][4] = { {0,0,0,1}, {0,0,0,1} };  // glMultiTexCoord when
 // post-multiply the current matrix by m: current = current * m
 void mult(const Mat& m) { g_current->top() = multiply(g_current->top(), m); }
 
+// Call site of the most recent transform applied to the MODELVIEW since it was last loaded with
+// identity. When the 2D guard finds a stray transform with a balanced stack (a pop that hit the wrong
+// stack, say), this is the code that put it there.
+const void* g_mvLastMutRA = nullptr;
+inline void noteModelviewMutation(const void* ra) {
+    if (g_current == &g_modelview) g_mvLastMutRA = ra;
+}
+
 } // namespace
 
 // ---- exposed shim API (C linkage to match the header declarations) ----
@@ -108,40 +122,57 @@ void a1ffMatrixMode(GLenum mode) {
     }
 }
 
-void a1ffLoadIdentity(void) { g_current->top() = identity(); }
+void a1ffLoadIdentity(void) {
+    g_current->top() = identity();
+    if (g_current == &g_modelview) g_mvLastMutRA = nullptr;   // back to a known-clean modelview
+}
 
-void a1ffPushMatrix(void) { g_current->s.push_back(g_current->top()); }
+void a1ffPushMatrix(void) {
+    g_current->s.push_back(g_current->top());
+    g_current->ra.push_back(__builtin_return_address(0));
+}
 
-void a1ffPopMatrix(void)  { if (g_current->s.size() > 1) g_current->s.pop_back(); }
+void a1ffPopMatrix(void)  {
+    if (g_current->s.size() > 1) { g_current->s.pop_back(); g_current->ra.pop_back(); }
+}
 
-void a1ffLoadMatrixf(const GLfloat* m) { std::memcpy(g_current->top().data(), m, 16 * sizeof(float)); }
+void a1ffLoadMatrixf(const GLfloat* m) {
+    noteModelviewMutation(__builtin_return_address(0));
+    std::memcpy(g_current->top().data(), m, 16 * sizeof(float));
+}
 
 void a1ffLoadMatrixd(const GLdouble* m) {
+    noteModelviewMutation(__builtin_return_address(0));
     Mat& t = g_current->top();
     for (int i = 0; i < 16; ++i) t[i] = (float)m[i];
 }
 
 void a1ffMultMatrixf(const GLfloat* m) {
+    noteModelviewMutation(__builtin_return_address(0));
     Mat mm; std::memcpy(mm.data(), m, 16 * sizeof(float)); mult(mm);
 }
 
 void a1ffMultMatrixd(const GLdouble* m) {
+    noteModelviewMutation(__builtin_return_address(0));
     Mat mm; for (int i = 0; i < 16; ++i) mm[i] = (float)m[i]; mult(mm);
 }
 
 void a1ffTranslatef(GLfloat x, GLfloat y, GLfloat z) {
+    noteModelviewMutation(__builtin_return_address(0));
     Mat m = identity();
     m[12] = x; m[13] = y; m[14] = z;
     mult(m);
 }
 
 void a1ffScalef(GLfloat x, GLfloat y, GLfloat z) {
+    noteModelviewMutation(__builtin_return_address(0));
     Mat m = identity();
     m[0] = x; m[5] = y; m[10] = z;
     mult(m);
 }
 
 void a1ffRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z) {
+    noteModelviewMutation(__builtin_return_address(0));
     float len = std::sqrt(x * x + y * y + z * z);
     if (len < 1e-8f) return;
     x /= len; y /= len; z /= len;
@@ -193,6 +224,154 @@ void a1ffColor4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
 
 void a1ffNormal3f(GLfloat x, GLfloat y, GLfloat z) {
     g_normal[0] = x; g_normal[1] = y; g_normal[2] = z;
+}
+
+// ---- 2D fixed-function transform guard ------------------------------------------------------
+// Every 2D pass (main menu / chapter screens / terminals / dialogs / load screen) draws through
+// the fixed-function path, i.e. MVP = projection * modelview. Screen::bound_screen_to_rect()
+// reloads the PROJECTION and the viewport before each such pass, but NOTHING reloads the
+// MODELVIEW -- all the 2D drawing code simply assumes it is identity. It normally is, because
+// OGL_EndMain() ends every world render with glMatrixMode(GL_MODELVIEW); glLoadIdentity().
+//
+// So if any draw path leaks a transform into the modelview (an unbalanced glPushMatrix, or an
+// early return between a push and its pop), the entire 2D image is silently drawn offset by that
+// transform, and stays that way:
+//   * in a terminal, render_computer_interface() REPLACES the world render (render.cpp), so
+//     nothing clears the modelview until you leave the terminal -- which is exactly why leaving
+//     and re-entering fixes it;
+//   * at the main menu there is no world render at all, so it never clears -- only an app restart
+//     fixes it.
+// Pointer hit-testing is unaffected (it goes through Screen::window_to_screen, not the GL
+// matrices), which is why the buttons still respond at their un-shifted positions.
+//
+// a1ff2DGuard() is called at the top of every 2D pass and at a few per-frame checkpoints, so the
+// stage that leaks the transform can be identified from the log. It REPORTS ONLY (heal is left at
+// 0 everywhere on purpose): papering over the dirty modelview here would hide the actual defect,
+// so the guard is a detector, not a fix.
+// Flag bits for a1ff2DGuard()'s second argument (this file cannot include gl_es_compat.h -- see the
+// note at the top -- so they are mirrored here; keep in sync).
+#define A1FF_GUARD_HEAL   1
+#define A1FF_GUARD_INJECT 2
+
+static float g_inject2D[2] = { 0.0f, 0.0f };     // debug fault injection; see a1ff2DFaultToggle()
+
+// Turn a captured return address into something readable. dladdr() gives the enclosing symbol when the
+// function is exported; when it isn't, the "+0x<offset into libmain.so>" is enough to symbolize offline
+// against the unstripped .so (llvm-symbolizer --obj=libmain.so <offset>).
+static const char* describeRA(const void* ra, char* buf, size_t n) {
+    if (!ra) { snprintf(buf, n, "none"); return buf; }
+    Dl_info di;
+    if (dladdr(ra, &di) && di.dli_fbase) {
+        const unsigned long off = (unsigned long)((const char*)ra - (const char*)di.dli_fbase);
+        snprintf(buf, n, "%s+0x%lx", di.dli_sname ? di.dli_sname : "(nosym)", off);
+    } else {
+        snprintf(buf, n, "%p", ra);
+    }
+    return buf;
+}
+
+// De-duplicate the log: a leaked transform persists for every frame that follows, so only report
+// when a given call site's verdict actually CHANGES (first time dirty, or the values move).
+struct GuardSite { const char* where; int depth; float tx, ty, sx, sy; bool valid; };
+static GuardSite g_guardSites[16];
+static int       g_guardSiteCount = 0;
+
+int a1ffMatrixDepth(int which) {
+    switch (which) {
+        case 1:  return (int)g_projection.s.size();
+        case 2:  return (int)g_texture.s.size();
+        default: return (int)g_modelview.s.size();
+    }
+}
+
+void a1ffGetMatrix(int which, GLfloat* out16) {
+    const Mat& m = (which == 1) ? g_projection.top() : (which == 2) ? g_texture.top() : g_modelview.top();
+    std::memcpy(out16, m.data(), 16 * sizeof(float));
+}
+
+int a1ff2DGuard(const char* where, int flags) {
+    const int heal = (flags & A1FF_GUARD_HEAL);
+    // Armed fault injection: force the reported symptom every 2D pass, so the real bug and the
+    // deliberate one can be compared side by side on the headset. Only at the 2D funnel, so the
+    // in-game checkpoints stay pure observers.
+    if ((flags & A1FF_GUARD_INJECT) && (g_inject2D[0] != 0.0f || g_inject2D[1] != 0.0f)) {
+        g_modelview.s.resize(1);
+        g_modelview.s[0] = identity();
+        g_modelview.s[0][12] = g_inject2D[0];
+        g_modelview.s[0][13] = g_inject2D[1];
+        return 1;
+    }
+
+    const Mat& m = g_modelview.top();
+    const int depth = (int)g_modelview.s.size();
+    const Mat id = identity();
+    bool dirty = (depth != 1);
+    for (int i = 0; i < 16 && !dirty; ++i) dirty = (std::fabs(m[i] - id[i]) > 1e-4f);
+
+    // Find (or claim) this call site's slot. `where` is always a string literal, so compare pointers.
+    GuardSite* site = nullptr;
+    for (int i = 0; i < g_guardSiteCount; ++i)
+        if (g_guardSites[i].where == where) { site = &g_guardSites[i]; break; }
+    if (!site && g_guardSiteCount < (int)(sizeof g_guardSites / sizeof g_guardSites[0])) {
+        site = &g_guardSites[g_guardSiteCount++];
+        site->where = where; site->valid = false;
+    }
+
+    const bool first  = !site || !site->valid;
+    const bool changed = first || site->depth != depth ||
+                         std::fabs(site->tx - m[12]) > 1e-4f || std::fabs(site->ty - m[13]) > 1e-4f ||
+                         std::fabs(site->sx - m[0])  > 1e-4f || std::fabs(site->sy - m[5])  > 1e-4f;
+    if (site) {
+        site->valid = true; site->depth = depth;
+        site->tx = m[12]; site->ty = m[13]; site->sx = m[0]; site->sy = m[5];
+    }
+
+    if (dirty && changed) {
+        // Report the whole 2D mapping, not just the modelview: if the offset ever turns out NOT to be
+        // a modelview leak, the projection/viewport printed alongside say so immediately.
+        const Mat& p = g_projection.top();
+        GLint vp[4] = { 0, 0, 0, 0 };
+        glGetIntegerv(GL_VIEWPORT, vp);
+        // Name the culprit: the call site of the last transform applied to the modelview, and (if the
+        // stack is also deep) the glPushMatrix that was never popped.
+        char mutBuf[160], pushBuf[160];
+        describeRA(g_mvLastMutRA, mutBuf, sizeof mutBuf);
+        describeRA(depth > 1 ? g_modelview.ra.back() : nullptr, pushBuf, sizeof pushBuf);
+        // Logged BOTH to logcat (live debugging) and to the on-device log file, so a glitch hit during
+        // ordinary play without adb attached is still recoverable afterwards.
+        __android_log_print(ANDROID_LOG_WARN, "A1VR",
+            "2Dguard DIRTY at %s: MV depth=%d translate=(%.1f,%.1f) scale=(%.3f,%.3f) shear=(%.3f,%.3f)"
+            " | lastMV=%s | livePush=%s"
+            " | PROJ depth=%d t=(%.3f,%.3f) s=(%.4f,%.4f) | viewport=(%d,%d %dx%d)",
+            where ? where : "?", depth, m[12], m[13], m[0], m[5], m[4], m[1],
+            mutBuf, pushBuf,
+            (int)g_projection.s.size(), p[12], p[13], p[0], p[5],
+            vp[0], vp[1], vp[2], vp[3]);
+        logWarning("2Dguard DIRTY at %s: MV depth=%d translate=(%.1f,%.1f) scale=(%.3f,%.3f)"
+            " | lastMV=%s | livePush=%s"
+            " | PROJ depth=%d t=(%.3f,%.3f) s=(%.4f,%.4f) | viewport=(%d,%d %dx%d)",
+            where ? where : "?", depth, m[12], m[13], m[0], m[5],
+            mutBuf, pushBuf,
+            (int)g_projection.s.size(), p[12], p[13], p[0], p[5],
+            vp[0], vp[1], vp[2], vp[3]);
+    } else if (!dirty && changed && !first) {
+        __android_log_print(ANDROID_LOG_WARN, "A1VR", "2Dguard clean again at %s", where ? where : "?");
+        logWarning("2Dguard clean again at %s", where ? where : "?");
+    }
+
+    if (dirty && heal) {
+        g_modelview.s.resize(1);
+        g_modelview.s[0] = identity();
+    }
+    return dirty ? 1 : 0;
+}
+
+void a1ff2DFaultToggle(void) {
+    const bool armed = (g_inject2D[0] != 0.0f || g_inject2D[1] != 0.0f);
+    g_inject2D[0] = armed ? 0.0f : 37.0f;   // 37 virtual px right == ~74 device px on the panel
+    g_inject2D[1] = 0.0f;
+    __android_log_print(ANDROID_LOG_WARN, "A1VR", "2Dguard fault injection %s",
+                        armed ? "OFF" : "ON (+37 px x)");
 }
 
 // ---- client vertex arrays ----
@@ -264,6 +443,8 @@ namespace a1ff {
 namespace {
 
 GLboolean g_texture2DEnabled = GL_FALSE;
+// Set by a1ffSetBrightnessNeutral: pins a1_Brightness to 1.0 for full-screen post-processing passes.
+bool      g_brightnessNeutral = false;
 GLuint    g_currentProgram   = 0;
 
 GLuint g_vao = 0, g_vbo = 0, g_ibo = 0;
@@ -617,7 +798,8 @@ void flushEngine(GLenum mode, const std::vector<int>& verts) {
     if (L.alphaRef   >= 0) glUniform1f(L.alphaRef, g_alphaTestRef);
     if (L.clipEnabled>= 0) glUniform1i(L.clipEnabled, g_clipEnabledMask);
     if (L.clipPlane  >= 0) glUniform4fv(L.clipPlane, 2, &g_clipPlaneEq[0][0]);
-    if (L.brightness >= 0) glUniform1f(L.brightness, VR_IsActive() ? VR_Settings()->brightness : 1.0f);
+    if (L.brightness >= 0) glUniform1f(L.brightness,
+        (g_brightnessNeutral || !VR_IsActive()) ? 1.0f : VR_Settings()->brightness);
     // Depth-cue / fog distance scale: VR eye-space is metres, but classicDepth & fog expect world units.
     if (L.depthScale >= 0) glUniform1f(L.depthScale, VR_IsActive() ? VR_Settings()->worldScaleWUM : 1.0f);
 
@@ -721,6 +903,7 @@ void ensureMorph() {
 extern "C" {
 
 void a1ffSetTexture2D(GLboolean enabled) { g_texture2DEnabled = enabled; }
+void a1ffSetBrightnessNeutral(GLboolean on) { g_brightnessNeutral = (on != GL_FALSE); }
 
 void a1ffSetAlphaTest(GLboolean enabled) { g_alphaTestEnabled = enabled; }
 void a1ffAlphaFunc(GLenum /*func*/, GLclampf ref) { g_alphaTestRef = ref; }

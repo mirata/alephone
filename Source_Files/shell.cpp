@@ -791,6 +791,13 @@ short get_level_number_from_user(void)
 	return level;
 }
 
+#if defined(__ANDROID__)
+// GLES fixed-function shim (gl_es_compat.cpp); declared here so shell.cpp needn't pull in the GL
+// headers. Arms/disarms the deliberate 2D-image offset used to reproduce the intermittent
+// shifted-menu/terminal bug -- see a1ff2DGuard().
+extern "C" void a1ff2DFaultToggle(void);
+#endif
+
 const uint32 TICKS_BETWEEN_EVENT_POLL = 16; // 60 Hz
 void main_event_loop(void)
 {
@@ -855,6 +862,22 @@ void main_event_loop(void)
 					}
 				}
 				s_vrConsolePrev = consoleBtn;
+			}
+
+			// Bound "2D Offset Test" button (VR_ACT_DIAG2D) -> arm/disarm the deliberate 2D-image
+			// offset. This reproduces, on demand, the intermittent bug where the main menu / a
+			// terminal renders shifted sideways while the buttons still respond at their un-shifted
+			// positions: it forces exactly the fault we suspect (a stray translation left in the
+			// fixed-function modelview, which nothing in the 2D path ever resets). Works in menus
+			// and terminals as well as in-game. Press again to clear.
+			{
+				static bool s_vrDiagPrev = false;
+				const bool diagBtn = VR_ActionHeld(VR_ACT_DIAG2D);
+				if (diagBtn && !s_vrDiagPrev) {
+					a1ff2DFaultToggle();
+					PlayInterfaceButtonSound(Sound_ButtonSuccess());
+				}
+				s_vrDiagPrev = diagBtn;
 			}
 		}
 #endif
