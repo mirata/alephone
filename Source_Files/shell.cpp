@@ -914,6 +914,18 @@ void main_event_loop(void)
 				break;
 		}
 
+#if defined(__ANDROID__)
+		// VR: never idle-wait on the SDL event queue. Moving your HEAD generates no SDL events, so at
+		// a menu the queue is usually empty and the wait below blocks the full 30 ms -- throttling
+		// OpenXR frame submission to ~33 Hz and making it irregular. The compositor's reprojection
+		// fixes up head ROTATION but not TRANSLATION, so the world-locked 2D panel visibly swims when
+		// you move your head. xrWaitFrame (inside the frame submit) is the correct pacing primitive
+		// and sleeps in the runtime, so dropping the yield costs no extra CPU. Same fix in
+		// sdl_dialogs.cpp for the dialog loop.
+		if (VR_IsActive())
+			yield_time = false;
+#endif
+
 		if (poll_event) {
 			global_idle_proc();
 

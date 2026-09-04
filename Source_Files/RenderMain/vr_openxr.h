@@ -227,6 +227,14 @@ bool VR_GetSecondaryPunch(void);
 // weapon code tell a thrust-started fist shot (suppress the swing animation) from a trigger-started one.
 bool VR_PrimaryPunchRecent(void);
 bool VR_SecondaryPunchRecent(void);
+// ---- Display refresh rate (XR_FB_display_refresh_rate) ------------------------------------------
+// Quest runs every app at 72 Hz unless it explicitly requests otherwise; the extension is what makes
+// 80/90/120 reachable. All three are no-ops when the runtime doesn't advertise the extension.
+// The app always runs at the highest rate the runtime reports -- there is no preference for this.
+int   VR_GetRefreshRates(float* out, int maxCount);  // supported rates; returns how many were written
+float VR_GetRefreshRate(void);                       // current rate, 0 if unknown
+bool  VR_SetRefreshRate(float hz);                   // request a rate; false if unsupported or refused
+
 // Drop the cached placement of the world-locked 2D panel so it is re-placed (and re-sized) on the
 // next screen-layer frame. placePanel() bakes screenDistanceM/screenHeightM in at placement time and
 // is otherwise only re-run after a world frame, so without this a panel pref changed at a menu does

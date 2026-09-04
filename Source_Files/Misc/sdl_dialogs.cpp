@@ -2350,7 +2350,20 @@ void dialog::start(bool play_sound)
 bool dialog::process_events()
 {
 	SDL_Event e;
-	if (SDL_WaitEventTimeout(&e, 30))
+	// VR: poll instead of idle-waiting. The 30 ms wait below throttles OpenXR frame submission to
+	// ~33 Hz whenever the queue is empty (head movement raises no SDL events), and the compositor
+	// only reprojects head rotation, not translation -- so the world-locked dialog panel judders as
+	// you move. dialog::run submits a frame each iteration via update()->MainScreenSwap, and
+	// xrWaitFrame in there paces the loop properly. Mirrors the same fix in shell.cpp.
+	bool got_event;
+#if defined(__ANDROID__)
+	if (VR_IsActive())
+		got_event = SDL_PollEvent(&e) != 0;
+	else
+#endif
+		got_event = SDL_WaitEventTimeout(&e, 30) != 0;
+
+	if (got_event)
 	{
 		event(e);
 		while (!done && SDL_PollEvent(&e))

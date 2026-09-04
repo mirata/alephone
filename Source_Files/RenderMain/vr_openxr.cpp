@@ -25,6 +25,8 @@
 #include <android/log.h>
 #include <SDL2/SDL.h>
 #include <cstring>
+#include <cstdio>
+#include <vector>
 #include <cstdlib>
 #include <cmath>
 
@@ -58,6 +60,13 @@ bool        s_active   = false;          // instance + system created
 
 // Session-level state (created lazily once the GL context exists).
 XrSession      s_session = XR_NULL_HANDLE;
+
+// XR_FB_display_refresh_rate. Enabled only when the runtime advertises it -- asking xrCreateInstance
+// for an unavailable extension makes the whole call fail, so it must be probed first.
+bool s_hasRefreshRateExt = false;
+PFN_xrEnumerateDisplayRefreshRatesFB s_pfnEnumRates = nullptr;
+PFN_xrGetDisplayRefreshRateFB        s_pfnGetRate   = nullptr;
+PFN_xrRequestDisplayRefreshRateFB    s_pfnReqRate   = nullptr;
 XrSpace        s_stageSpace = XR_NULL_HANDLE;   // world reference (metres)
 XrSpace        s_headSpace  = XR_NULL_HANDLE;   // VIEW space (for locating eyes)
 XrSessionState s_sessionState = XR_SESSION_STATE_UNKNOWN;
@@ -390,6 +399,26 @@ bool startSession() {
 	sci.systemId = s_systemId;
 	if (XR_FAILED(xrCreateSession(s_instance, &sci, &s_session))) { A1VR_LOG("xrCreateSession failed"); return false; }
 
+	// Display refresh rate. Quest hands every app 72 Hz; anything higher has to be asked for.
+	if (s_hasRefreshRateExt) {
+		xrGetInstanceProcAddr(s_instance, "xrEnumerateDisplayRefreshRatesFB", (PFN_xrVoidFunction*)&s_pfnEnumRates);
+		xrGetInstanceProcAddr(s_instance, "xrGetDisplayRefreshRateFB",       (PFN_xrVoidFunction*)&s_pfnGetRate);
+		xrGetInstanceProcAddr(s_instance, "xrRequestDisplayRefreshRateFB",   (PFN_xrVoidFunction*)&s_pfnReqRate);
+		float rates[32];
+		const int n = VR_GetRefreshRates(rates, 32);
+		char buf[256]; int off = 0;
+		for (int i = 0; i < n && off < (int)sizeof(buf) - 8; ++i)
+			off += std::snprintf(buf + off, sizeof(buf) - off, "%s%.0f", i ? "/" : "", rates[i]);
+		if (!n) std::snprintf(buf, sizeof buf, "(none reported)");
+		A1VR_LOG("VR: display refresh rates supported: %s Hz; current %.0f Hz", buf, VR_GetRefreshRate());
+		// Always run at the highest rate the runtime offers. Quest hands every app 72 Hz by default;
+		// there is deliberately no preference for this.
+		float want = 0.0f;
+		for (int i = 0; i < n; ++i) if (rates[i] > want) want = rates[i];
+		if (want > 0.0f)
+			VR_SetRefreshRate(want);
+	}
+
 	XrReferenceSpaceCreateInfo head = { XR_TYPE_REFERENCE_SPACE_CREATE_INFO };
 	head.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
 	head.poseInReferenceSpace.orientation.w = 1.0f;
@@ -478,10 +507,30 @@ extern "C" bool VR_InitOpenXR(void)
 		A1VR_LOG("VR_InitOpenXR: xrInitializeLoaderKHR not found");
 	}
 
-	const char* extensions[] = {
+	// Probe for optional extensions FIRST: xrCreateInstance fails outright if asked for one the
+	// runtime doesn't have, so an unconditional request would take the whole VR mode down on any
+	// headset/runtime lacking it.
+	s_hasRefreshRateExt = false;
+	{
+		uint32_t extCount = 0;
+		if (XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(nullptr, 0, &extCount, nullptr)) && extCount) {
+			std::vector<XrExtensionProperties> props(extCount, { XR_TYPE_EXTENSION_PROPERTIES });
+			if (XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(nullptr, extCount, &extCount, props.data()))) {
+				for (uint32_t i = 0; i < extCount; ++i)
+					if (!std::strcmp(props[i].extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME))
+						s_hasRefreshRateExt = true;
+			}
+		}
+	}
+	A1VR_LOG("VR_InitOpenXR: %s %s", XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME,
+		s_hasRefreshRateExt ? "available" : "NOT available (locked to the runtime default rate)");
+
+	std::vector<const char*> extensions = {
 		XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME,
 		XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME,
 	};
+	if (s_hasRefreshRateExt)
+		extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
 	XrInstanceCreateInfoAndroidKHR androidInfo{};
 	androidInfo.type = XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR;
 	androidInfo.applicationVM = vm;
@@ -493,8 +542,8 @@ extern "C" bool VR_InitOpenXR(void)
 	std::strcpy(ici.applicationInfo.applicationName, "Aleph One");
 	std::strcpy(ici.applicationInfo.engineName, "Aleph One");
 	ici.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
-	ici.enabledExtensionCount = sizeof(extensions) / sizeof(extensions[0]);
-	ici.enabledExtensionNames = extensions;
+	ici.enabledExtensionCount = (uint32_t)extensions.size();
+	ici.enabledExtensionNames = extensions.data();
 
 	if (XR_FAILED(xrCreateInstance(&ici, &s_instance))) {
 		A1VR_LOG("VR_InitOpenXR: xrCreateInstance failed (runtime unavailable?)");
@@ -514,6 +563,41 @@ extern "C" bool VR_InitOpenXR(void)
 }
 
 extern "C" bool VR_IsActive(void) { return s_active; }
+
+// ---- Display refresh rate -----------------------------------------------------------------------
+// All three degrade to "unsupported" (0 / false) when the runtime lacks XR_FB_display_refresh_rate,
+// in which case the app simply stays on whatever the runtime picked (72 Hz on Quest).
+extern "C" int VR_GetRefreshRates(float* out, int maxCount)
+{
+	if (!s_pfnEnumRates || s_session == XR_NULL_HANDLE || !out || maxCount <= 0) return 0;
+	uint32_t count = 0;
+	if (XR_FAILED(s_pfnEnumRates(s_session, 0, &count, nullptr)) || !count) return 0;
+	std::vector<float> rates(count, 0.0f);
+	if (XR_FAILED(s_pfnEnumRates(s_session, count, &count, rates.data()))) return 0;
+	const int n = (int)count < maxCount ? (int)count : maxCount;
+	for (int i = 0; i < n; ++i) out[i] = rates[i];
+	return n;
+}
+
+extern "C" float VR_GetRefreshRate(void)
+{
+	if (!s_pfnGetRate || s_session == XR_NULL_HANDLE) return 0.0f;
+	float hz = 0.0f;
+	if (XR_FAILED(s_pfnGetRate(s_session, &hz))) return 0.0f;
+	return hz;
+}
+
+extern "C" bool VR_SetRefreshRate(float hz)
+{
+	if (!s_pfnReqRate || s_session == XR_NULL_HANDLE || hz <= 0.0f) return false;
+	const XrResult r = s_pfnReqRate(s_session, hz);
+	if (XR_FAILED(r)) {
+		A1VR_LOG("VR: display refresh rate %.0f Hz REFUSED (%d) -- staying at %.0f Hz", hz, r, VR_GetRefreshRate());
+		return false;
+	}
+	A1VR_LOG("VR: display refresh rate set to %.0f Hz", hz);
+	return true;
+}
 
 namespace {
 	vr_settings_t s_settings = {
@@ -2985,6 +3069,9 @@ extern "C" unsigned VR_CurrentEyeFramebuffer(void) { return 0; }
 extern "C" int  VR_CurrentEye(void)     { return 0; }
 extern "C" void VR_MarkWorldFramePresented(void) {}
 extern "C" void VR_InvalidatePanelPlacement(void) {}
+extern "C" int   VR_GetRefreshRates(float*, int) { return 0; }
+extern "C" float VR_GetRefreshRate(void)         { return 0.0f; }
+extern "C" bool  VR_SetRefreshRate(float)        { return false; }
 extern "C" bool VR_TakeWorldFramePresented(void) { return false; }
 extern "C" unsigned VR_ScreenLayerFramebuffer(void) { return 0; }
 extern "C" void VR_PresentScreenLayer(void) {}

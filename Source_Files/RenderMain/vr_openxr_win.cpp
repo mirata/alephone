@@ -5,6 +5,9 @@
 extern "C" bool VR_InitOpenXR(void)     { return false; }
 extern "C" bool VR_IsActive(void)       { return false; }
 extern "C" void VR_InvalidatePanelPlacement(void) {}
+extern "C" int   VR_GetRefreshRates(float*, int) { return 0; }
+extern "C" float VR_GetRefreshRate(void)         { return 0.0f; }
+extern "C" bool  VR_SetRefreshRate(float)        { return false; }
 extern "C" vr_settings_t* VR_Settings(void) {
 	// Positional -- keep in step with vr_settings_t's field ORDER (vr_openxr.h). Inserting a field
 	// mid-struct without adding its value here silently shifts every value after it.
