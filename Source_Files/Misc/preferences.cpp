@@ -1139,7 +1139,9 @@ static const float vr_hud_distance_values[] = { 0.8f, 1.0f, 1.2f, 1.5f };
 // Panel height as a FRACTION of the HUD distance -> sets APPARENT (angular) size directly and stays
 // constant as Distance changes (Distance only affects stereo depth; see VR_PresentHudEye). Bigger =
 // larger on screen. Values happen to equal the old metre-heights at the 1.0 m default distance.
-static const char *vr_hud_size_labels[] = { "Small", "Normal", "Large", "Huge", "Max", NULL };
+// Same 5-step vocabulary as Panel Size -- two size controls in one dialog reading "Small/Normal/
+// Large/Huge/Max" and "Smallest/.../Largest" was half the confusion.
+static const char *vr_hud_size_labels[] = { "Smallest", "Small", "Medium", "Large", "Largest", NULL };
 static const float vr_hud_size_values[] = { 0.55f, 0.70f, 0.90f, 1.15f, 1.45f };
 
 // Global multiplier on ALL Lua HUD text (applied in Lua_Font::Scale via g_lua_hud_font_scale). The
@@ -1882,48 +1884,38 @@ static void vr_graphics_dialog(void *arg)
 	w_select_popup *hud_plugin_w = new w_select_popup();
 	hud_plugin_w->set_labels(hud_plugin_labels);
 	hud_plugin_w->set_selection(hud_plugin_index >= 0 ? hud_plugin_index : 0);
-	table->dual_add(hud_plugin_w->label("HUD Plugin"), d);
+	table->dual_add(hud_plugin_w->label("Plugin"), d);
 	table->dual_add(hud_plugin_w, d);
 
-	w_select_popup *hud_scale_w = new w_select_popup();
-	hud_scale_w->set_labels(build_stringvector_from_cstring_array(hud_scale_labels));
-	hud_scale_w->set_selection(graphics_preferences->screen_mode.hud_scale_level);
-	table->dual_add(hud_scale_w->label("HUD Size"), d);
-	table->dual_add(hud_scale_w, d);
-	hud_w->add_dependent_widget(hud_scale_w);
-
-	// Text scale lives with the other HUD content options rather than with the plane geometry below:
-	// it changes what the HUD says, not where it sits.
-	w_select *hud_text_scale_w = new w_select(
-		vr_closest_index(vr_hud_text_scale_values, 4, vr->hudTextScale), vr_hud_text_scale_labels);
-	table->dual_add(hud_text_scale_w->label("HUD Text Scale"), d);
-	table->dual_add(hud_text_scale_w, d);
-
-	w_toggle *laser_sight_w = new w_toggle(vr->showLaserSight != 0);
-	table->dual_add(laser_sight_w->label("Laser Sight"), d);
-	table->dual_add(laser_sight_w, d);
-
-	table->add_row(new w_spacer(), true);
-
-	// Geometry of the head-locked HUD plane. Grouped under its own heading so "Size" here reads as
-	// the plane's apparent size and can't be confused with the "HUD Size" above (which is the stock
-	// hud_scale_level, sizing the HUD graphic inside the layer).
-	table->dual_add_row(new w_static_text("HUD Panel"), d);
+	// ONE size control for the HUD. There used to be two: this one (the head-locked plane's apparent
+	// size) under a separate "HUD Panel" heading, and the stock hud_scale_level -- also called
+	// "HUD Size" -- up here. The stock one is a flat-renderer knob that only reaches the CLASSIC HUD
+	// (via HUD_DestRect); the Enhanced/Lua HUD that ships as the default ignores it entirely, so it
+	// was a control that mostly did nothing sitting next to one that always works. Dropped, and this
+	// one moved into the HUD group where people look for it.
+	w_select *hud_size_w = new w_select(
+		vr_closest_index(vr_hud_size_values, 5, vr->hudSizeM), vr_hud_size_labels);
+	table->dual_add(hud_size_w->label("Size"), d);
+	table->dual_add(hud_size_w, d);
 
 	w_select *hud_dist_w = new w_select(
 		vr_closest_index(vr_hud_distance_values, 4, vr->hudDistanceM), vr_hud_distance_labels);
 	table->dual_add(hud_dist_w->label("Distance"), d);
 	table->dual_add(hud_dist_w, d);
 
-	w_select *hud_size_w = new w_select(
-		vr_closest_index(vr_hud_size_values, 5, vr->hudSizeM), vr_hud_size_labels);
-	table->dual_add(hud_size_w->label("Size"), d);
-	table->dual_add(hud_size_w, d);
-
 	w_select *hud_tilt_w = new w_select(
 		vr_closest_index(vr_hud_tilt_values, 5, vr->hudTiltDeg), vr_hud_tilt_labels);
 	table->dual_add(hud_tilt_w->label("Tilt"), d);
 	table->dual_add(hud_tilt_w, d);
+
+	w_select *hud_text_scale_w = new w_select(
+		vr_closest_index(vr_hud_text_scale_values, 4, vr->hudTextScale), vr_hud_text_scale_labels);
+	table->dual_add(hud_text_scale_w->label("Text Scale"), d);
+	table->dual_add(hud_text_scale_w, d);
+
+	w_toggle *laser_sight_w = new w_toggle(vr->showLaserSight != 0);
+	table->dual_add(laser_sight_w->label("Laser Sight"), d);
+	table->dual_add(laser_sight_w, d);
 
 	table->add_row(new w_spacer(), true);
 
@@ -1946,16 +1938,19 @@ static void vr_graphics_dialog(void *arg)
 
 	table->add_row(new w_spacer(), true);
 
+	table->dual_add_row(new w_static_text("Map"), d);
+
 	w_toggle *map_w = new w_toggle(graphics_preferences->screen_mode.translucent_map);
-	table->dual_add(map_w->label("Overlay Map"), d);
+	table->dual_add(map_w->label("Overlay"), d);
 	table->dual_add(map_w, d);
 
-	// Sits with Overlay Map: both are "how the map reads", not VR comfort.
 	w_toggle *map_player_up_w = new w_toggle(vr->mapPlayerUp != 0);
 	table->dual_add(map_player_up_w->label("Player-Up Rotation"), d);
 	table->dual_add(map_player_up_w, d);
 
 	table->add_row(new w_spacer(), true);
+
+	table->dual_add_row(new w_static_text("World"), d);
 
 	// In VR this shared pref is the ONLY view-bob control (the old VR-only "Disable View Bob" toggle
 	// was folded into it). bob_index maps the 3-way pref onto the 2 behaviours VR can tell apart.
@@ -2005,8 +2000,6 @@ static void vr_graphics_dialog(void *arg)
 			for (auto i = 0; i < hud_plugins.size(); ++i) hud_plugins[i]->enabled = (i == hud_plugin);
 			changed = true;
 		}
-		short hud_scale = static_cast<short>(hud_scale_w->get_selection());
-		if (hud_scale != graphics_preferences->screen_mode.hud_scale_level) { graphics_preferences->screen_mode.hud_scale_level = hud_scale; changed = true; }
 		bool translucent_map = map_w->get_selection() != 0;
 		if (translucent_map != graphics_preferences->screen_mode.translucent_map) { graphics_preferences->screen_mode.translucent_map = translucent_map; changed = true; }
 

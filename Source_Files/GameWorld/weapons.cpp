@@ -2238,6 +2238,24 @@ static void calculate_weapon_origin_and_vector(
 			float ox = 0.0f, oy = 0.0f;
 			VR_GetHeadOffset(&ox, &oy);
 			lean_x = (world_distance)ox; lean_y = (world_distance)oy; eye_z = (world_distance)VR_GetEyeZOffset();
+
+			// ...and then out to the HAND. The head terms above only place the origin at the player's
+			// eye; the fire direction below comes from the controller, so without this the shot is a
+			// ray from the eye pointing where the hand points -- moving the weapon up or down changes
+			// nothing (it only translates the controller, it doesn't rotate it) and the laser sight,
+			// which already casts from the controller (render_vr_aim_reticle), shows a dot the bullet
+			// never travels to. The wall clamp below then applies to the muzzle, so a hand pushed into
+			// geometry still can't shoot through it.
+			float hx = 0.0f, hy = 0.0f, hz = 0.0f;
+			const bool got_hand = vr_use_offhand
+				? VR_GetSecondaryWeaponOriginOffset(&hx, &hy, &hz)
+				: VR_GetWeaponOriginOffset(&hx, &hy, &hz);
+			if (got_hand)
+			{
+				lean_x += (world_distance)hx;
+				lean_y += (world_distance)hy;
+				eye_z  += (world_distance)hz;
+			}
 			have_vr_origin = true;
 		}
 #endif
@@ -2263,7 +2281,21 @@ static void calculate_weapon_origin_and_vector(
 			source_location = vr_origin;
 		}
 	}
-	origin->z += trigger_definition->dz;
+	// dz/dx are SCREEN-SPACE offsets: they line the projectile up with the 2D weapon sprite the flat
+	// renderer draws at a fixed spot on screen. Once the muzzle is anchored to the physical
+	// controller (above) they just shove the spawn point off the hand -- and they are big. dz runs
+	// -20 WU on the pistol/shotgun/SMG (~4 cm, barely noticed) up to -80 on the fusion pistol
+	// (~15.6 cm), -150 on the M2 shotgun and -160 on the alien weapon (~31 cm); the missile
+	// launcher's dx is -128 WU (~25 cm sideways). Suppress both wherever the origin came from a
+	// controller. This generalises the dual-pistol dx case below, which had the same reasoning.
+	// Scoped to exactly the branch that applied the hand offset: the netgame path still starts at
+	// the head, so its behaviour is left byte-identical until shot origin reaches wire parity.
+	bool vr_hand_muzzle = false;
+#if defined(__ANDROID__)
+	vr_hand_muzzle = (VR_IsActive() && player_index == local_player_index && !game_is_networked);
+#endif
+	if (!vr_hand_muzzle)
+		origin->z += trigger_definition->dz;
 
 	/* Translate the projectile out to the end of the gun barrel.. */
 	translate_point3d(origin, WEAPON_FORWARD_DISPLACEMENT,
@@ -2279,17 +2311,15 @@ static void calculate_weapon_origin_and_vector(
 		dx_translation_amount= 0;
 	} else {
 		dx_translation_amount= trigger_definition->dx;
-		// In VR each pistol fires along its controller's aim; the classic screen-space barrel offset
+		// In VR each weapon fires along its controller's aim; the classic screen-space barrel offset
 		// would shift the muzzle off the hand and land bullets left/right of the aim. Zero it so each
-		// hand shoots exactly where it aims -- for the synced netgame path (all clients, deterministic)
-		// and the single-player live path alike. See docs/VR_NETCODE.md.
+		// hand shoots exactly where it aims. The netgame branch stays restricted to dual pistols (the
+		// case it was added for) so netplay is unchanged; the local VR branch now covers every weapon,
+		// since the origin it pairs with is hand-anchored. See docs/VR_NETCODE.md.
 		if (vr_net_is_active() && definition->weapon_class == _twofisted_pistol_class)
 			dx_translation_amount = 0;
-#if defined(__ANDROID__)
-		else if (VR_IsActive() && player_index == local_player_index && !game_is_networked
-			&& definition->weapon_class == _twofisted_pistol_class)
+		else if (vr_hand_muzzle)
 			dx_translation_amount = 0;
-#endif
 	}
 
 	/* Handle the left/right translation */

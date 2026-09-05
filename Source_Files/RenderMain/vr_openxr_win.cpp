@@ -93,6 +93,8 @@ extern "C" bool VR_IsTwoHandedActive() { return false; }
 extern "C" bool VR_GetTwoHandedFwdStage(float*) { return false; }
 extern "C" bool VR_GetHeadPosStage(float*) { return false; }
 extern "C" bool VR_GetWeaponAim(float*) { return false; }
+extern "C" bool VR_GetWeaponOriginOffset(float*, float*, float*) { return false; }
+extern "C" bool VR_GetSecondaryWeaponOriginOffset(float*, float*, float*) { return false; }
 extern "C" bool VR_GetSecondaryWeaponAim(float*) { return false; }
 extern "C" bool VR_TakeMenuButton(void) { return false; }
 extern "C" bool VR_HasFocus(void) { return false; }

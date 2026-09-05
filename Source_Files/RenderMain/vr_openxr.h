@@ -412,6 +412,13 @@ bool VR_GetWeaponAim(float dir[3]);
 // other hand. Used when the secondary weapon fires so the left gun aims along the left controller.
 bool VR_GetSecondaryWeaponAim(float dir[3]);
 
+// Offset from the player's HEAD to the firing hand, in world units, already rotated into game axes
+// (same convention as VR_GetHeadOffset). Added to the head-based shot origin so bullets leave the
+// GUN rather than the eye -- without it the origin is the head while the direction is the hand's, so
+// raising or lowering the weapon does not move the point of impact. wz is the vertical component.
+bool VR_GetWeaponOriginOffset(float* wx, float* wy, float* wz);
+bool VR_GetSecondaryWeaponOriginOffset(float* wx, float* wy, float* wz);
+
 // HUD layer: the engine draws the 2D HUD (Lua plugin HUD or classic OGL HUD) into this transparent
 // offscreen each frame; VR_PresentHudEye then composites it head-locked, in front of the world, into
 // each eye (alpha-blended, depth off). hudDistanceM/hudSizeM (VR settings) control its placement so

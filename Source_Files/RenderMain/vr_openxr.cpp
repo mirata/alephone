@@ -2351,6 +2351,40 @@ extern "C" bool VR_GetSecondaryWeaponAim(float dir[3])
 	return aimStageToWorld(hand, dir);
 }
 
+// Offset from the head to a controller, in world units and game axes. Mirrors the transform
+// render_vr_aim_reticle uses for the laser sight (controller pos - head pos, scaled by worldScale and
+// rotated by the yaw offset), so the laser and the bullet start from the same point instead of
+// running as parallel rays from the hand and the eye.
+static bool handOffsetFromHead(int hand, float* wx, float* wy, float* wz)
+{
+	if (wx) *wx = 0.0f; if (wy) *wy = 0.0f; if (wz) *wz = 0.0f;
+	float hp[3], ps[3], fs[3];
+	if (!VR_GetHeadPosStage(hp)) return false;
+	if (!VR_GetAimPoseStage(hand, ps, fs)) return false;
+	const float dx = ps[0] - hp[0];
+	const float dy = ps[1] - hp[1];
+	const float dz = ps[2] - hp[2];
+	const float W  = s_settings.worldScaleWUM;
+	const float yr = s_yawOffset * (2.0f * 3.14159265358979f / 512.0f);
+	const float c  = std::cos(yr), sn = std::sin(yr);
+	if (wx) *wx = W * (-c  * dx + sn * dz);
+	if (wy) *wy = W * (-sn * dx - c  * dz);
+	if (wz) *wz = W * dy;
+	return true;
+}
+
+extern "C" bool VR_GetWeaponOriginOffset(float* wx, float* wy, float* wz)
+{
+	// Dominant hand -- matches VR_GetWeaponAim, including while two-handed (the model and the grip
+	// still sit on the dominant controller; only the aim DIRECTION comes from the inter-hand vector).
+	return handOffsetFromHead(s_settings.dominantHand ? 0 : 1, wx, wy, wz);
+}
+
+extern "C" bool VR_GetSecondaryWeaponOriginOffset(float* wx, float* wy, float* wz)
+{
+	return handOffsetFromHead(s_settings.dominantHand ? 1 : 0, wx, wy, wz);
+}
+
 // Menu (hamburger) button press, consumed once. The main loop turns this into the in-game quit dialog.
 extern "C" bool VR_TakeMenuButton(void) { bool v = s_menuLatch; s_menuLatch = false; return v; }
 
@@ -3091,6 +3125,8 @@ extern "C" bool VR_IsTwoHandedActive() { return false; }
 extern "C" bool VR_GetTwoHandedFwdStage(float*) { return false; }
 extern "C" bool VR_GetHandTracking(int, bool*, float*) { return false; }
 extern "C" bool VR_GetHeadPosStage(float*) { return false; }
+extern "C" bool VR_GetWeaponOriginOffset(float*, float*, float*) { return false; }
+extern "C" bool VR_GetSecondaryWeaponOriginOffset(float*, float*, float*) { return false; }
 extern "C" bool VR_GetWeaponAim(float*) { return false; }
 extern "C" bool VR_GetSecondaryWeaponAim(float*) { return false; }
 extern "C" bool VR_TakeMenuButton(void) { return false; }
