@@ -26,6 +26,9 @@
 #define MACHINE_TICKS_PER_SECOND 1000
 
 extern uint64_t machine_tick_count(void);
+// Microsecond-resolution companion to machine_tick_count(). Use where a millisecond quantum is too
+// coarse -- notably timing the 30 Hz tick interpolation against a high display refresh rate.
+extern uint64_t machine_tick_count_us(void);
 extern void sleep_for_machine_ticks(uint32 ticks);
 extern void sleep_until_machine_tick_count(uint64_t ticks);
 extern void yield(void);

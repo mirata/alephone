@@ -48,6 +48,22 @@ uint64_t machine_tick_count(void)
 }
 
 /*
+ *  Same clock, microsecond resolution.
+ *
+ *  The millisecond counter above is too coarse to time the 30 Hz tick interpolation against a high
+ *  refresh rate: one tick is 33.33 ms, so a 1 ms quantum is 3% of a tick. At 120 Hz a frame is
+ *  8.33 ms, so the measured per-frame elapsed alternates 8, 8, 9, 8, 8, 9 -- the interpolation
+ *  fraction advances in an irregular pattern and the world visibly judders while translating (see
+ *  get_heartbeat_fraction). At 72 Hz the same 1 ms sat against a 13.9 ms frame and mattered half as
+ *  much, which is why raising the refresh rate is what exposed it.
+ */
+uint64_t machine_tick_count_us(void)
+{
+	const auto now = std::chrono::steady_clock::now();
+	return std::chrono::duration_cast<std::chrono::microseconds>(now - epoch).count() / TIME_SKEW;
+}
+
+/*
  *  Delay a certain number of ticks
  */
 

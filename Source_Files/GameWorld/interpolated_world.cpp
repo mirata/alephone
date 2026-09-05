@@ -42,7 +42,9 @@ static const world_distance default_speed_limit = WORLD_ONE_HALF;
 static const world_distance projectile_speed_limit = WORLD_ONE;
 
 bool world_is_interpolated;
-static uint64_t start_machine_tick;
+// Microseconds, not milliseconds: this times the interpolation between 30 Hz ticks against the
+// display refresh rate, and a 1 ms quantum is 3% of a 33.33 ms tick. See machine_tick_count_us().
+static uint64_t start_machine_tick_us;
 
 extern struct view_data* world_view;
 
@@ -234,7 +236,7 @@ void enter_interpolated_world()
 		return;
 	}
 	
-	start_machine_tick = machine_tick_count();
+	start_machine_tick_us = machine_tick_count_us();
 	
 	previous_tick_objects.assign(current_tick_objects.begin(),
 								 current_tick_objects.end());
@@ -839,7 +841,18 @@ float get_heartbeat_fraction()
 	}
 	else
 	{
-		auto fraction = static_cast<float>((machine_tick_count() - start_machine_tick) * TICKS_PER_SECOND + 1) / MACHINE_TICKS_PER_SECOND;
+		// Elapsed since the tick, in ticks. Microsecond-resolution so the fraction advances smoothly
+		// frame to frame: with the old millisecond clock this stepped by 0.03 per ms, which at 120 Hz
+		// made the per-frame advance alternate between 8 and 9 ms worth of movement (~6% swing) and
+		// read as judder while walking or strafing. Rotation was unaffected (it comes from the
+		// headset pose, not this clock), which is exactly why only translation felt rough.
+		// The trailing epsilon reproduces the old "+1" numerator (which was +0.001 ticks). It is not
+		// cosmetic: the fps_target>0 branch below does ceil(fraction * q), so a fraction of exactly 0
+		// at a tick boundary would floor that whole frame to the previous tick instead of the first
+		// sub-step. VR takes the fps_target==0 branch and doesn't care, but the flat 60/120 paths do.
+		auto fraction = static_cast<float>(
+			(double)(machine_tick_count_us() - start_machine_tick_us) * TICKS_PER_SECOND / 1000000.0
+			+ 0.001);
 		
 		auto speed = 1.f;
 		if (game_is_being_replayed() && get_replay_speed() < 0)
