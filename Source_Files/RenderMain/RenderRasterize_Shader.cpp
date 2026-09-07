@@ -383,7 +383,7 @@ void RenderRasterize_Shader::clip_to_window(clipping_window_data *win)
     // recenter to player's orientation temporarily
     glPushMatrix();
     glTranslatef(view->origin.x, view->origin.y, 0.);
-    glRotatef(view->yaw * (360/float(FULL_CIRCLE)) + 90., 0., 0., 1.);
+    glRotatef(view->cone_yaw * (360/float(FULL_CIRCLE)) + 90., 0., 0., 1.);
 
     glRotatef(-0.1, 0., 0., 1.); // leave some excess to avoid artifacts at edges
 	if (win->left.i != leftmost_clip.i || win->left.j != leftmost_clip.j) {
@@ -863,7 +863,7 @@ void RenderRasterize_Shader::render_node_floor_or_ceiling(clipping_window_data *
 		if (window->y0 > 0 || window->y1 < view->screen_height) {
 			const float adj_h = float(surface->height - view->origin.z);
 			const float vox   = float(view->origin.x), voy = float(view->origin.y);
-			const float yr    = float(view->yaw) * float(2.0 * M_PI / FULL_CIRCLE);
+			const float yr    = float(view->cone_yaw) * float(2.0 * M_PI / FULL_CIRCLE);
 			const float cy    = cosf(yr), sy = sinf(yr);
 
 			// Sutherland-Hodgman clip against one plane.  Visible side: heighti - plane.j*depth >= 0.

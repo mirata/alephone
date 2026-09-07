@@ -202,7 +202,7 @@ render_object_data *RenderPlaceObjsClass::build_render_object(
 			temp_tfm_origin.y = object->location.y;
 			transformed_origin.z = object->location.z - view->origin.z;
 			uint16 tfm_origin_flags;
-			transform_overflow_point2d(&temp_tfm_origin, (world_point2d *)&view->origin, view->yaw, &tfm_origin_flags);
+			transform_overflow_point2d(&temp_tfm_origin, (world_point2d *)&view->origin, view->cone_yaw, &tfm_origin_flags);
 			long_vector2d *tfm_origin_ptr = (long_vector2d *)(&transformed_origin);
 			overflow_short_to_long_2d(temp_tfm_origin,tfm_origin_flags,*tfm_origin_ptr);
 		}
@@ -702,7 +702,7 @@ auto RenderPlaceObjsClass::build_base_node_list(
 	
 	auto pt_along_object_rect = [&](world_distance offset_from_origin) -> long_point2d // can be off-map
 	{
-		const angle right = normalize_angle(view->yaw + QUARTER_CIRCLE);
+		const angle right = normalize_angle(view->cone_yaw + QUARTER_CIRCLE);
 		const auto v = (1.f*offset_from_origin/TRIG_MAGNITUDE) * long_vector2d{cosine_table[right], sine_table[right]};
 		return origin.xy() + v;
 	};
@@ -754,8 +754,8 @@ void RenderPlaceObjsClass::build_aggregate_render_object_clipping_window(
 		auto eye_vec_toward = [&](long_point2d pt) -> long_vector2d // == 1024*(eye vec _to_ the pt)
 		{ 
 			const auto v = pt - view->origin.xy();
-			const int16 c = cosine_table[view->yaw];
-			const int16 s = sine_table[view->yaw];
+			const int16 c = cosine_table[view->cone_yaw];
+			const int16 s = sine_table[view->cone_yaw];
 			return {c*v.i + s*v.j, c*v.j - s*v.i};
 		};
 	

@@ -22,8 +22,8 @@ android {
         applicationId 'org.alephone'
         minSdk 29                // Quest 2/3 (Android 10 / 12L)
         targetSdk 34                // Meta Horizon Store caps targetSdkVersion at 34 (compileSdk stays 35)
-        versionCode 12
-        versionName '1.2'
+        versionCode 13
+        versionName '1.3'
 
         // app_name is provided per-flavor via resValue (below), so every variant has a name.
         // (It used to live in res/values/strings.xml; moved here to avoid a duplicate-resource

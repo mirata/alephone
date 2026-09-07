@@ -108,6 +108,17 @@ struct view_data
 	float heartbeat_fraction;
 	short origin_polygon_index;
 	angle yaw, pitch, roll;
+	// Azimuth the VISIBILITY CONE is built around: the two edge rays, the endpoint transform, the
+	// screen-column clip windows and the clip planes emitted from them. Always equal to `yaw` today.
+	// It exists so VR can sweep the cone across several sectors (looking straight down, the ground you
+	// can see spans 360deg, which one <162deg cone can never cover) WITHOUT disturbing the things that
+	// must keep following the real head azimuth -- which sprite view of a creature to draw, and which
+	// way to billboard it. Rotate `cone_yaw`, never `yaw`, for that.
+	// NOTE: scottish_textures.cpp (the SOFTWARE rasterizer) still reads `yaw` where it consumes the
+	// cone's transformed coordinates. That is correct today because the two are always equal, and the
+	// software renderer can never run in VR (OpenGL only) -- but it would need converting if cone
+	// sweeping were ever wanted outside VR.
+	angle cone_yaw;
 	fixed_angle virtual_yaw, virtual_pitch;
 	world_point3d origin;
 	_fixed maximum_depth_intensity; /* in fixed units */

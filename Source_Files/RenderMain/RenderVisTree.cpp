@@ -154,7 +154,7 @@ void RenderVisTreeClass::build_render_tree()
 				
 				/* transform all visited endpoints */
 				endpoint->transformed= endpoint->vertex;
-				transform_overflow_point2d(&endpoint->transformed, (world_point2d *) &view->origin, view->yaw, &endpoint->flags);
+				transform_overflow_point2d(&endpoint->transformed, (world_point2d *) &view->origin, view->cone_yaw, &endpoint->flags);
 
 				/* calculate an outbound vector to this endpoint */
 				// LP: changed to do long distance correctly.	
@@ -659,8 +659,8 @@ void RenderVisTreeClass::calculate_line_clipping_information(
 		so we have to do it ourselves */
 	// LP change: making the operation long-distance friendly
 	uint16 p0_flags = 0, p1_flags = 0;
-	transform_overflow_point2d(&p0_orig, (world_point2d *) &view->origin, view->yaw, &p0_flags);
-	transform_overflow_point2d(&p1_orig, (world_point2d *) &view->origin, view->yaw, &p1_flags);
+	transform_overflow_point2d(&p0_orig, (world_point2d *) &view->origin, view->cone_yaw, &p0_flags);
+	transform_overflow_point2d(&p1_orig, (world_point2d *) &view->origin, view->cone_yaw, &p1_flags);
 	
 	// Defining long versions here and copying over
 	long_point2d p0, p1;

@@ -85,6 +85,13 @@ typedef enum {
 
 class RenderRasterizerClass
 {
+public:
+	// Render ONLY the diffuse pass of whatever tree is currently built, with none of the per-frame
+	// shader/uniform setup or the glow+bloom pass that the full render_tree() does. Used by the VR
+	// multi-sector visibility sweep for sectors after the first: they add geometry to an eye buffer
+	// the primary sector has already rendered (and bloomed), so re-running those would double up.
+	void render_tree_diffuse_only() { render_tree(kDiffuse); }
+
 protected:
 	// Auxiliary data and routines:
 	virtual void render_tree(RenderStep renderStep);

@@ -760,6 +760,51 @@ static void render_vr_aim_gizmos(view_data* view)
 	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 }
 
+// ---- VR multi-sector visibility sweep ----------------------------------------------------------
+// Marathon's visibility cone cannot exceed ~162 deg: build_render_tree projects each endpoint onto a
+// 1D screen line (x = half_screen_width + j*world_to_screen_x / i) which requires i > 0 -- in front
+// of the view plane -- and precision dies as i approaches 0. That is fine for a flat player, whose
+// pitch is limited and whose view therefore always fits one forward cone.
+//
+// A VR player can look straight down, and then the ground they can see spans the FULL 360 deg of
+// azimuth. One cone can never cover that, which is why the floor renders as a forward wedge with
+// hard black either side. So sweep the cone across several adjacent sectors and render each. This is
+// pitch-driven: level play uses a single sector and pays nothing.
+//
+// Sector layout (angle units, 512 = full circle; half_cone must stay < 128):
+//   sector 0 -> ALWAYS centred on the view, half_cone 115 (+/-81 deg)
+//   extras   -> half_cone 86 centred at +/-171, which together with sector 0 closes the full circle
+//
+// Sector 0 MUST stay centred, because it is the only sector that places objects (see the eye loop):
+// anything outside its cone gets no sprites. An earlier version centred the 2-sector case at
+// yaw-86/+86, so sector 0 covered [yaw-172, yaw] -- the LEFT half of the view only -- and every
+// sprite right of your facing direction silently vanished. That asymmetric tier is gone; sector 0
+// now spans the same +/-115 it always did, so sprite coverage is exactly the pre-sweep behaviour.
+static int vr_vis_sector_count(const view_data* view)
+{
+	// Signed pitch: NORMALIZE_ANGLE leaves "looking down" near the top of the 0..511 range.
+	int p = (int)view->pitch;
+	if (p > NUMBER_OF_ANGLES / 2) p -= NUMBER_OF_ANGLES;
+	if (p < 0) p = -p;                        // looking up widens the footprint just as looking down
+	// One cone spans +/-81 deg of azimuth. The azimuth a pitched frustum actually needs is
+	// atan2(tan h, cos p - tan v * sin p), which passes 81 deg at roughly 36-40 deg of pitch for the
+	// headset's ~45 deg vertical half-FOV. Switch at ~34 deg, a little early, and go straight to full
+	// coverage -- there is no correct intermediate tier that keeps sector 0 centred.
+	return (p < 48) ? 1 : 3;
+}
+
+static angle vr_vis_sector_offset(int sector)
+{
+	return (angle)(sector == 0 ? 0 : (sector == 1 ? 171 : -171));
+}
+
+// Sector 0 stays wide (and centred) so it places sprites across the whole forward view; the extras
+// only need to be wide enough to close the circle around it.
+static angle vr_vis_sector_half_cone(int sector)
+{
+	return (angle)(sector == 0 ? 115 : 86);
+}
+
 // ---- 3D weapon sprites anchored to VR controllers -------------------------------------------
 // Replaces render_viewer_sprite_layer() in the VR eye loop. Renders each weapon sprite as a
 // world-space quad at the matching controller's aim position. World projection + modelview from
@@ -1425,9 +1470,9 @@ void render_view(
 		angle theta;
 		view->half_cone = 115;            // ~81 deg half-angle (162 deg total)
 		view->half_vertical_cone = 110;   // ~77 deg
-		theta = NORMALIZE_ANGLE(view->yaw - view->half_cone);
+		theta = NORMALIZE_ANGLE(view->cone_yaw - view->half_cone);
 		view->left_edge.i = cosine_table[theta]; view->left_edge.j = sine_table[theta];
-		theta = NORMALIZE_ANGLE(view->yaw + view->half_cone);
+		theta = NORMALIZE_ANGLE(view->cone_yaw + view->half_cone);
 		view->right_edge.i = cosine_table[theta]; view->right_edge.j = sine_table[theta];
 	}
 #endif
@@ -1456,6 +1501,18 @@ void render_view(
 		// LP: now from the visibility-tree class
 		/* build the render tree, regardless of map mode, so the automap updates while active */
 		RenderVisTree.view = view;
+#if defined(__ANDROID__)
+		// VR rebuilds the tree, the sort and the object list PER EYE below, from each eye's true
+		// position -- and starts by clearing render_flags, which throws away everything this pass
+		// produced. Doing it here as well is pure waste: it was a third of the visibility CPU per
+		// frame for a result nothing reads. Skipped, with two exceptions that still need it:
+		//   * the opaque overhead map (the per-eye loop never runs, and this pass is what marks
+		//     polygons explored for the automap), and
+		//   * the level-load texture prewarm, which builds its own tree explicitly.
+		const bool vr_rebuilds_per_eye =
+			VR_IsActive() && (!view->overhead_map_active || map_is_translucent());
+		if (!vr_rebuilds_per_eye)
+#endif
 		RenderVisTree.build_render_tree();
 		
 		/* do something complicated and difficult to explain */
@@ -1465,12 +1522,17 @@ void render_view(
 			/* sort the render tree (so we have a depth-ordering of polygons) and accumulate
 				clipping information for each polygon */
 			RenderSortPoly.view = view;
-			RenderSortPoly.sort_render_tree();
-			
-			// LP: now from the object-placement class
-			/* build the render object list by looking at the sorted render tree */
 			RenderPlaceObjs.view = view;
-			RenderPlaceObjs.build_render_object_list();
+#if defined(__ANDROID__)
+			if (!vr_rebuilds_per_eye)
+#endif
+			{
+				RenderSortPoly.sort_render_tree();
+
+				// LP: now from the object-placement class
+				/* build the render object list by looking at the sorted render tree */
+				RenderPlaceObjs.build_render_object_list();
+			}
 			
 			// LP addition: set the current rasterizer to whichever is appropriate here
 			RasterizerClass *RasPtr;
@@ -1544,13 +1606,12 @@ void render_view(
 					// In-game console keyboard: place/hover/click once (this frame's head + controller
 					// poses are latched by VR_BeginFrame above), then each eye draws it below.
 					VR_UpdateInGameKeyboard();
+					// The cone centre every sector is measured from (update_view_data set it = yaw).
+					// view->yaw itself is never rotated: sprite-view selection and billboarding read
+					// it and must keep following the real head azimuth.
+					const angle base_cone_yaw = view->cone_yaw;
 					for (int eye = 0; eye < 2; ++eye)
 					{
-						// render_flags is a global flat array; the outer build_render_tree call
-						// (above) already set every endpoint/line flag. Without this clear the
-						// per-eye traversal skips all of them and the vis-tree sees nothing.
-						objlist_clear(render_flags, RENDER_FLAGS_BUFFER_SIZE);
-
 						float ipd_wx = 0, ipd_wy = 0;
 						VR_GetEyeIPDOffsetWU(eye, &ipd_wx, &ipd_wy);
 						world_point3d eye_origin = base_origin;
@@ -1563,15 +1624,9 @@ void render_view(
 							base_poly);
 						if (eye_poly == NONE) eye_poly = base_poly;
 
-						view->origin               = eye_origin;
-						view->origin_polygon_index = eye_poly;
-
-						RenderVisTree.view = view;
-						RenderVisTree.build_render_tree();
+						RenderVisTree.view  = view;
 						RenderSortPoly.view = view;
-						RenderSortPoly.sort_render_tree();
 						RenderPlaceObjs.view = view;
-						RenderPlaceObjs.build_render_object_list();
 
 						// SetView needs head-centre: VR_GetEyeViewMetres encodes the IPD
 						// offset in the OpenXR matrices, so the origin must not be pre-shifted.
@@ -1582,11 +1637,45 @@ void render_view(
 						RasPtr->SetView(*view);
 						RasPtr->Begin();
 
-						// Restore eye origin so render_tree's CPU sprite clip planes use the
-						// true eye position. The GPU matrices are already set above and are
-						// unaffected by view->origin from here.
-						view->origin = eye_origin;
-						RenPtr->render_tree();
+						// Visibility sweep. Each sector rebuilds the tree around a rotated cone
+						// and renders into the SAME eye buffer, so the sectors accumulate into one
+						// image. Sector 0 is the primary view: it alone does the full render_tree
+						// (per-frame shader uniforms + the glow/bloom pass) and it alone places
+						// objects, so sprites are drawn once, in the sector that faces you. The
+						// extra sectors add world geometry only -- they exist to fill in the floor
+						// you can see beside and behind your feet when looking down.
+						//
+						// The flags MUST be cleared per sector: endpoint->transformed is cached and
+						// gated by _endpoint_has_been_visited, and that cached transform is only
+						// valid for the cone_yaw it was computed with.
+						const int sectors = vr_vis_sector_count(view);
+						for (int sector = 0; sector < sectors; ++sector)
+						{
+							view->cone_yaw  = NORMALIZE_ANGLE(base_cone_yaw + vr_vis_sector_offset(sector));
+							view->half_cone = vr_vis_sector_half_cone(sector);
+							angle th = NORMALIZE_ANGLE(view->cone_yaw - view->half_cone);
+							view->left_edge.i  = cosine_table[th]; view->left_edge.j  = sine_table[th];
+							th = NORMALIZE_ANGLE(view->cone_yaw + view->half_cone);
+							view->right_edge.i = cosine_table[th]; view->right_edge.j = sine_table[th];
+
+							objlist_clear(render_flags, RENDER_FLAGS_BUFFER_SIZE);
+
+							view->origin               = eye_origin;
+							view->origin_polygon_index = eye_poly;
+							RenderVisTree.build_render_tree();
+							RenderSortPoly.sort_render_tree();
+							if (sector == 0)
+								RenderPlaceObjs.build_render_object_list();
+
+							// render_tree's CPU sprite clip planes want the true eye position; the
+							// GPU matrices were set above and don't read view->origin.
+							if (sector == 0) RenPtr->render_tree();
+							else             RenPtr->render_tree_diffuse_only();
+						}
+						view->origin_polygon_index = base_poly;
+						view->cone_yaw  = base_cone_yaw;
+						view->half_cone = 115;   // restore the un-swept cone for anything downstream
+
 						// Weapon and aim reticle build world-space quads using view->origin as
 						// the camera world position; restore base_origin so the GPU matrices
 						// (head-centre + OpenXR IPD) don't double-count the IPD offset.
@@ -1741,6 +1830,9 @@ static void update_view_data(
 {
 	angle theta;
 
+	// The cone follows the view unless a caller deliberately sweeps it (see view_data::cone_yaw).
+	view->cone_yaw = view->yaw;
+
 	// LP change: doing all the FOV changes here:
 	View_AdjustFOV(view->field_of_view,view->target_field_of_view);
 	
@@ -1758,11 +1850,11 @@ static void update_view_data(
 	view->dtanpitch= (view->world_to_screen_y*sine_table[view->pitch])/cosine_table[view->pitch];
 
 	/* calculate left cone vector */
-	theta= NORMALIZE_ANGLE(view->yaw-view->half_cone);
+	theta= NORMALIZE_ANGLE(view->cone_yaw-view->half_cone);
 	view->left_edge.i= cosine_table[theta], view->left_edge.j= sine_table[theta];
 	
 	/* calculate right cone vector */
-	theta= NORMALIZE_ANGLE(view->yaw+view->half_cone);
+	theta= NORMALIZE_ANGLE(view->cone_yaw+view->half_cone);
 	view->right_edge.i= cosine_table[theta], view->right_edge.j= sine_table[theta];
 	
 	/* if we’re sitting on one of the endpoints in our origin polygon, move us back slightly (±1) into
