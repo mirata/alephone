@@ -635,6 +635,7 @@ namespace {
 		                            //   punch strength in VR CONTROLS (Low 1.1 / Medium 1.6 / High 2.4)
 		/* leanGiveFraction */ 0.80f,  // head may lean 80% of the player's collision radius before the body
 		                            //   follows (against-a-wall "give"; 0 = strict 1:1)
+		/* panelCurvature   */ 0.0f,  // menu/terminal panel bend; flat by default (see vr_settings_t)
 	};
 
 	// Locomotion yaw offset (snap/smooth turn), in Marathon angle units (512 = full circle).
@@ -1679,6 +1680,8 @@ namespace {
 	float s_panelC[3] = {0,0,0}, s_panelR[3] = {1,0,0}, s_panelU[3] = {0,1,0}, s_panelN[3] = {0,0,1};
 	float s_panelHalfW = 1, s_panelHalfH = 1;
 	bool  s_panelPlaced = false;
+	// True while the 2D panel is showing a terminal rather than a menu. Pushed from screen.cpp.
+	bool  s_panelIsTerminal = false;
 	// Per-hand pointer result (computed in VR_PresentScreenLayer): each controller's ray hit on the panel.
 	struct PtrHit { bool active; int x, y; float u, v; };
 	PtrHit s_ptr[2] = {};
@@ -1690,6 +1693,8 @@ extern "C" void VR_MarkWorldFramePresented(void) { s_worldFramePresented = true;
 // panel and the keyboard placement (the keyboard is positioned relative to the panel, so a resized
 // panel must drag it along).
 extern "C" void VR_InvalidatePanelPlacement(void) { s_panelRecenterPending = true; }
+
+extern "C" void VR_SetTerminalActive(int active) { s_panelIsTerminal = (active != 0); }
 extern "C" bool VR_TakeWorldFramePresented(void) { bool v = s_worldFramePresented; s_worldFramePresented = false; return v; }
 
 // Menu pointer: the screen-layer pixel the dominant (or any) controller ray is hitting (false = no hit).
@@ -1733,7 +1738,12 @@ namespace {
 	constexpr int kScreenW = 1280, kScreenH = 1024;   // matches change_screen_mode's VR vmode default
 	GLuint s_screenFBO = 0, s_screenTex = 0, s_screenDepth = 0;
 	GLuint s_quadProg = 0, s_quadVAO = 0, s_quadVBO = 0;
-	GLint  s_quadTexLoc = -1, s_quadMVPLoc = -1;
+	GLint  s_quadTexLoc = -1, s_quadMVPLoc = -1, s_quadPhiLoc = -1, s_quadRLoc = -1;
+	// A curve needs geometry to bend, and the flat quad is only two triangles, so the menu/terminal
+	// panel gets its own horizontally-tessellated strip. Only x is subdivided -- a vertical cylinder
+	// does not bend in y.
+	GLuint s_panelStripVAO = 0, s_panelStripVBO = 0;
+	enum { kPanelStripCols = 48, kPanelStripVerts = kPanelStripCols * 6 };
 	GLuint s_curProg = 0; GLint s_curMVPLoc = -1, s_curColorLoc = -1;   // pointer cursor (solid colour)
 
 	void ensureScreenLayer() {
@@ -1756,12 +1766,30 @@ namespace {
 			A1VR_LOG("screen layer FBO incomplete");
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
+		// The panel is drawn flat, or bent around a vertical cylinder for a curved-monitor look.
+		// The bend is applied here rather than baked into the vertex data, so the model matrix, the
+		// UVs, and the flat users of this program (the HUD and loading screens) are all untouched --
+		// they simply leave uCurvePhi at 0. aPos.x spans [-1,1] across the panel, and the model
+		// matrix scales x by halfWidth and z by 1 (the unit panel normal, which points at the
+		// viewer), so emitting R*sin(theta)/halfWidth and R*(1-cos(theta)) puts each vertex on a
+		// cylinder of radius R whose axis runs through centre + R*normal: concave toward you.
 		static const char* vs =
 			"#version 300 es\n"
 			"layout(location=0) in vec2 aPos;\n"
 			"uniform mat4 uMVP;\n"
+			"uniform float uCurvePhi;\n"
+			"uniform float uCurveR;\n"
 			"out vec2 vUV;\n"
-			"void main(){ vUV = aPos*0.5+0.5; gl_Position = uMVP * vec4(aPos,0.0,1.0); }\n";
+			"void main(){\n"
+			"  vUV = aPos*0.5+0.5;\n"
+			"  vec3 p = vec3(aPos, 0.0);\n"
+			"  if (uCurvePhi > 0.0001) {\n"
+			"    float th = aPos.x * uCurvePhi;\n"
+			"    p.x = sin(th) / uCurvePhi;\n"
+			"    p.z = uCurveR * (1.0 - cos(th));\n"
+			"  }\n"
+			"  gl_Position = uMVP * vec4(p, 1.0);\n"
+			"}\n";
 		static const char* fs =
 			"#version 300 es\n"
 			"precision mediump float;\n"
@@ -1773,6 +1801,8 @@ namespace {
 		glDeleteShader(v); glDeleteShader(f);
 		s_quadTexLoc = glGetUniformLocation(s_quadProg, "uTex");
 		s_quadMVPLoc = glGetUniformLocation(s_quadProg, "uMVP");
+		s_quadPhiLoc = glGetUniformLocation(s_quadProg, "uCurvePhi");
+		s_quadRLoc   = glGetUniformLocation(s_quadProg, "uCurveR");
 		const float quad[] = { -1,-1,  1,-1,  1,1,  -1,-1,  1,1,  -1,1 };
 		glGenVertexArrays(1, &s_quadVAO);
 		glGenBuffers(1, &s_quadVBO);
@@ -1782,6 +1812,25 @@ namespace {
 		glEnableVertexAttribArray(0);
 		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
 		glBindVertexArray(0);
+
+		{
+			std::vector<float> strip;
+			strip.reserve(kPanelStripVerts * 2);
+			for (int i = 0; i < kPanelStripCols; ++i) {
+				const float x0 = -1.0f + 2.0f * (float)i / (float)kPanelStripCols;
+				const float x1 = -1.0f + 2.0f * (float)(i + 1) / (float)kPanelStripCols;
+				const float q[12] = { x0,-1, x1,-1, x1,1,  x0,-1, x1,1, x0,1 };
+				strip.insert(strip.end(), q, q + 12);
+			}
+			glGenVertexArrays(1, &s_panelStripVAO);
+			glGenBuffers(1, &s_panelStripVBO);
+			glBindVertexArray(s_panelStripVAO);
+			glBindBuffer(GL_ARRAY_BUFFER, s_panelStripVBO);
+			glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(strip.size()*sizeof(float)), strip.data(), GL_STATIC_DRAW);
+			glEnableVertexAttribArray(0);
+			glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+			glBindVertexArray(0);
+		}
 
 		// Cursor program: a circle (reuses the same [-1,1] quad VAO; fragment discards outside unit circle).
 		static const char* cvs =
@@ -1901,6 +1950,7 @@ extern "C" void VR_PresentHudEye(int eye)
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   // HUD pixels (alpha>0) over the world
 	glUseProgram(s_quadProg);
 	glUniformMatrix4fv(s_quadMVPLoc, 1, GL_FALSE, mvp);
+	glUniform1f(s_quadPhiLoc, 0.0f);   // the head-locked HUD stays flat
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, s_hudTex);
 	glUniform1i(s_quadTexLoc, 0);
@@ -1996,6 +2046,7 @@ extern "C" void VR_PresentMapEye(int eye)
 
 	glDisable(GL_DEPTH_TEST);
 	glUseProgram(s_quadProg);
+	glUniform1f(s_quadPhiLoc, 0.0f);   // flat: only the menu/terminal panel curves
 	glUniformMatrix4fv(s_quadMVPLoc, 1, GL_FALSE, mvp);
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, s_mapTex);
@@ -2138,21 +2189,77 @@ namespace {
 	}
 
 	// Intersect each controller aim ray with the panel independently; both can hit at once.
+	// Arc half-angle of the panel's curve, radians. 0 = flat. curvature = distance/radius, so the
+	// arc half-angle is halfWidth/R = halfWidth*curvature/distance.
+	float panelCurvePhi() {
+		const float c = s_settings.panelCurvature;
+		if (c <= 0.001f || s_settings.screenDistanceM <= 0.01f) return 0.0f;
+		return s_panelHalfW * c / s_settings.screenDistanceM;
+	}
+	float panelCurveR() {
+		const float phi = panelCurvePhi();
+		return (phi > 0.0001f) ? (s_panelHalfW / phi) : 0.0f;
+	}
+
+	// Panel-local (u,v) in [-1,1] -> stage position, following the curve so the cursor and the
+	// hit-test sit on the same surface the shader draws.
+	void panelPointAt(float u, float v, float outp[3]) {
+		const float phi = panelCurvePhi();
+		float along, depth;
+		if (phi > 0.0001f) {
+			const float R = s_panelHalfW / phi, th = u * phi;
+			along = R * std::sin(th);
+			depth = R * (1.0f - std::cos(th));
+		} else {
+			along = u * s_panelHalfW;
+			depth = 0.0f;
+		}
+		for (int i = 0; i < 3; ++i)
+			outp[i] = s_panelC[i] + along*s_panelR[i] + (v*s_panelHalfH)*s_panelU[i] + depth*s_panelN[i];
+	}
+
 	void updatePointer() {
 		for (int h = 0; h < 2; ++h) {
 			s_ptr[h].active = false;
 			if (!s_aimValid[h]) continue;
 			float O[3] = { s_aimStage[h].position.x, s_aimStage[h].position.y, s_aimStage[h].position.z };
 			float Dd[3]; poseFwd(s_aimStage[h], Dd);
-			float denom = vdot(Dd, s_panelN);
-			if (denom > -1e-4f) continue;
-			float oc[3]; vsub(s_panelC, O, oc);
-			float t = vdot(oc, s_panelN)/denom;
-			if (t <= 0) continue;
-			float hit[3] = { O[0]+Dd[0]*t, O[1]+Dd[1]*t, O[2]+Dd[2]*t };
-			float loc[3]; vsub(hit, s_panelC, loc);
-			float u = vdot(loc, s_panelR)/s_panelHalfW;
-			float v = vdot(loc, s_panelU)/s_panelHalfH;
+			float u, v;
+			const float phi = panelCurvePhi();
+			if (phi > 0.0001f) {
+				// Curved: intersect the cylinder the shader bends the panel onto, so the pointer
+				// lands where the image actually is. Axis is vertical (panelUp) through
+				// centre + R*normal; solve in the plane perpendicular to the axis.
+				const float R = s_panelHalfW / phi;
+				float A[3]; for (int i=0;i<3;++i) A[i] = s_panelC[i] + R*s_panelN[i];
+				float oa[3]; vsub(O, A, oa);
+				const float oaU = vdot(oa, s_panelU), dU = vdot(Dd, s_panelU);
+				float o2[3], d2[3];
+				for (int i=0;i<3;++i) { o2[i] = oa[i] - oaU*s_panelU[i]; d2[i] = Dd[i] - dU*s_panelU[i]; }
+				const float a = vdot(d2,d2), b = 2.0f*vdot(o2,d2), c = vdot(o2,o2) - R*R;
+				if (a < 1e-8f) continue;
+				const float disc = b*b - 4.0f*a*c;
+				if (disc < 0.0f) continue;
+				const float sq = std::sqrt(disc);
+				const float t = (-b + sq) / (2.0f*a);       // far root: the viewer is inside the cylinder
+				if (t <= 0.0f) continue;
+				float hit[3] = { O[0]+Dd[0]*t, O[1]+Dd[1]*t, O[2]+Dd[2]*t };
+				float ha[3]; vsub(hit, A, ha);
+				// P - A = R*sin(th)*right - R*cos(th)*normal
+				const float th = std::atan2(vdot(ha, s_panelR), -vdot(ha, s_panelN));
+				u = th / phi;
+				v = vdot(ha, s_panelU) / s_panelHalfH;
+			} else {
+				float denom = vdot(Dd, s_panelN);
+				if (denom > -1e-4f) continue;
+				float oc[3]; vsub(s_panelC, O, oc);
+				float t = vdot(oc, s_panelN)/denom;
+				if (t <= 0) continue;
+				float hit[3] = { O[0]+Dd[0]*t, O[1]+Dd[1]*t, O[2]+Dd[2]*t };
+				float loc[3]; vsub(hit, s_panelC, loc);
+				u = vdot(loc, s_panelR)/s_panelHalfW;
+				v = vdot(loc, s_panelU)/s_panelHalfH;
+			}
 			if (u<-1||u>1||v<-1||v>1) continue;
 			s_ptr[h].active = true; s_ptr[h].u = u; s_ptr[h].v = v;
 			s_ptr[h].x = (int)((u*0.5f+0.5f) * kScreenW);
@@ -2685,6 +2792,7 @@ namespace {
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		glUseProgram(s_quadProg);
+		glUniform1f(s_quadPhiLoc, 0.0f);   // flat: only the menu/terminal panel curves
 		glUniformMatrix4fv(s_quadMVPLoc, 1, GL_FALSE, mvp);
 		glActiveTexture(GL_TEXTURE0);
 		glBindTexture(GL_TEXTURE_2D, s_kbTex);
@@ -2802,6 +2910,7 @@ namespace {
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		glUseProgram(s_quadProg);
+		glUniform1f(s_quadPhiLoc, 0.0f);   // flat: only the menu/terminal panel curves
 		glUniformMatrix4fv(s_quadMVPLoc, 1, GL_FALSE, mvp);
 		glActiveTexture(GL_TEXTURE0);
 		glBindTexture(GL_TEXTURE_2D, s_conTex);
@@ -2933,9 +3042,10 @@ extern "C" void VR_PresentScreenLayer(void)
 		for (int h = 0; h < 2; ++h) {
 			if (!s_ptr[h].active) continue;
 			const float u = s_ptr[h].u, v = s_ptr[h].v;
-			const float cx = s_panelC[0] + u*hw*s_panelR[0] + v*hh*s_panelU[0] + s_panelN[0]*0.01f;
-			const float cy = s_panelC[1] + u*hw*s_panelR[1] + v*hh*s_panelU[1] + s_panelN[1]*0.01f;
-			const float cz = s_panelC[2] + u*hw*s_panelR[2] + v*hh*s_panelU[2] + s_panelN[2]*0.01f;
+			float cp[3]; panelPointAt(u, v, cp);          // follows the curve, so it sits on the image
+			const float cx = cp[0] + s_panelN[0]*0.01f;
+			const float cy = cp[1] + s_panelN[1]*0.01f;
+			const float cz = cp[2] + s_panelN[2]*0.01f;
 			curModel[h][0] = s_panelR[0]*cs; curModel[h][1] = s_panelR[1]*cs; curModel[h][2] = s_panelR[2]*cs; curModel[h][3] = 0;
 			curModel[h][4] = s_panelU[0]*cs; curModel[h][5] = s_panelU[1]*cs; curModel[h][6] = s_panelU[2]*cs; curModel[h][7] = 0;
 			curModel[h][8] = s_panelN[0];    curModel[h][9] = s_panelN[1];    curModel[h][10]= s_panelN[2];    curModel[h][11]= 0;
@@ -2960,14 +3070,28 @@ extern "C" void VR_PresentScreenLayer(void)
 			glActiveTexture(GL_TEXTURE0);
 			glBindTexture(GL_TEXTURE_2D, s_screenTex);
 			glUniform1i(s_quadTexLoc, 0);
-			glBindVertexArray(s_quadVAO);
-			glDrawArrays(GL_TRIANGLES, 0, 6);
+			// Curved: the tessellated strip has the vertices the bend needs; flat: the plain quad.
+			const float phi = panelCurvePhi();
+			glUniform1f(s_quadPhiLoc, phi);
+			glUniform1f(s_quadRLoc,   panelCurveR());
+			if (phi > 0.0001f) {
+				glBindVertexArray(s_panelStripVAO);
+				glDrawArrays(GL_TRIANGLES, 0, kPanelStripVerts);
+			} else {
+				glBindVertexArray(s_quadVAO);
+				glDrawArrays(GL_TRIANGLES, 0, 6);
+			}
 			// cursors: grey translucent circles for both hands
 			glEnable(GL_BLEND);
 			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 			glUseProgram(s_curProg);
+			// Bind explicitly: this used to inherit whatever the panel draw left bound, which was
+			// always the 6-vertex quad. The curved panel binds a 288-vertex strip instead, so the
+			// cursor was drawing that strip's first 6 vertices -- a sliver at the panel's left edge.
+			glBindVertexArray(s_quadVAO);
 			glUniform4f(s_curColorLoc, 0.5f, 0.5f, 0.5f, 0.5f);
 			for (int h = 0; h < 2; ++h) {
+				if (s_panelIsTerminal) break;   // nothing to click on a terminal; dots just cover text
 				if (!s_ptr[h].active) continue;
 				float cmvp[16]; mat_mul(cmvp, vp, curModel[h]);
 				glUniformMatrix4fv(s_curMVPLoc, 1, GL_FALSE, cmvp);
@@ -3103,6 +3227,7 @@ extern "C" unsigned VR_CurrentEyeFramebuffer(void) { return 0; }
 extern "C" int  VR_CurrentEye(void)     { return 0; }
 extern "C" void VR_MarkWorldFramePresented(void) {}
 extern "C" void VR_InvalidatePanelPlacement(void) {}
+extern "C" void VR_SetTerminalActive(int) {}
 extern "C" int   VR_GetRefreshRates(float*, int) { return 0; }
 extern "C" float VR_GetRefreshRate(void)         { return 0.0f; }
 extern "C" bool  VR_SetRefreshRate(float)        { return false; }

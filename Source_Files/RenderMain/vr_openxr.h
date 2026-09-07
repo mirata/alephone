@@ -106,6 +106,10 @@ typedef struct {
 	                        //     follow (pure lean below it). Kills the against-a-wall ratchet and lets you
 	                        //     lean into a wall a little. 0 = strict 1:1 (old behaviour). radius is read
 	                        //     live from the physics model -- never hardcoded -- so the give tracks it.
+	float panelCurvature;   // menu/terminal panel curve, 0 = flat (default), 1 = wrapped at the panel
+	                        //   distance (cylinder axis through your head). Curvature = distance /
+	                        //   radius, so 0.4 means a radius 2.5x the viewing distance -- roughly a
+	                        //   curved-widescreen-monitor bend. Opt-in: ships flat.
 } vr_settings_t;
 
 vr_settings_t* VR_Settings(void);
@@ -240,6 +244,9 @@ bool  VR_SetRefreshRate(float hz);                   // request a rate; false if
 // is otherwise only re-run after a world frame, so without this a panel pref changed at a menu does
 // not apply until the player starts the game.
 void VR_InvalidatePanelPlacement(void);
+// Tell the VR layer whether the 2D panel is currently showing a TERMINAL rather than a menu. The
+// pointer dots are hidden for terminals -- there is nothing to click, and they sit on top of the text.
+void VR_SetTerminalActive(int active);
 bool VR_GetAction(void);               // A button (use terminals/switches)
 bool VR_GetAdvance(void);              // A or X: advance terminal / skip cutscene
 bool VR_GetBack(void);                 // Y or B: terminal page back

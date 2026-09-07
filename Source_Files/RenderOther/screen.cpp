@@ -2775,6 +2775,9 @@ void MainScreenSwap()
 		// If render_view already presented the stereo world this tick, we're done; otherwise present
 		// the 2D UI (menus/terminals/loading) from the screen-layer FBO as a flat panel.
 		if (!VR_TakeWorldFramePresented()) {
+			// Terminals share the world-locked panel with the menus; tell the VR layer which it is
+			// so the pointer dots can be hidden over terminal text.
+			VR_SetTerminalActive(world_view->terminal_mode_active ? 1 : 0);
 			VR_PresentScreenLayer();
 			// Drive the 2D UI with the controller pointer: VR_PresentScreenLayer just ray-cast the
 			// aiming controller(s) onto the world-locked panel; inject SDL mouse motion to that pixel

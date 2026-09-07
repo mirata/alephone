@@ -5,6 +5,7 @@
 extern "C" bool VR_InitOpenXR(void)     { return false; }
 extern "C" bool VR_IsActive(void)       { return false; }
 extern "C" void VR_InvalidatePanelPlacement(void) {}
+extern "C" void VR_SetTerminalActive(int) {}
 extern "C" int   VR_GetRefreshRates(float*, int) { return 0; }
 extern "C" float VR_GetRefreshRate(void)         { return 0.0f; }
 extern "C" bool  VR_SetRefreshRate(float)        { return false; }

@@ -1127,6 +1127,12 @@ static const float vr_punch_strength_values[] = { 1.1f, 1.6f, 2.4f };
 static const char *vr_screen_distance_labels[] = { "1.5 m", "2.0 m", "2.5 m", "3.0 m", "4.0 m", NULL };
 static const float vr_screen_distance_values[] = { 1.5f, 2.0f, 2.5f, 3.0f, 4.0f };
 
+// Menu/terminal panel curve, as distance/radius: 0 = flat, 1 = the cylinder axis passes through your
+// head (maximum bend). A curved widescreen monitor sits around 0.3-0.5 at a normal viewing distance.
+// Defaults to Off -- it is an opt-in look, not an improvement everyone wants.
+static const char *vr_panel_curve_labels[] = { "Off", "Subtle", "Medium", "Strong", "Full", NULL };
+static const float vr_panel_curve_values[] = { 0.0f, 0.25f, 0.40f, 0.60f, 0.85f };
+
 // Height of the world-locked menu/terminal panel. Described rather than dimensioned: the metre value
 // means nothing without also knowing Panel Distance, whereas "how big does it look" is the thing
 // being chosen. Medium (2.0 m) is the long-standing default.
@@ -1936,6 +1942,11 @@ static void vr_graphics_dialog(void *arg)
 	table->dual_add(screen_height_w->label("Size"), d);
 	table->dual_add(screen_height_w, d);
 
+	w_select *panel_curve_w = new w_select(
+		vr_closest_index(vr_panel_curve_values, 5, vr->panelCurvature), vr_panel_curve_labels);
+	table->dual_add(panel_curve_w->label("Curvature"), d);
+	table->dual_add(panel_curve_w, d);
+
 	table->add_row(new w_spacer(), true);
 
 	table->dual_add_row(new w_static_text("Map"), d);
@@ -2015,6 +2026,7 @@ static void vr_graphics_dialog(void *arg)
 		vr->mapPlayerUp      = map_player_up_w->get_selection() ? 1 : 0;
 		vr->screenDistanceM  = vr_screen_distance_values[screen_dist_w->get_selection()];
 		vr->screenHeightM    = vr_screen_height_values[screen_height_w->get_selection()];
+		vr->panelCurvature   = vr_panel_curve_values[panel_curve_w->get_selection()];
 		vr->teleportDistortion = teleport_distortion_w->get_selection() ? 1 : 0;
 
 		// Only rewrite bobbing_type when the choice actually changed: a stored "Weapon Only" behaves
@@ -4700,6 +4712,7 @@ InfoTree vr_preferences_tree()
 	vr_settings_t *vr = VR_Settings();
 	root.put_attr("screen_distance_m", vr->screenDistanceM);
 	root.put_attr("screen_height_m", vr->screenHeightM);
+	root.put_attr("panel_curvature", vr->panelCurvature);
 	root.put_attr("world_scale_wum", vr->worldScaleWUM);
 	root.put_attr("height_adjust_m", vr->heightAdjustM);
 	root.put_attr("snap_turn", vr->snapTurn);
@@ -5813,6 +5826,7 @@ void parse_vr_preferences(InfoTree root, std::string version)
 	}
 	root.read_attr("screen_distance_m", vr->screenDistanceM);
 	root.read_attr("screen_height_m", vr->screenHeightM);
+	root.read_attr("panel_curvature", vr->panelCurvature);
 	root.read_attr("world_scale_wum", vr->worldScaleWUM);
 	// Note: the old "eye_height_m" (absolute 1.4-1.8 m) key is intentionally NOT read -- it would be
 	// misread as a huge adjust. Absent key -> heightAdjustM keeps its 0.0 default. Read the interim
