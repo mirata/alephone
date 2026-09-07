@@ -110,6 +110,10 @@ typedef struct {
 	                        //   distance (cylinder axis through your head). Curvature = distance /
 	                        //   radius, so 0.4 means a radius 2.5x the viewing distance -- roughly a
 	                        //   curved-widescreen-monitor bend. Opt-in: ships flat.
+	float hudCurvature;     // same idea for the head-locked HUD plane -- bends the corner readouts
+	                        //   (ammo/health/oxygen) in toward you instead of leaving them flat out
+	                        //   in the periphery. 0 = flat.
+	float mapCurvature;     // ditto for the overhead map overlay. 0 = flat.
 } vr_settings_t;
 
 vr_settings_t* VR_Settings(void);

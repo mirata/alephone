@@ -1861,11 +1861,32 @@ static void vr_graphics_dialog(void *arg)
 	placer->dual_add(new w_title("VR GRAPHICS"), d);
 	placer->add(new w_spacer(), true);
 
-	table_placer *table = new table_placer(2, get_theme_space(ITEM_WIDGET), true);
-	table->col_flags(0, placeable::kAlignRight);
-	table->col_flags(1, placeable::kAlignLeft);
+	// One table per tab. The sections used to stack in a single table with static-text headings, but
+	// the dialog outgrew the window's maximum height; tabs keep every row reachable without scrolling.
+	// The tab label carries the group name, so the headings are gone.
+	tab_placer *tabs_placer = new tab_placer();
+	std::vector<std::string> tab_labels;
+	tab_labels.push_back("HUD");
+	tab_labels.push_back("PANEL");
+	tab_labels.push_back("MAP");
+	tab_labels.push_back("WORLD");
+	w_tab *tabs = new w_tab(tab_labels, tabs_placer);
+	placer->dual_add(tabs, d);
+	placer->add(new w_spacer(), true);
 
-	table->dual_add_row(new w_static_text("Heads-Up Display"), d);
+	auto make_table = [&]() {
+		table_placer *t = new table_placer(2, get_theme_space(ITEM_WIDGET), true);
+		t->col_flags(0, placeable::kAlignRight);
+		t->col_flags(1, placeable::kAlignLeft);
+		return t;
+	};
+	table_placer *hud_table   = make_table();
+	table_placer *panel_table = make_table();
+	table_placer *map_table   = make_table();
+	table_placer *world_table = make_table();
+
+	// `table` points at whichever tab's table the following rows belong to.
+	table_placer *table = hud_table;
 
 	w_enabling_toggle *hud_w = new w_enabling_toggle(graphics_preferences->screen_mode.hud);
 	table->dual_add(hud_w->label("Show HUD"), d);
@@ -1919,18 +1940,19 @@ static void vr_graphics_dialog(void *arg)
 	table->dual_add(hud_text_scale_w->label("Text Scale"), d);
 	table->dual_add(hud_text_scale_w, d);
 
+	w_select *hud_curve_w = new w_select(
+		vr_closest_index(vr_panel_curve_values, 5, vr->hudCurvature), vr_panel_curve_labels);
+	table->dual_add(hud_curve_w->label("Curvature"), d);
+	table->dual_add(hud_curve_w, d);
+
 	w_toggle *laser_sight_w = new w_toggle(vr->showLaserSight != 0);
 	table->dual_add(laser_sight_w->label("Laser Sight"), d);
 	table->dual_add(laser_sight_w, d);
 
-	table->add_row(new w_spacer(), true);
-
-	// Geometry of the world-locked panel the menus and terminals are drawn on. (The stock
-	// "Terminal Size" -- screen_mode.term_scale_level -- is not offered in VR: it only sizes the
-	// terminal rect INSIDE the 2D layer, so it can never exceed the panel, and its default of
-	// Largest already fills it. Panel Size is the knob that actually changes how big a terminal
-	// looks in the headset.)
-	table->dual_add_row(new w_static_text("Menu / Terminal Panel"), d);
+	// The stock "Terminal Size" (screen_mode.term_scale_level) is deliberately not offered in VR: it
+	// only sizes the terminal rect INSIDE the 2D layer, so it can never exceed the panel, and its
+	// default of Largest already fills it. Panel Size is what actually changes how big a terminal looks.
+	table = panel_table;
 
 	w_select *screen_dist_w = new w_select(
 		vr_closest_index(vr_screen_distance_values, 5, vr->screenDistanceM), vr_screen_distance_labels);
@@ -1947,9 +1969,7 @@ static void vr_graphics_dialog(void *arg)
 	table->dual_add(panel_curve_w->label("Curvature"), d);
 	table->dual_add(panel_curve_w, d);
 
-	table->add_row(new w_spacer(), true);
-
-	table->dual_add_row(new w_static_text("Map"), d);
+	table = map_table;
 
 	w_toggle *map_w = new w_toggle(graphics_preferences->screen_mode.translucent_map);
 	table->dual_add(map_w->label("Overlay"), d);
@@ -1959,9 +1979,12 @@ static void vr_graphics_dialog(void *arg)
 	table->dual_add(map_player_up_w->label("Player-Up Rotation"), d);
 	table->dual_add(map_player_up_w, d);
 
-	table->add_row(new w_spacer(), true);
+	w_select *map_curve_w = new w_select(
+		vr_closest_index(vr_panel_curve_values, 5, vr->mapCurvature), vr_panel_curve_labels);
+	table->dual_add(map_curve_w->label("Curvature"), d);
+	table->dual_add(map_curve_w, d);
 
-	table->dual_add_row(new w_static_text("World"), d);
+	table = world_table;
 
 	// In VR this shared pref is the ONLY view-bob control (the old VR-only "Disable View Bob" toggle
 	// was folded into it). bob_index maps the 3-way pref onto the 2 behaviours VR can tell apart.
@@ -1985,7 +2008,11 @@ static void vr_graphics_dialog(void *arg)
 	table->dual_add(brightness_w->label("Brightness"), d);
 	table->dual_add(brightness_w, d);
 
-	placer->add(table, true);
+	tabs_placer->add(hud_table, true);
+	tabs_placer->add(panel_table, true);
+	tabs_placer->add(map_table, true);
+	tabs_placer->add(world_table, true);
+	placer->add(tabs_placer, false);
 	placer->add(new w_spacer(), true);
 	placer->dual_add(new w_button("RENDERING OPTIONS", vr_rendering_options, &d), d);
 	placer->add(new w_spacer(), true);
@@ -2027,6 +2054,8 @@ static void vr_graphics_dialog(void *arg)
 		vr->screenDistanceM  = vr_screen_distance_values[screen_dist_w->get_selection()];
 		vr->screenHeightM    = vr_screen_height_values[screen_height_w->get_selection()];
 		vr->panelCurvature   = vr_panel_curve_values[panel_curve_w->get_selection()];
+		vr->hudCurvature     = vr_panel_curve_values[hud_curve_w->get_selection()];
+		vr->mapCurvature     = vr_panel_curve_values[map_curve_w->get_selection()];
 		vr->teleportDistortion = teleport_distortion_w->get_selection() ? 1 : 0;
 
 		// Only rewrite bobbing_type when the choice actually changed: a stored "Weapon Only" behaves
@@ -4713,6 +4742,8 @@ InfoTree vr_preferences_tree()
 	root.put_attr("screen_distance_m", vr->screenDistanceM);
 	root.put_attr("screen_height_m", vr->screenHeightM);
 	root.put_attr("panel_curvature", vr->panelCurvature);
+	root.put_attr("hud_curvature", vr->hudCurvature);
+	root.put_attr("map_curvature", vr->mapCurvature);
 	root.put_attr("world_scale_wum", vr->worldScaleWUM);
 	root.put_attr("height_adjust_m", vr->heightAdjustM);
 	root.put_attr("snap_turn", vr->snapTurn);
@@ -5827,6 +5858,8 @@ void parse_vr_preferences(InfoTree root, std::string version)
 	root.read_attr("screen_distance_m", vr->screenDistanceM);
 	root.read_attr("screen_height_m", vr->screenHeightM);
 	root.read_attr("panel_curvature", vr->panelCurvature);
+	root.read_attr("hud_curvature", vr->hudCurvature);
+	root.read_attr("map_curvature", vr->mapCurvature);
 	root.read_attr("world_scale_wum", vr->worldScaleWUM);
 	// Note: the old "eye_height_m" (absolute 1.4-1.8 m) key is intentionally NOT read -- it would be
 	// misread as a huge adjust. Absent key -> heightAdjustM keeps its 0.0 default. Read the interim

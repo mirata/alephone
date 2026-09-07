@@ -636,6 +636,8 @@ namespace {
 		/* leanGiveFraction */ 0.80f,  // head may lean 80% of the player's collision radius before the body
 		                            //   follows (against-a-wall "give"; 0 = strict 1:1)
 		/* panelCurvature   */ 0.0f,  // menu/terminal panel bend; flat by default (see vr_settings_t)
+		/* hudCurvature     */ 0.0f,  // head-locked HUD plane bend; flat by default
+		/* mapCurvature     */ 0.0f,  // overhead map overlay bend; flat by default
 	};
 
 	// Locomotion yaw offset (snap/smooth turn), in Marathon angle units (512 = full circle).
@@ -1744,6 +1746,23 @@ namespace {
 	// does not bend in y.
 	GLuint s_panelStripVAO = 0, s_panelStripVBO = 0;
 	enum { kPanelStripCols = 48, kPanelStripVerts = kPanelStripCols * 6 };
+
+	// Curvature is expressed as distance/radius, so it is dimensionless and reads the same on any
+	// surface: the arc half-angle is halfWidth/R = halfWidth*curvature/distance. Shared by the
+	// world-locked menu panel and the two head-locked overlays (HUD, map).
+	inline float curvePhiFor(float halfW, float distM, float curvature) {
+		if (curvature <= 0.001f || distM <= 0.01f) return 0.0f;
+		return halfW * curvature / distM;
+	}
+	// Selects the geometry the bend needs and uploads the curve uniforms; returns the vertex count to
+	// draw. A flat surface keeps the cheap two-triangle quad.
+	inline GLsizei bindCurvedSurface(float halfW, float distM, float curvature) {
+		const float phi = curvePhiFor(halfW, distM, curvature);
+		glUniform1f(s_quadPhiLoc, phi);
+		glUniform1f(s_quadRLoc, (phi > 0.0001f) ? (halfW / phi) : 0.0f);
+		if (phi > 0.0001f) { glBindVertexArray(s_panelStripVAO); return (GLsizei)kPanelStripVerts; }
+		glBindVertexArray(s_quadVAO); return 6;
+	}
 	GLuint s_curProg = 0; GLint s_curMVPLoc = -1, s_curColorLoc = -1;   // pointer cursor (solid colour)
 
 	void ensureScreenLayer() {
@@ -1950,12 +1969,14 @@ extern "C" void VR_PresentHudEye(int eye)
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   // HUD pixels (alpha>0) over the world
 	glUseProgram(s_quadProg);
 	glUniformMatrix4fv(s_quadMVPLoc, 1, GL_FALSE, mvp);
-	glUniform1f(s_quadPhiLoc, 0.0f);   // the head-locked HUD stays flat
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, s_hudTex);
 	glUniform1i(s_quadTexLoc, 0);
-	glBindVertexArray(s_quadVAO);
-	glDrawArrays(GL_TRIANGLES, 0, 6);
+	// Curving the HUD pulls the corner readouts in toward you rather than leaving them flat out at
+	// the edge of vision. D is the same distance the plane is placed at, so the ratio reads the same
+	// here as it does on the menu panel.
+	const GLsizei hudVerts = bindCurvedSurface(hw, D, s_settings.hudCurvature);
+	glDrawArrays(GL_TRIANGLES, 0, hudVerts);
 	glBindVertexArray(0);
 	glDisable(GL_BLEND);
 }
@@ -2046,12 +2067,11 @@ extern "C" void VR_PresentMapEye(int eye)
 
 	glDisable(GL_DEPTH_TEST);
 	glUseProgram(s_quadProg);
-	glUniform1f(s_quadPhiLoc, 0.0f);   // flat: only the menu/terminal panel curves
 	glUniformMatrix4fv(s_quadMVPLoc, 1, GL_FALSE, mvp);
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, s_mapTex);
 	glUniform1i(s_quadTexLoc, 0);
-	glBindVertexArray(s_quadVAO);
+	const GLsizei mapVerts = bindCurvedSurface(hw, D, s_settings.mapCurvature);
 
 	if (s_vrMapTranslucent)
 	{
@@ -2060,14 +2080,14 @@ extern "C" void VR_PresentMapEye(int eye)
 		// This means only the coloured lines/icons float visibly over the scene.
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR);
-		glDrawArrays(GL_TRIANGLES, 0, 6);
+		glDrawArrays(GL_TRIANGLES, 0, mapVerts);
 		glDisable(GL_BLEND);
 	}
 	else
 	{
 		// Solid mode: plain opaque draw (world was already wiped above).
 		glDisable(GL_BLEND);
-		glDrawArrays(GL_TRIANGLES, 0, 6);
+		glDrawArrays(GL_TRIANGLES, 0, mapVerts);
 	}
 
 	glBindVertexArray(0);
@@ -2189,16 +2209,10 @@ namespace {
 	}
 
 	// Intersect each controller aim ray with the panel independently; both can hit at once.
-	// Arc half-angle of the panel's curve, radians. 0 = flat. curvature = distance/radius, so the
-	// arc half-angle is halfWidth/R = halfWidth*curvature/distance.
+	// Arc half-angle of the menu panel's curve. Shares curvePhiFor with the draw so the hit-test can
+	// never disagree with the geometry the shader produces.
 	float panelCurvePhi() {
-		const float c = s_settings.panelCurvature;
-		if (c <= 0.001f || s_settings.screenDistanceM <= 0.01f) return 0.0f;
-		return s_panelHalfW * c / s_settings.screenDistanceM;
-	}
-	float panelCurveR() {
-		const float phi = panelCurvePhi();
-		return (phi > 0.0001f) ? (s_panelHalfW / phi) : 0.0f;
+		return curvePhiFor(s_panelHalfW, s_settings.screenDistanceM, s_settings.panelCurvature);
 	}
 
 	// Panel-local (u,v) in [-1,1] -> stage position, following the curve so the cursor and the
@@ -3070,17 +3084,9 @@ extern "C" void VR_PresentScreenLayer(void)
 			glActiveTexture(GL_TEXTURE0);
 			glBindTexture(GL_TEXTURE_2D, s_screenTex);
 			glUniform1i(s_quadTexLoc, 0);
-			// Curved: the tessellated strip has the vertices the bend needs; flat: the plain quad.
-			const float phi = panelCurvePhi();
-			glUniform1f(s_quadPhiLoc, phi);
-			glUniform1f(s_quadRLoc,   panelCurveR());
-			if (phi > 0.0001f) {
-				glBindVertexArray(s_panelStripVAO);
-				glDrawArrays(GL_TRIANGLES, 0, kPanelStripVerts);
-			} else {
-				glBindVertexArray(s_quadVAO);
-				glDrawArrays(GL_TRIANGLES, 0, 6);
-			}
+			const GLsizei nverts = bindCurvedSurface(hw, s_settings.screenDistanceM,
+			                                         s_settings.panelCurvature);
+			glDrawArrays(GL_TRIANGLES, 0, nverts);
 			// cursors: grey translucent circles for both hands
 			glEnable(GL_BLEND);
 			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
