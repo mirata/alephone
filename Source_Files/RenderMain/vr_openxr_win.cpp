@@ -18,6 +18,7 @@ extern "C" vr_settings_t* VR_Settings(void) {
 	static vr_settings_t s = { 2.5f, 2.0f, 512.0f, 0.0f, 1, 30.0f, 90.0f, 1.0f, 0, 0, 0, -20.0f, 0.8f, 0.55f, 30.0f, 0 };
 	return &s;
 }
+extern "C" const vr_settings_t* VR_DefaultSettings(void) { return VR_Settings(); }
 extern "C" float VR_GetYawOffset(void)   { return 0.0f; }
 extern "C" void  VR_UpdateTurn(float, float) {}
 extern "C" void  VR_SetYawOffset(float)  {}

@@ -117,6 +117,8 @@ typedef struct {
 } vr_settings_t;
 
 vr_settings_t* VR_Settings(void);
+// The factory defaults, for the preferences dialog's per-section "reset to defaults".
+const vr_settings_t* VR_DefaultSettings(void);
 
 // ---- Locomotion yaw offset (QuestZDoom model) ----
 // The HMD yaw IS the player's facing; this offset is the extra rotation added by snap/smooth turning

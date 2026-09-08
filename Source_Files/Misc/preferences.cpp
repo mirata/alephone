@@ -1131,7 +1131,12 @@ static const float vr_screen_distance_values[] = { 1.5f, 2.0f, 2.5f, 3.0f, 4.0f 
 // head (maximum bend). A curved widescreen monitor sits around 0.3-0.5 at a normal viewing distance.
 // Defaults to Off -- it is an opt-in look, not an improvement everyone wants.
 static const char *vr_panel_curve_labels[] = { "Off", "Subtle", "Medium", "Strong", "Full", NULL };
-static const float vr_panel_curve_values[] = { 0.0f, 0.25f, 0.40f, 0.60f, 0.85f };
+// Roughly doubled at the top end -- the old maximum (0.85) still read as a gentle bend. Since the
+// cylinder radius is R = distance/curvature, the viewer sits inside the cylinder only while
+// curvature < 2 (distance-from-axis = D-R < R  <=>  D < 2R  <=>  curvature < 2), independent of
+// panel size or distance. The menu panel's ray-cast takes the far intersection on that assumption,
+// so the top of this scale is kept comfortably below 2.
+static const float vr_panel_curve_values[] = { 0.0f, 0.33f, 0.60f, 0.90f, 1.20f };
 
 // Height of the world-locked menu/terminal panel. Described rather than dimensioned: the metre value
 // means nothing without also knowing Panel Distance, whereas "how big does it look" is the thing
@@ -1855,6 +1860,7 @@ static void vr_rendering_options(void* arg)
 static void vr_graphics_dialog(void *arg)
 {
 	vr_settings_t *vr = VR_Settings();
+	const vr_settings_t *vrd = VR_DefaultSettings();   // for the per-tab reset buttons
 	dialog *parent = (dialog *)arg;
 	dialog d;
 	vertical_placer *placer = new vertical_placer;
@@ -1945,9 +1951,26 @@ static void vr_graphics_dialog(void *arg)
 	table->dual_add(hud_curve_w->label("Curvature"), d);
 	table->dual_add(hud_curve_w, d);
 
+
 	w_toggle *laser_sight_w = new w_toggle(vr->showLaserSight != 0);
 	table->dual_add(laser_sight_w->label("Laser Sight"), d);
 	table->dual_add(laser_sight_w, d);
+
+	// Per-tab reset. Values come from VR_DefaultSettings() (and the engine's own graphics defaults)
+	// rather than being restated here, so they cannot drift from the real defaults. The HUD Plugin is
+	// deliberately left alone: which HUD to run is a content choice, not a tuning value, and the
+	// "default" plugin is whatever the loaded scenario enables.
+	table->add_row(new w_spacer(), true);
+	table->dual_add_row(new w_button("RESET HUD DEFAULTS",
+		[hud_w, hud_size_w, hud_dist_w, hud_tilt_w, hud_text_scale_w, hud_curve_w, laser_sight_w, vrd](void*) {
+			hud_w->set_selection(1);   // screen_mode.hud defaults to true
+			hud_size_w->set_selection(vr_closest_index(vr_hud_size_values, 5, vrd->hudSizeM));
+			hud_dist_w->set_selection(vr_closest_index(vr_hud_distance_values, 4, vrd->hudDistanceM));
+			hud_tilt_w->set_selection(vr_closest_index(vr_hud_tilt_values, 5, vrd->hudTiltDeg));
+			hud_text_scale_w->set_selection(vr_closest_index(vr_hud_text_scale_values, 4, vrd->hudTextScale));
+			hud_curve_w->set_selection(vr_closest_index(vr_panel_curve_values, 5, vrd->hudCurvature));
+			laser_sight_w->set_selection(vrd->showLaserSight ? 1 : 0);
+		}, nullptr), d);
 
 	// The stock "Terminal Size" (screen_mode.term_scale_level) is deliberately not offered in VR: it
 	// only sizes the terminal rect INSIDE the 2D layer, so it can never exceed the panel, and its
@@ -1969,6 +1992,14 @@ static void vr_graphics_dialog(void *arg)
 	table->dual_add(panel_curve_w->label("Curvature"), d);
 	table->dual_add(panel_curve_w, d);
 
+	table->add_row(new w_spacer(), true);
+	table->dual_add_row(new w_button("RESET PANEL DEFAULTS",
+		[screen_dist_w, screen_height_w, panel_curve_w, vrd](void*) {
+			screen_dist_w->set_selection(vr_closest_index(vr_screen_distance_values, 5, vrd->screenDistanceM));
+			screen_height_w->set_selection(vr_closest_index(vr_screen_height_values, 5, vrd->screenHeightM));
+			panel_curve_w->set_selection(vr_closest_index(vr_panel_curve_values, 5, vrd->panelCurvature));
+		}, nullptr), d);
+
 	table = map_table;
 
 	w_toggle *map_w = new w_toggle(graphics_preferences->screen_mode.translucent_map);
@@ -1983,6 +2014,14 @@ static void vr_graphics_dialog(void *arg)
 		vr_closest_index(vr_panel_curve_values, 5, vr->mapCurvature), vr_panel_curve_labels);
 	table->dual_add(map_curve_w->label("Curvature"), d);
 	table->dual_add(map_curve_w, d);
+
+	table->add_row(new w_spacer(), true);
+	table->dual_add_row(new w_button("RESET MAP DEFAULTS",
+		[map_w, map_player_up_w, map_curve_w, vrd](void*) {
+			map_w->set_selection(1);   // translucent_map defaults on for the VR builds
+			map_player_up_w->set_selection(vrd->mapPlayerUp ? 1 : 0);
+			map_curve_w->set_selection(vr_closest_index(vr_panel_curve_values, 5, vrd->mapCurvature));
+		}, nullptr), d);
 
 	table = world_table;
 
@@ -2007,6 +2046,14 @@ static void vr_graphics_dialog(void *arg)
 	brightness_w->set_selection(graphics_preferences->screen_mode.gamma_level);
 	table->dual_add(brightness_w->label("Brightness"), d);
 	table->dual_add(brightness_w, d);
+
+	table->add_row(new w_spacer(), true);
+	table->dual_add_row(new w_button("RESET WORLD DEFAULTS",
+		[bobbing_w, teleport_distortion_w, brightness_w, vrd](void*) {
+			bobbing_w->set_selection(0);   // BobbingType::none is the VR default
+			teleport_distortion_w->set_selection(vrd->teleportDistortion ? 1 : 0);
+			brightness_w->set_selection(DEFAULT_GAMMA_LEVEL);
+		}, nullptr), d);
 
 	tabs_placer->add(hud_table, true);
 	tabs_placer->add(panel_table, true);

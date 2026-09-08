@@ -600,7 +600,9 @@ extern "C" bool VR_SetRefreshRate(float hz)
 }
 
 namespace {
-	vr_settings_t s_settings = {
+	// Factory defaults live in their own object so the preferences dialog can offer a per-section
+	// "reset to defaults" without duplicating these numbers (see VR_DefaultSettings).
+	const vr_settings_t s_defaults = {
 		/* screenDistanceM */ 2.5f,
 		/* screenHeightM   */ 2.0f,
 		/* worldScaleWUM   */ 512.0f,
@@ -636,9 +638,12 @@ namespace {
 		/* leanGiveFraction */ 0.80f,  // head may lean 80% of the player's collision radius before the body
 		                            //   follows (against-a-wall "give"; 0 = strict 1:1)
 		/* panelCurvature   */ 0.0f,  // menu/terminal panel bend; flat by default (see vr_settings_t)
-		/* hudCurvature     */ 0.0f,  // head-locked HUD plane bend; flat by default
+		/* hudCurvature     */ 0.90f, // head-locked HUD plane bend -- "Strong". Curving the HUD pulls
+		                            //   the corner readouts in toward you, so unlike the flat menu
+		                            //   panel it earns being on by default.
 		/* mapCurvature     */ 0.0f,  // overhead map overlay bend; flat by default
 	};
+	vr_settings_t s_settings = s_defaults;
 
 	// Locomotion yaw offset (snap/smooth turn), in Marathon angle units (512 = full circle).
 	float s_yawOffset = 0.0f;
@@ -698,6 +703,7 @@ extern "C" bool VR_TakeYawRecenter(int* targetAngleUnits)
 	return true;
 }
 extern "C" vr_settings_t* VR_Settings(void) { return &s_settings; }
+extern "C" const vr_settings_t* VR_DefaultSettings(void) { return &s_defaults; }
 
 extern "C" float VR_GetYawOffset(void)        { return s_yawOffset; }
 extern "C" void  VR_SetYawOffset(float a)     { s_yawOffset = a; }
@@ -3173,6 +3179,7 @@ extern "C" vr_settings_t* VR_Settings(void) {
 	static vr_settings_t s = { 1, 2.5f, 2.0f, 512.0f, 0.0f, 1, 30.0f, 90.0f, 1.0f, 0, 0, 0, -20.0f, 0.8f, 0.55f, 30.0f, 0, 0, 0 };
 	return &s;
 }
+extern "C" const vr_settings_t* VR_DefaultSettings(void) { return VR_Settings(); }
 extern "C" float VR_GetYawOffset(void)   { return 0.0f; }
 extern "C" void  VR_UpdateTurn(float, float) {}
 extern "C" void  VR_SetYawOffset(float)  {}
