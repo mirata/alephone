@@ -928,12 +928,28 @@ void RenderRasterize_Shader::render_node_floor_or_ceiling(clipping_window_data *
 		glVertexPointer(3, GL_FLOAT, 0, vertex_array);
 		glTexCoordPointer(2, GL_FLOAT, 0, texcoord_array);
 
+		// A landscape ceiling is the sky, not a surface -- it has no business occluding anything.
+		// Marathon fakes "outdoors" with a normal ceiling polygon at a finite height, and that
+		// polygon writes depth like any other, so an object poking above it gets cut off. Sprites
+		// never showed this because the inhabitant path draws them with the depth test OFF (BSP
+		// painter's order); 3D model replacements DO depth-test, so a tall model -- the G-4
+		// Sunbathing satellite dish -- is sliced flat at the ceiling plane.
+		//
+		// Suppressing only the depth WRITE keeps the sky drawing correctly (it still depth-tests
+		// against nearer geometry already laid down) while leaving the depth buffer at its far
+		// clear value, so anything drawn afterwards is free to appear in front of it.
+		const bool skyCeiling = ceil && (surface->transfer_mode == _xfer_landscape ||
+		                                 surface->transfer_mode == _xfer_big_landscape);
+		if (skyCeiling) glDepthMask(GL_FALSE);
+
 		glDrawArrays(GL_POLYGON, 0, vertex_count);
 
 		// see note 2 above; pulsate uniform should stay set from setupWall call
 		if (setupGlow(view, TMgr, 0, intensity, weaponFlare, selfLuminosity, offset, renderStep)) {
 			glDrawArrays(GL_POLYGON, 0, vertex_count);
 		}
+
+		if (skyCeiling) glDepthMask(GL_TRUE);
 
 		Shader::disable();
 		glMatrixMode(GL_TEXTURE);
@@ -1186,6 +1202,17 @@ bool RenderModel(rectangle_definition& RenderRectangle, short Collection, short 
 	else
 		ModelPtr->Model.FindPositions_Neutral(true);	// Fallback: neutral (will do nothing for static models)
 
+#if defined(__ANDROID__)
+	// Static scenery models keep their geometry resident in vram. Pushing it through the GLES
+	// shim's client-array path instead costs a full de-index + glBufferData per draw, per eye,
+	// per pass -- which measured as the single biggest CPU item in the frame once plugin models
+	// were on screen. Positions here are invariant (no bones, no morph frames), so upload once.
+	const bool useStaticMesh = ModelPtr->Model.VtxSrcIndices.empty() &&
+	                           ModelPtr->Model.MD3NumFrames == 0;
+	if (useStaticMesh && !ModelPtr->VR_StaticTried) ModelPtr->VR_BuildStaticMesh();
+	const bool haveStaticMesh = useStaticMesh && ModelPtr->VR_StaticVBO != 0;
+#endif
+
 	glVertexPointer(3,GL_FLOAT,0,ModelPtr->Model.PosBase());
 	glClientActiveTextureARB(GL_TEXTURE0_ARB);
 	if (ModelPtr->Model.TxtrCoords.empty()) {
@@ -1216,6 +1243,11 @@ bool RenderModel(rectangle_definition& RenderRectangle, short Collection, short 
 		glActiveTextureARB(GL_TEXTURE0_ARB);
 	}
 
+#if defined(__ANDROID__)
+	if (haveStaticMesh)
+		a1ffDrawStaticMesh(ModelPtr->VR_StaticVBO, ModelPtr->VR_StaticIBO, ModelPtr->VR_StaticIndices);
+	else
+#endif
 	glDrawElements(GL_TRIANGLES,(GLsizei)ModelPtr->Model.NumVI(),GL_UNSIGNED_SHORT,ModelPtr->Model.VIBase());
 
 	if (canGlow && SkinPtr->GlowImg.IsPresent()) {
@@ -1234,6 +1266,11 @@ bool RenderModel(rectangle_definition& RenderRectangle, short Collection, short 
 		if(ModelPtr->Use(CLUT,OGL_SkinManager::Glowing)) {
 			LoadModelSkin(SkinPtr->GlowImg, Collection, CLUT);
 		}
+#if defined(__ANDROID__)
+		if (haveStaticMesh)
+			a1ffDrawStaticMesh(ModelPtr->VR_StaticVBO, ModelPtr->VR_StaticIBO, ModelPtr->VR_StaticIndices);
+		else
+#endif
 		glDrawElements(GL_TRIANGLES,(GLsizei)ModelPtr->Model.NumVI(),GL_UNSIGNED_SHORT,ModelPtr->Model.VIBase());
 	}
 

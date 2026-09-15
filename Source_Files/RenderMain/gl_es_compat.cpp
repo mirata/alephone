@@ -698,7 +698,8 @@ void flushBuiltin(GLenum mode, const std::vector<int>& verts) {
     const bool useVColor = (g_colorArray.enabled && g_colorArray.ptr);
     const bool colNorm   = (g_colorArray.type != GL_FLOAT && g_colorArray.type != GL_DOUBLE);
 
-    std::vector<float> buf;
+    static std::vector<float> buf;   // reused; see flushEngine
+    buf.clear();
     buf.reserve(verts.size() * 8);
 
     int posComps = g_vertexArray.size;
@@ -744,6 +745,9 @@ void flushBuiltin(GLenum mode, const std::vector<int>& verts) {
 
 // 3D world path: an engine shader is bound. Bind all five fixed-function attributes (with
 // constant fallbacks) and feed the matrix/fog uniforms the rewritten shaders read via a1_*.
+void uploadEngineUniforms();
+
+
 void flushEngine(GLenum mode, const std::vector<int>& verts) {
     ensureBuffers();
 
@@ -759,7 +763,9 @@ void flushEngine(GLenum mode, const std::vector<int>& verts) {
     for (auto& a : attrs) a.isArray = (a.arr->enabled && a.arr->ptr);
     attrs[0].isArray = true;   // position array is required (checked by caller)
 
-    std::vector<float> buf;
+    // Reused across draws: a fresh vector here means a malloc/free on every single draw call.
+    static std::vector<float> buf;
+    buf.clear();
     buf.reserve(verts.size() * 16);
     for (auto& a : attrs) {
         if (!a.isArray) continue;
@@ -781,6 +787,14 @@ void flushEngine(GLenum mode, const std::vector<int>& verts) {
         }
     }
 
+    uploadEngineUniforms();
+
+    glDrawArrays(mode, 0, (GLsizei)verts.size());
+}
+
+// Upload the fixed-function-derived uniforms the engine shaders expect. Shared by the client-array
+// flush and the resident-mesh path so both see identical matrices, fog, clipping and brightness.
+void uploadEngineUniforms() {
     const EngineLocs& L = engineLocsFor(g_currentProgram);
     Mat mv  = g_modelview.top();
     Mat mvp = multiply(g_projection.top(), mv);
@@ -802,8 +816,6 @@ void flushEngine(GLenum mode, const std::vector<int>& verts) {
         (g_brightnessNeutral || !VR_IsActive()) ? 1.0f : VR_Settings()->brightness);
     // Depth-cue / fog distance scale: VR eye-space is metres, but classicDepth & fog expect world units.
     if (L.depthScale >= 0) glUniform1f(L.depthScale, VR_IsActive() ? VR_Settings()->worldScaleWUM : 1.0f);
-
-    glDrawArrays(mode, 0, (GLsizei)verts.size());
 }
 
 void flushIndexed(GLenum mode, const std::vector<int>& verts) {
@@ -963,9 +975,13 @@ void a1ffFogfv(GLenum pname, const GLfloat* params) {
     }
 }
 
+// Scratch index list, reused by both draw entry points so a draw call costs no heap traffic.
+static std::vector<int> g_drawIndices;
+
 void a1ffDrawArrays(GLenum mode, GLint first, GLsizei count) {
     if (count <= 0) return;
-    std::vector<int> verts;
+    std::vector<int>& verts = g_drawIndices;
+    verts.clear();
     verts.reserve(count);
     for (GLsizei i = 0; i < count; ++i) verts.push_back(first + i);
     flushIndexed(mode, verts);
@@ -973,7 +989,8 @@ void a1ffDrawArrays(GLenum mode, GLint first, GLsizei count) {
 
 void a1ffDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     if (count <= 0 || !indices) return;
-    std::vector<int> verts;
+    std::vector<int>& verts = g_drawIndices;
+    verts.clear();
     verts.reserve(count);
     for (GLsizei i = 0; i < count; ++i) {
         int idx = 0;
@@ -987,6 +1004,37 @@ void a1ffDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indic
     }
     flushIndexed(mode, verts);
 }
+
+// Draw a static world model straight from its resident interleaved VBO, under whatever engine
+// shader is currently bound. This bypasses the client-array flush entirely: no de-indexing, no
+// per-draw glBufferData. Attribute layout matches flushEngine's locations
+// (0=pos, 1=tex0, 2=tex1/tangent, 3=color, 4=normal); colour stays a constant attribute because the
+// model path sets it with glColor4f rather than a colour array.
+void a1ffDrawStaticMesh(GLuint vbo, GLuint ibo, int numIndices) {
+    if (!vbo || !ibo || numIndices <= 0 || g_currentProgram == 0) return;
+    ensureBuffers();
+
+    const GLsizei stride = 12 * sizeof(GLfloat);
+    glBindVertexArray(g_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (const void*)(0));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, (const void*)(3 * sizeof(GLfloat)));
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, stride, (const void*)(5 * sizeof(GLfloat)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, (const void*)(8 * sizeof(GLfloat)));
+    setConstAttrib(3, g_color, 4);
+
+    uploadEngineUniforms();
+    glDrawElements(GL_TRIANGLES, numIndices, GL_UNSIGNED_SHORT, (const void*)0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+}
+
+
 
 void a1ffDrawMorphMesh(GLuint posVBO, GLuint texVBO, GLuint ibo,
                        int numVerts, int numIndices,

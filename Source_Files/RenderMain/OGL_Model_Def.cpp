@@ -746,8 +746,57 @@ void OGL_ModelData::VR_UploadBuffers()
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
+// Build the resident interleaved mesh for a static model. No-op (and latched off) for anything
+// whose Positions can change at runtime: boned/sequenced models rebuild Positions in place via
+// FindPositions_*, and MD3 models morph between keyframes, so neither can be cached this way.
+void OGL_ModelData::VR_BuildStaticMesh()
+{
+	VR_StaticTried = true;
+	if (!Model.VtxSrcIndices.empty()) return;   // boned/sequenced: FindPositions_* rewrites Positions
+	if (Model.MD3NumFrames > 0) return;         // morph target: handled by the VR_PosVBO path
+	if (Model.Positions.empty() || Model.VertIndices.empty()) return;
+	if (Model.TxtrCoords.empty() || Model.Normals.empty()) return;
+
+	const size_t numVerts = Model.Positions.size() / 3;
+	if (numVerts == 0 || Model.TxtrCoords.size() / 2 < numVerts ||
+	    Model.Normals.size() / 3 < numVerts || Model.Tangents.size() < numVerts) return;
+
+	// Interleave: pos(3) tex(2) norm(3) tangent(4) == 12 floats per vertex.
+	std::vector<GLfloat> interleaved(numVerts * 12);
+	for (size_t v = 0; v < numVerts; ++v)
+	{
+		GLfloat* d = &interleaved[v * 12];
+		const GLfloat* pos = &Model.Positions[v * 3];
+		const GLfloat* tex = &Model.TxtrCoords[v * 2];
+		const GLfloat* nrm = &Model.Normals[v * 3];
+		const GLfloat* tan = Model.Tangents[v].p();
+		d[0] = pos[0]; d[1] = pos[1];  d[2]  = pos[2];
+		d[3] = tex[0]; d[4] = tex[1];
+		d[5] = nrm[0]; d[6] = nrm[1];  d[7]  = nrm[2];
+		d[8] = tan[0]; d[9] = tan[1];  d[10] = tan[2]; d[11] = tan[3];
+	}
+
+	glGenBuffers(1, &VR_StaticVBO);
+	glBindBuffer(GL_ARRAY_BUFFER, VR_StaticVBO);
+	glBufferData(GL_ARRAY_BUFFER, interleaved.size() * sizeof(GLfloat),
+		interleaved.data(), GL_STATIC_DRAW);
+
+	glGenBuffers(1, &VR_StaticIBO);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, VR_StaticIBO);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, Model.VertIndices.size() * sizeof(GLushort),
+		Model.VertIndices.data(), GL_STATIC_DRAW);
+
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	VR_StaticIndices = (int)Model.VertIndices.size();
+}
+
 void OGL_ModelData::VR_FreeBuffers()
 {
+	if (VR_StaticVBO) { glDeleteBuffers(1, &VR_StaticVBO); VR_StaticVBO = 0; }
+	if (VR_StaticIBO) { glDeleteBuffers(1, &VR_StaticIBO); VR_StaticIBO = 0; }
+	VR_StaticIndices = 0;
+	VR_StaticTried = false;
 	if (VR_PosVBO) { glDeleteBuffers(1, &VR_PosVBO); VR_PosVBO = 0; }
 	if (VR_TexVBO) { glDeleteBuffers(1, &VR_TexVBO); VR_TexVBO = 0; }
 	if (VR_IBO)    { glDeleteBuffers(1, &VR_IBO);    VR_IBO    = 0; }

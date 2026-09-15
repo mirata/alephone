@@ -146,6 +146,17 @@ public:
 	GLuint VR_IBO    = 0;      // triangle indices, shared across frames, STATIC
 	int VR_NumVerts   = 0;     // vertices per keyframe
 	int VR_NumIndices = 0;     // total triangle indices
+
+	// Static world-model geometry, resident in vram (see VR_BuildStaticMesh).
+	// Only for models whose vertices never change (no bones, no MD3 morph frames) -- i.e. the
+	// plain OBJ scenery a plugin substitutes for sprites. The shader rasterizer draws these
+	// straight from the VBO instead of pushing client arrays through the GLES shim, which
+	// otherwise re-de-indexes and re-uploads the whole mesh on every draw, for every eye.
+	GLuint VR_StaticVBO  = 0;  // interleaved pos3 / tex2 / norm3 / tangent4 (12 floats, 48 bytes)
+	GLuint VR_StaticIBO  = 0;
+	int  VR_StaticIndices = 0;
+	bool VR_StaticTried   = false;   // don't retry a model that can't be cached
+	void VR_BuildStaticMesh();
 	void VR_UploadBuffers();   // upload from Model.MD3Positions/TxtrCoords/VertIndices
 	void VR_FreeBuffers();
 #endif
