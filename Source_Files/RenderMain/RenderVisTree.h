@@ -108,6 +108,14 @@ struct endpoint_clip_data
 	// LP change: made into a long vector for long views
 	long_vector2d vector;
 	
+	// The exact map vertex this clip was cast from, when there is one. `vector` is the endpoint
+	// transformed into the view frame, and that transform rounds to whole world units, which
+	// pivots the resulting clip plane slightly off the rendered silhouette. Keeping the
+	// untransformed vertex lets the renderer rebuild the plane exactly, in float, from wherever
+	// the eye really is. false for the two screen-edge clips -- directions, not points.
+	world_point2d vertex{};
+	bool has_vertex = false;
+	
 	// The vector sans right-clip-negation
 	long_vector2d forward_vector() const
 	{
@@ -121,6 +129,12 @@ struct clipping_window_data
 	long_vector2d left, right;
 	long_vector2d top, bottom;
 	short x0, x1, y0, y1;
+	
+	// Exact map vertices behind `left`/`right`, carried through from endpoint_clip_data. Absent
+	// for windows built from computed directions rather than map endpoints (the screen edges,
+	// and the object windows RenderPlaceObjs builds) -- those keep the transformed vectors.
+	world_point2d left_vertex{}, right_vertex{};
+	bool has_left_vertex = false, has_right_vertex = false;
 	
 	struct clipping_window_data *next_window;
 };

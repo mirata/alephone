@@ -428,6 +428,10 @@ clipping_window_data *RenderSortPolyClass::build_clipping_windows(
 					window->x0= left_clip->x, window->x1= right_clip->x;
 					window->left= left_clip->vector;
 					window->right= right_clip->vector;
+					window->left_vertex= left_clip->vertex;
+					window->has_left_vertex= left_clip->has_vertex;
+					window->right_vertex= right_clip->vertex;
+					window->has_right_vertex= right_clip->has_vertex;
 					calculate_vertical_clip_data(&AccumulatedLineClips.front(), AccumulatedLineClips.size(), window,
 						MAX(x0, window->x0), MIN(x1, window->x1));
 					window->next_window= NULL;

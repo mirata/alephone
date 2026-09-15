@@ -28,6 +28,8 @@ extern "C" bool  VR_TakeSystemRecenter(void) { return false; }
 extern "C" void  VR_DimCurrentEye(void)  {}
 extern "C" bool VR_RenderTestFrame(void){ return false; }
 extern "C" bool VR_InitEGL(void)        { return false; }
+extern "C" void VR_RequestSwapchainRebuild(void) {}
+extern "C" void VR_RequestEyeBufferRebuild(void) {}
 extern "C" bool VR_GetEyeResolution(int* w, int* h) { (void)w; (void)h; return false; }
 extern "C" bool VR_GetHmdYawPitch(float* y, float* p) { if (y) *y = 0; if (p) *p = 0; return false; }
 extern "C" void VR_GetMove(float* x, float* y) { if (x) *x = 0; if (y) *y = 0; }

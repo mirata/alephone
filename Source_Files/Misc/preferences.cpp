@@ -1059,6 +1059,7 @@ static const char *bobbing_view_labels[] = {
 // BobbingType::none and BobbingType::weapon_only are indistinguishable here. Only whether the CAMERA
 // bobs actually differs, so offer just that. Index 0 -> no camera bob, index 1 -> camera_and_weapon.
 static const char *vr_bobbing_labels[] = { "None", "Camera", NULL };
+
 #endif
 
 #if defined(__ANDROID__)
@@ -2104,6 +2105,7 @@ static void vr_graphics_dialog(void *arg)
 		vr->hudCurvature     = vr_panel_curve_values[hud_curve_w->get_selection()];
 		vr->mapCurvature     = vr_panel_curve_values[map_curve_w->get_selection()];
 		vr->teleportDistortion = teleport_distortion_w->get_selection() ? 1 : 0;
+
 
 		// Only rewrite bobbing_type when the choice actually changed: a stored "Weapon Only" behaves
 		// exactly like "None" in VR, so leave it intact rather than silently rewriting a pref this
@@ -4807,6 +4809,10 @@ InfoTree vr_preferences_tree()
 	root.put_attr("hud_text_scale", vr->hudTextScale);
 	root.put_attr("map_player_up", vr->mapPlayerUp);
 	root.put_attr("teleport_distortion", vr->teleportDistortion);
+	root.put_attr("resolution_scale", vr->resolutionScale);
+	root.put_attr("msaa_samples", vr->msaaSamples);
+	root.put_attr("layer_sharpening", vr->layerSharpening);
+	root.put_attr("layer_supersample", vr->layerSupersample);
 	root.put_attr("laser_sight", vr->showLaserSight);
 	root.put_attr("punch_speed", vr->punchSpeed);
 	root.put_attr("lean_give_fraction", vr->leanGiveFraction);
@@ -5930,6 +5936,13 @@ void parse_vr_preferences(InfoTree root, std::string version)
 	g_lua_hud_font_scale = vr->hudTextScale;   // apply the persisted HUD text scale at startup
 	root.read_attr("map_player_up", vr->mapPlayerUp);
 	root.read_attr("teleport_distortion", vr->teleportDistortion);
+	root.read_attr("resolution_scale", vr->resolutionScale);
+	root.read_attr("msaa_samples", vr->msaaSamples);
+	root.read_attr("layer_sharpening", vr->layerSharpening);
+	root.read_attr("layer_supersample", vr->layerSupersample);
+	// The first build to ship this used one combined 0-4 control; clamp any stored value from it.
+	if (vr->layerSharpening  < 0 || vr->layerSharpening  > 2) vr->layerSharpening  = 0;
+	if (vr->layerSupersample < 0 || vr->layerSupersample > 2) vr->layerSupersample = 0;
 	root.read_attr("laser_sight", vr->showLaserSight);
 	root.read_attr("punch_speed", vr->punchSpeed);
 	root.read_attr("lean_give_fraction", vr->leanGiveFraction);

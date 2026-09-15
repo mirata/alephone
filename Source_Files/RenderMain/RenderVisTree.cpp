@@ -783,6 +783,11 @@ short RenderVisTreeClass::calculate_endpoint_clipping_information(
 	overflow_short_to_long_2d(endpoint->transformed,endpoint->flags,transformed_endpoint);
 	
 	data->flags= clip_flags&(_clip_left|_clip_right);
+	
+	// Keep the exact, untransformed vertex beside the transformed vector; see endpoint_clip_data.
+	data->vertex= endpoint->vertex;
+	data->has_vertex= true;
+	
 	switch (data->flags)
 	{
 		case _clip_left:

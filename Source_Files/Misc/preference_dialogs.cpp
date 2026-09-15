@@ -180,6 +180,52 @@ OpenGLDialog::~OpenGLDialog()
 
 }
 
+#if defined(__ANDROID__)
+// Per-eye render resolution, as a multiple of the runtime's RECOMMENDED size. That recommendation
+// sits well below the physical panel (1440x1584 vs 2064x2208 per eye on Quest 3), so at 100% the
+// compositor upscales our image ~1.4x to fill the display -- the main reason edges still look
+// aliased even with MSAA on. Clamped to the runtime maximum, so picking more than the hardware
+// allows simply lands on the ceiling. Costs fill rate.
+static const char *vr_res_scale_labels[] = {
+    "100% (default)", "125%", "150%", "175%", "200%", NULL };
+static const float vr_res_scale_values[] = { 1.0f, 1.25f, 1.5f, 1.75f, 2.0f };
+
+// Anti-aliasing on the eye buffers. Resolved in tile memory via GL_EXT_multisampled_render_to_texture,
+// so on Quest the cost is modest; the value is clamped to GL_MAX_SAMPLES at apply time.
+static const char *vr_msaa_labels[] = { "Off", "2x", "4x (default)", "8x", NULL };
+static const int   vr_msaa_values[] = { 1, 2, 4, 8 };
+
+// Compositor layer filtering (XR_FB_composition_layer_settings). Two independent bit families, so
+// two controls -- they can be combined. "Super Resolution" is Meta Quest Super Resolution (MQSR).
+//
+// These act on the composited eye layer, which is never shown to the eye 1:1: the compositor
+// resamples it through the lens-distortion mesh, so parts of the image are effectively undersampled
+// even when we render at the runtime's recommended resolution. That is why sharpening can visibly
+// help here and isn't only useful when rendering below native.
+static const char *vr_sharpening_labels[]  = { "Off", "Normal", "Super Resolution", NULL };
+static const char *vr_supersample_labels[] = { "Off", "Normal", "Quality", NULL };
+
+// The VR sampling rows live in the OpenGL dialog's Advanced tab (alongside texture filtering, which
+// is the same kind of setting). Held as file statics rather than routed through BinderSet because
+// they target VR_Settings(), not graphics_preferences, so the Bindable machinery doesn't apply.
+// Null whenever the rows weren't built (i.e. not in VR).
+static w_select* s_vrResScaleW    = nullptr;
+static w_select* s_vrMsaaW        = nullptr;
+static w_select* s_vrSharpenW     = nullptr;
+static w_select* s_vrSupersampleW = nullptr;
+
+static int vr_res_scale_index(float v) {
+	int best = 0;
+	for (int i = 1; i < 5; ++i)
+		if (std::fabs(vr_res_scale_values[i] - v) < std::fabs(vr_res_scale_values[best] - v)) best = i;
+	return best;
+}
+static int vr_msaa_index(int samples) {
+	for (int i = 0; i < 4; ++i) if (vr_msaa_values[i] == samples) return i;
+	return 2;   // 4x
+}
+#endif
+
 void OpenGLDialog::OpenGLPrefsByRunning ()
 {
 	m_cancelWidget->set_callback (std::bind (&OpenGLDialog::Stop, this, false));
@@ -262,6 +308,26 @@ void OpenGLDialog::OpenGLPrefsByRunning ()
 	if (result) {
 		// migrate prefs and save
 		binders.migrate_all_first_to_second ();
+#if defined(__ANDROID__)
+		if (s_vrResScaleW) {
+			vr_settings_t* vr = VR_Settings();
+			// Compositor filtering is re-read on every frame submit, so it applies immediately.
+			vr->layerSharpening  = s_vrSharpenW->get_selection();
+			vr->layerSupersample = s_vrSupersampleW->get_selection();
+			// These two own GPU resources; the VR layer rebuilds them at a frame boundary rather
+			// than here, where tearing down the render target would hit an in-flight frame.
+			const float new_scale = vr_res_scale_values[s_vrResScaleW->get_selection()];
+			if (new_scale != vr->resolutionScale) {
+				vr->resolutionScale = new_scale;
+				VR_RequestSwapchainRebuild();
+			}
+			const int new_msaa = vr_msaa_values[s_vrMsaaW->get_selection()];
+			if (new_msaa != vr->msaaSamples) {
+				vr->msaaSamples = new_msaa;
+				VR_RequestEyeBufferRebuild();
+			}
+		}
+#endif
 		write_preferences ();
 	}
 }
@@ -453,13 +519,56 @@ public:
 		table_placer *advanced_table = new table_placer(2, get_theme_space(ITEM_WIDGET), true);
 		advanced_table->col_flags(0, placeable::kAlignRight);
 	
-		w_toggle *use_npot_w = new w_toggle(false);
-		advanced_table->dual_add(use_npot_w->label("Non-Power-of-Two Textures"), m_dialog);
-		advanced_table->dual_add(use_npot_w, m_dialog);
-		advanced_table->dual_add_row(new w_static_text("Non-power-of-two textures conserve memory,"), m_dialog);
-		advanced_table->dual_add_row(new w_static_text("but cause problems on some machines."), m_dialog);
+		// Non-Power-of-Two Textures is a desktop-driver compatibility workaround; GLES3 supports NPOT
+		// natively, so it means nothing in the headset and only costs rows on a dialog already tight
+		// for height. Hidden there, like 3D Perspective above -- the pref keeps its value.
+		w_toggle *use_npot_w = nullptr;
+		if (!VR_IsActive())
+		{
+			use_npot_w = new w_toggle(false);
+			advanced_table->dual_add(use_npot_w->label("Non-Power-of-Two Textures"), m_dialog);
+			advanced_table->dual_add(use_npot_w, m_dialog);
+			advanced_table->dual_add_row(new w_static_text("Non-power-of-two textures conserve memory,"), m_dialog);
+			advanced_table->dual_add_row(new w_static_text("but cause problems on some machines."), m_dialog);
+			advanced_table->add_row(new w_spacer(), true);
+		}
 
-		advanced_table->add_row(new w_spacer(), true);
+#if defined(__ANDROID__)
+		// VR sampling. Ordered as the pipeline runs: we render into the eye buffer (resolution,
+		// anti-aliasing), then the compositor resamples that buffer onto the display (sharpening,
+		// supersampling). One shared description line -- the dialog has no height for more.
+		if (VR_IsActive())
+		{
+			advanced_table->dual_add_row(new w_static_text("VR Sampling"), m_dialog);
+
+			s_vrResScaleW = new w_select(vr_res_scale_index(VR_Settings()->resolutionScale),
+				                             vr_res_scale_labels);
+			advanced_table->dual_add(s_vrResScaleW->label("Render Resolution"), m_dialog);
+			advanced_table->dual_add(s_vrResScaleW, m_dialog);
+
+			s_vrMsaaW = new w_select(vr_msaa_index(VR_Settings()->msaaSamples), vr_msaa_labels);
+			advanced_table->dual_add(s_vrMsaaW->label("Anti-Aliasing"), m_dialog);
+			advanced_table->dual_add(s_vrMsaaW, m_dialog);
+
+			s_vrSharpenW = new w_select(VR_Settings()->layerSharpening, vr_sharpening_labels);
+			advanced_table->dual_add(s_vrSharpenW->label("Sharpening"), m_dialog);
+			advanced_table->dual_add(s_vrSharpenW, m_dialog);
+
+			s_vrSupersampleW = new w_select(VR_Settings()->layerSupersample, vr_supersample_labels);
+			advanced_table->dual_add(s_vrSupersampleW->label("Supersampling"), m_dialog);
+			advanced_table->dual_add(s_vrSupersampleW, m_dialog);
+
+			advanced_table->dual_add_row(new w_static_text(
+				"Sharpening helps at low Render Resolution, Supersampling at high."), m_dialog);
+
+			advanced_table->add_row(new w_spacer(), true);
+		}
+		else
+		{
+			s_vrResScaleW = s_vrMsaaW = s_vrSharpenW = s_vrSupersampleW = nullptr;
+		}
+#endif
+
 		advanced_table->dual_add_row(new w_static_text("Texture Filtering"), m_dialog);
 		advanced_placer->add(advanced_table, true);
 
@@ -566,7 +675,9 @@ public:
 
 		m_sRGBWidget = new ToggleWidget(srgb_w);
 
-		m_useNPOTWidget = new ToggleWidget (use_npot_w);
+		// Null when the row was skipped for VR; BinderSet::insert ignores null bindables, so the
+		// pref simply keeps whatever value it already had.
+		m_useNPOTWidget = use_npot_w ? new ToggleWidget (use_npot_w) : nullptr;
 		m_vsyncWidget = new ToggleWidget (vsync_w);
 		
 		m_wallsFilterWidget = new SelectSelectorWidget (far_filter_wa[OGL_Txtr_Wall]);

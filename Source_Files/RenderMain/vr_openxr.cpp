@@ -308,14 +308,66 @@ EGLConfig currentEglConfig(EGLDisplay dpy, EGLContext ctx) {
 	return cfg;
 }
 
+// Whether XR_FB_composition_layer_settings is available (compositor sharpening / supersampling).
+static bool s_hasLayerSettingsExt = false;
+
+// MSAA sample count actually in use (clamped to GL capability; 1 = off).
+static int s_msaaSamples = 1;
+
+// GL_EXT_multisampled_render_to_texture entry points. GLES3's <gl3.h> declares only the core
+// multisample calls, and core has no way to attach a multisampled render target to a plain
+// GL_TEXTURE_2D -- which is exactly what we need, since the swapchain image the compositor owns is a
+// single-sample texture. So resolve the EXT functions ourselves.
+typedef void (GL_APIENTRYP A1_PFNFramebufferTexture2DMultisampleEXT)(
+	GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLsizei samples);
+typedef void (GL_APIENTRYP A1_PFNRenderbufferStorageMultisampleEXT)(
+	GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height);
+static A1_PFNFramebufferTexture2DMultisampleEXT s_glFramebufferTexture2DMultisampleEXT = nullptr;
+static A1_PFNRenderbufferStorageMultisampleEXT  s_glRenderbufferStorageMultisampleEXT  = nullptr;
+
+static bool loadMultisampleEXT() {
+	if (s_glFramebufferTexture2DMultisampleEXT && s_glRenderbufferStorageMultisampleEXT) return true;
+	s_glFramebufferTexture2DMultisampleEXT = (A1_PFNFramebufferTexture2DMultisampleEXT)
+		eglGetProcAddress("glFramebufferTexture2DMultisampleEXT");
+	s_glRenderbufferStorageMultisampleEXT = (A1_PFNRenderbufferStorageMultisampleEXT)
+		eglGetProcAddress("glRenderbufferStorageMultisampleEXT");
+	return s_glFramebufferTexture2DMultisampleEXT && s_glRenderbufferStorageMultisampleEXT;
+}
+
+void buildEyeFramebuffers(int e);
+void destroySwapchains();
+// Clamp the requested MSAA against this GL's capability; sets s_msaaSamples. 1 = off.
+void resolveMsaaSamples();
+// Set when the MSAA preference changes; consumed at a frame boundary in VR_BeginFrame.
+static bool s_eyeBufferRebuildPending = false;
+// Set when the resolution scale changes; consumed at a frame boundary in VR_BeginFrame.
+static bool s_swapchainRebuildPending = false;
+
 bool createSwapchains() {
 	uint32_t count = 0;
 	for (int i = 0; i < kEyes; ++i) s_viewConfig[i].type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
 	XR_CHECK(xrEnumerateViewConfigurationViews(s_instance, s_systemId,
 		XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, kEyes, &count, s_viewConfig));
-	s_eyeW = s_viewConfig[0].recommendedImageRectWidth;
-	s_eyeH = s_viewConfig[0].recommendedImageRectHeight;
-	A1VR_LOG("eye resolution %dx%d", s_eyeW, s_eyeH);
+	// The recommended size is a performance-oriented default, NOT the panel resolution -- on Quest 3
+	// a Quest 2 recommends ~1440x1584 against an 1832x1920 panel, so at 1.0 the compositor magnifies
+	// by ~1.4x on the way to the display. That upscale re-introduces the stair-stepping MSAA just
+	// removed, which is why anti-aliasing alone barely moves the needle. Scaling up here is the one
+	// change that raises the sampling rate for geometry edges, texture detail and alpha-tested
+	// cutouts all at once.
+	const uint32_t recW = s_viewConfig[0].recommendedImageRectWidth;
+	const uint32_t recH = s_viewConfig[0].recommendedImageRectHeight;
+	const uint32_t maxW = s_viewConfig[0].maxImageRectWidth;
+	const uint32_t maxH = s_viewConfig[0].maxImageRectHeight;
+	float rscale = VR_Settings()->resolutionScale;
+	if (!(rscale > 0.1f)) rscale = 1.0f;
+	uint32_t wantW = (uint32_t)(recW * rscale + 0.5f);
+	uint32_t wantH = (uint32_t)(recH * rscale + 0.5f);
+	if (maxW && wantW > maxW) wantW = maxW;
+	if (maxH && wantH > maxH) wantH = maxH;
+	s_eyeW = (int)wantW;
+	s_eyeH = (int)wantH;
+	A1VR_LOG("eye resolution %dx%d (recommended %ux%u, max %ux%u, scale %.2f)",
+		s_eyeW, s_eyeH, recW, recH, maxW, maxH, rscale);
 
 	// Pick an sRGB colour format (GL_SRGB8_ALPHA8), matching TBXR/QuestZDoom. The Quest compositor
 	// interprets the swapchain in this colour space; handing it a linear RGBA8 made the world far too
@@ -335,6 +387,11 @@ bool createSwapchains() {
 	else if (haveRgba8) chosen = GL_RGBA8;
 	delete[] fmts;
 
+	// Clamp the requested MSAA to what this GL actually offers. Without the EXT we cannot do
+	// tile-resolved MSAA at all, and conventional multisample FBOs would mean an extra full-resolution
+	// resolve blit per eye per frame -- not worth it, so fall back to none.
+	resolveMsaaSamples();
+
 	for (int e = 0; e < kEyes; ++e) {
 		XrSwapchainCreateInfo ci = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
 		ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
@@ -350,23 +407,109 @@ bool createSwapchains() {
 		xrEnumerateSwapchainImages(s_eye[e].swapchain, s_eye[e].imageCount, &s_eye[e].imageCount,
 								   (XrSwapchainImageBaseHeader*)s_eye[e].images);
 
+		buildEyeFramebuffers(e);
+	}
+	return true;
+}
+
+// Release the eye swapchains and everything hanging off them, so they can be rebuilt at a new
+// resolution. Must only be called between frames (no image acquired).
+void destroySwapchains() {
+	for (int e = 0; e < kEyes; ++e) {
+		if (s_eye[e].fbos) {
+			glDeleteFramebuffers(s_eye[e].imageCount, s_eye[e].fbos);
+			delete[] s_eye[e].fbos;
+			s_eye[e].fbos = nullptr;
+		}
+		if (s_eye[e].depth) { glDeleteRenderbuffers(1, &s_eye[e].depth); s_eye[e].depth = 0; }
+		if (s_eye[e].images) { delete[] s_eye[e].images; s_eye[e].images = nullptr; }
+		if (s_eye[e].swapchain != XR_NULL_HANDLE) {
+			xrDestroySwapchain(s_eye[e].swapchain);
+			s_eye[e].swapchain = XR_NULL_HANDLE;
+		}
+		s_eye[e].imageCount = 0;
+	}
+}
+
+void resolveMsaaSamples() {
+	s_msaaSamples = VR_Settings()->msaaSamples;
+	if (s_msaaSamples > 1) {
+		const char* exts = (const char*)glGetString(GL_EXTENSIONS);
+		if (!exts || !std::strstr(exts, "GL_EXT_multisampled_render_to_texture") || !loadMultisampleEXT()) {
+			A1VR_LOG("MSAA requested (%dx) but GL_EXT_multisampled_render_to_texture is absent; disabling",
+				s_msaaSamples);
+			s_msaaSamples = 1;
+		} else {
+			GLint maxSamples = 0;
+			glGetIntegerv(GL_MAX_SAMPLES, &maxSamples);   // same token/value as GL_MAX_SAMPLES_EXT
+			if (maxSamples < 2) s_msaaSamples = 1;
+			else if (s_msaaSamples > maxSamples) s_msaaSamples = maxSamples;
+		}
+	}
+	A1VR_LOG("eye MSAA: %dx", s_msaaSamples < 2 ? 1 : s_msaaSamples);
+}
+
+// Create (or recreate) one eye's depth renderbuffer and per-swapchain-image FBOs at the current
+// s_msaaSamples. Split out of createSwapchains so changing the MSAA preference can rebuild them
+// without tearing down the swapchains themselves -- the swapchain images are always single-sample,
+// so only our attachments change.
+void buildEyeFramebuffers(int e) {
+	{
+		// MSAA. The eye buffers previously had none (sampleCount 1, plain depth renderbuffer), which
+		// is why geometry edges alias badly -- there is no other anti-aliasing anywhere in the VR
+		// path (the engine's `multisamples` pref only feeds SDL's GL attributes in screen.cpp, which
+		// the OpenXR swapchain never goes through).
+		//
+		// GL_EXT_multisampled_render_to_texture is the right tool on a tile-based GPU: the multisample
+		// samples live in tile memory and are resolved to the single-sample swapchain texture as the
+		// tile is written out, so the multisample buffer never touches main memory. That makes it
+		// far cheaper here than conventional MSAA, and it keeps the swapchain itself single-sample
+		// (sampleCount stays 1) so the compositor is unaffected.
+		// Release whatever a previous build left behind FIRST. This function runs again whenever the
+		// MSAA or resolution preference changes, and deleting after creating would destroy the
+		// renderbuffer we are about to attach -- which silently leaves the eye FBOs with NO depth
+		// attachment (a colour-only FBO still reports FRAMEBUFFER_COMPLETE, so nothing warns).
+		if (s_eye[e].fbos) {
+			glDeleteFramebuffers(s_eye[e].imageCount, s_eye[e].fbos);
+			delete[] s_eye[e].fbos;
+			s_eye[e].fbos = nullptr;
+		}
+		if (s_eye[e].depth) { glDeleteRenderbuffers(1, &s_eye[e].depth); s_eye[e].depth = 0; }
+		
+		const int wantSamples = s_msaaSamples;
 		glGenRenderbuffers(1, &s_eye[e].depth);
 		glBindRenderbuffer(GL_RENDERBUFFER, s_eye[e].depth);
-		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, s_eyeW, s_eyeH);
+		if (wantSamples > 1)
+			s_glRenderbufferStorageMultisampleEXT(GL_RENDERBUFFER, wantSamples, GL_DEPTH_COMPONENT24, s_eyeW, s_eyeH);
+		else
+			glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, s_eyeW, s_eyeH);
 		glBindRenderbuffer(GL_RENDERBUFFER, 0);
 
 		s_eye[e].fbos = new GLuint[s_eye[e].imageCount];
 		glGenFramebuffers(s_eye[e].imageCount, s_eye[e].fbos);
 		for (uint32_t i = 0; i < s_eye[e].imageCount; ++i) {
 			glBindFramebuffer(GL_FRAMEBUFFER, s_eye[e].fbos[i]);
-			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_eye[e].images[i].image, 0);
+			if (wantSamples > 1)
+				s_glFramebufferTexture2DMultisampleEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+					GL_TEXTURE_2D, s_eye[e].images[i].image, 0, wantSamples);
+			else
+				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_eye[e].images[i].image, 0);
 			glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, s_eye[e].depth);
-			if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-				A1VR_LOG("eye %d fbo %u incomplete", e, i);
+			if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+				A1VR_LOG("eye %d fbo %u incomplete (msaa %d)", e, i, wantSamples);
+				// Fall back to no MSAA rather than render nothing.
+				if (wantSamples > 1) {
+					s_msaaSamples = 1;
+					glBindRenderbuffer(GL_RENDERBUFFER, s_eye[e].depth);
+					glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, s_eyeW, s_eyeH);
+					glBindRenderbuffer(GL_RENDERBUFFER, 0);
+					glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_eye[e].images[i].image, 0);
+					glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, s_eye[e].depth);
+				}
+			}
 		}
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	}
-	return true;
 }
 
 void initActions();   // defined below (input action set); attached once the session exists
@@ -511,19 +654,25 @@ extern "C" bool VR_InitOpenXR(void)
 	// runtime doesn't have, so an unconditional request would take the whole VR mode down on any
 	// headset/runtime lacking it.
 	s_hasRefreshRateExt = false;
+	s_hasLayerSettingsExt = false;
 	{
 		uint32_t extCount = 0;
 		if (XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(nullptr, 0, &extCount, nullptr)) && extCount) {
 			std::vector<XrExtensionProperties> props(extCount, { XR_TYPE_EXTENSION_PROPERTIES });
 			if (XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(nullptr, extCount, &extCount, props.data()))) {
-				for (uint32_t i = 0; i < extCount; ++i)
+				for (uint32_t i = 0; i < extCount; ++i) {
 					if (!std::strcmp(props[i].extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME))
 						s_hasRefreshRateExt = true;
+					if (!std::strcmp(props[i].extensionName, XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME))
+						s_hasLayerSettingsExt = true;
+				}
 			}
 		}
 	}
 	A1VR_LOG("VR_InitOpenXR: %s %s", XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME,
 		s_hasRefreshRateExt ? "available" : "NOT available (locked to the runtime default rate)");
+	A1VR_LOG("VR_InitOpenXR: %s %s", XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME,
+		s_hasLayerSettingsExt ? "available" : "NOT available (no compositor sharpening/supersampling)");
 
 	std::vector<const char*> extensions = {
 		XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME,
@@ -531,6 +680,8 @@ extern "C" bool VR_InitOpenXR(void)
 	};
 	if (s_hasRefreshRateExt)
 		extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+	if (s_hasLayerSettingsExt)
+		extensions.push_back(XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
 	XrInstanceCreateInfoAndroidKHR androidInfo{};
 	androidInfo.type = XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR;
 	androidInfo.applicationVM = vm;
@@ -642,6 +793,16 @@ namespace {
 		                            //   the corner readouts in toward you, so unlike the flat menu
 		                            //   panel it earns being on by default.
 		/* mapCurvature     */ 0.0f,  // overhead map overlay bend; flat by default
+		/* resolutionScale  */ 1.0f,  // the runtime's recommendation -- i.e. how the port rendered
+		                              // before this control existed. Deliberately conservative:
+		                              // defaults land on hardware we cannot test, and raising this
+		                              // is pure fill rate. Raise it per-device in the prefs.
+		/* msaaSamples      */ 4,     // 4x. Resolved in tile memory via EXT_multisampled_render_to_
+		                              // texture, so the multisample buffer never reaches main memory
+		                              // -- near-free on a tile GPU, unlike resolutionScale which is
+		                              // pure fill rate and so stays at 1.0
+		/* layerSharpening  */ 0,     // off, as before; compositor filtering is opt-in
+		/* layerSupersample */ 0,     // supersampling off; see VR_Settings doc comment
 	};
 	vr_settings_t s_settings = s_defaults;
 
@@ -1037,6 +1198,12 @@ static bool twoHandPositions(int domHand, int offHand, float dom[3], float off[3
 	return true;
 }
 
+// Ask for the eye framebuffers to be rebuilt at the next frame boundary (MSAA preference changed).
+extern "C" void VR_RequestEyeBufferRebuild(void) { s_eyeBufferRebuildPending = true; }
+
+// Ask for the eye swapchains to be recreated at the next frame boundary (resolution scale changed).
+extern "C" void VR_RequestSwapchainRebuild(void) { s_swapchainRebuildPending = true; }
+
 extern "C" bool VR_BeginFrame(void)
 {
 	// Idempotent within a frame. render_screen (apply_vr_view_offsets) now calls this EARLY so the head
@@ -1052,6 +1219,27 @@ extern "C" bool VR_BeginFrame(void)
 	if (!startSession()) return false;   // waits for the GL context
 	pollEvents();
 	if (!s_sessionRunning) return false; // session not running yet -> no frame begun
+
+	// A resolution-scale change needs the swapchains themselves rebuilt, not just our attachments.
+	// Same frame-boundary rule as MSAA below -- nothing may be acquired when we destroy them.
+	if (s_swapchainRebuildPending) {
+		s_swapchainRebuildPending = false;
+		s_eyeBufferRebuildPending = false;   // createSwapchains rebuilds the framebuffers anyway
+		destroySwapchains();
+		if (!createSwapchains()) A1VR_LOG("swapchain rebuild FAILED");
+	}
+
+	// Apply a pending MSAA change here, at a frame boundary, before any swapchain image is acquired:
+	// rebuilding the FBOs mid-frame would pull the render target out from under the eye loop.
+	if (s_eyeBufferRebuildPending) {
+		s_eyeBufferRebuildPending = false;
+		const int was = s_msaaSamples;
+		resolveMsaaSamples();
+		if (s_msaaSamples != was) {
+			for (int e = 0; e < kEyes; ++e) buildEyeFramebuffers(e);
+			A1VR_LOG("eye buffers rebuilt for MSAA %dx", s_msaaSamples < 2 ? 1 : s_msaaSamples);
+		}
+	}
 	processHaptics();
 	syncInput();
 
@@ -1279,7 +1467,31 @@ extern "C" bool VR_ConsumeLevelWarmup(void) { bool v = s_needWarmup; s_needWarmu
 extern "C" void VR_SubmitFrame(void)
 {
 	if (!s_frameBegun) return;
+	// Compositor layer filtering (XR_FB_composition_layer_settings). Chained onto the projection
+	// layer as a suggestion -- the runtime is free to ignore it.
+	//
+	// Note what each family is FOR: the sharpening bits (2 = Meta Quest Super Resolution) reconstruct
+	// detail when the eye buffer is rendered BELOW display resolution, so they pay off with a
+	// resolution scale under 1.0; they do not anti-alias, and on an already-aliased image sharpening
+	// tends to make stair-stepping more obvious, not less. The supersampling bits reduce flicker when
+	// the layer is rendered ABOVE display resolution. Both cost compositor GPU time.
+	// Sharpening and supersampling are separate bit families and may be set together, so OR them.
+	// (Within a family the runtime picks "normal" if both bits of that family are set.)
+	XrCompositionLayerSettingsFB layerSettings = { XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB };
+	layerSettings.layerFlags = 0;
+	switch (s_settings.layerSharpening) {
+		case 1: layerSettings.layerFlags |= XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB; break;
+		case 2: layerSettings.layerFlags |= XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB; break;
+		default: break;
+	}
+	switch (s_settings.layerSupersample) {
+		case 1: layerSettings.layerFlags |= XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SUPER_SAMPLING_BIT_FB; break;
+		case 2: layerSettings.layerFlags |= XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB; break;
+		default: break;
+	}
+
 	XrCompositionLayerProjection layer = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
+	if (s_hasLayerSettingsExt && layerSettings.layerFlags != 0) layer.next = &layerSettings;
 	layer.space = s_stageSpace;
 	layer.viewCount = kEyes;
 	layer.views = s_layerViews;
@@ -3194,6 +3406,8 @@ extern "C" bool VR_ConsumeLevelWarmup(void) { return false; }
 extern "C" void VR_BeginWarmupEye(int)  {}
 extern "C" void VR_EndWarmup(void)      {}
 extern "C" bool VR_InitEGL(void)        { return false; }
+extern "C" void VR_RequestSwapchainRebuild(void) {}
+extern "C" void VR_RequestEyeBufferRebuild(void) {}
 extern "C" bool VR_GetEyeResolution(int* w, int* h) { (void)w; (void)h; return false; }
 extern "C" bool VR_GetHmdYawPitch(float* y, float* p) { if (y) *y = 0; if (p) *p = 0; return false; }
 extern "C" void VR_GetMove(float* x, float* y) { if (x) *x = 0; if (y) *y = 0; }

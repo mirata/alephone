@@ -379,16 +379,65 @@ void RenderRasterize_Shader::render_node(sorted_node_data *node, bool SeeThruLiq
 void RenderRasterize_Shader::clip_to_window(clipping_window_data *win)
 {
     GLdouble clip[] = { 0., 0., 0., 0. };
-        
-    // recenter to player's orientation temporarily
+
+    // Each clip plane is the vertical plane through the view position and a wall endpoint, and it has
+    // to coincide with where that wall's silhouette actually lands on screen or a seam opens up.
+    //
+    // RenderVisTree hands us win->left/right as R(-cone_yaw) * (E - O), which loses precision twice:
+    // O is view->origin, an int16, and the rotation itself rounds to whole world units. Meanwhile the
+    // eye does not rasterise from O at all -- SetView builds the camera from VR_GetRenderCamera(), a
+    // continuous float position carrying the low-passed wall-clamp pushback, plus this eye's exact IPD
+    // offset. Both errors pivot the plane about the wrong point, tilting it by roughly
+    // (error / distance-to-edge) radians -- which GROWS as you approach a corner, so no fixed angular
+    // slack can compensate for it.
+    //
+    // So rebuild the plane from scratch where we can: the exact map vertex E travels with the window,
+    // and P is known in float, giving n = R(-yaw) * (E - P) with no rounding on either term. Windows
+    // built from computed directions rather than map endpoints (screen edges, object windows) have no
+    // vertex and keep the transformed vector. win->right carries the negated form (see the _clip_right
+    // case in RenderVisTree), so its plane negates too.
+    float anchorX = view->origin.x, anchorY = view->origin.y;
+    bool  exact = false;
+    float cy = 1.0f, sy = 0.0f;
+#if defined(__ANDROID__)
+    if (VR_IsActive())
+    {
+        float rcx = 0.0f, rcy = 0.0f, rcz = 0.0f;
+        if (VR_GetRenderCamera(&rcx, &rcy, &rcz)) { anchorX = rcx; anchorY = rcy; }
+        float ipdx = 0.0f, ipdy = 0.0f;
+        VR_GetEyeIPDOffsetWU(VR_CurrentEye(), &ipdx, &ipdy);
+        anchorX += ipdx;
+        anchorY += ipdy;
+
+        const float yaw = float(view->cone_yaw) * float(2.0 * M_PI / FULL_CIRCLE);
+        cy = cosf(yaw); sy = sinf(yaw);
+        exact = true;
+    }
+#endif
+
+    // R(-yaw) * (E - P), matching transform_overflow_point2d's convention (i forward, j lateral).
+    auto exact_vector = [&](const world_point2d& E, bool negate, GLdouble* out) {
+        const float ex = float(E.x) - anchorX;
+        const float ey = float(E.y) - anchorY;
+        const float i =  ex * cy + ey * sy;
+        const float j = -ex * sy + ey * cy;
+        out[0] = negate ? -i : i;
+        out[1] = negate ? -j : j;
+    };
+
+    // recenter to the position the eye actually renders from
     glPushMatrix();
-    glTranslatef(view->origin.x, view->origin.y, 0.);
+    glTranslatef(anchorX, anchorY, 0.);
     glRotatef(view->cone_yaw * (360/float(FULL_CIRCLE)) + 90., 0., 0., 1.);
 
     glRotatef(-0.1, 0., 0., 1.); // leave some excess to avoid artifacts at edges
 	if (win->left.i != leftmost_clip.i || win->left.j != leftmost_clip.j) {
-		clip[0] = win->left.i;
-		clip[1] = win->left.j;
+		if (exact && win->has_left_vertex) {
+			exact_vector(win->left_vertex, false, clip);
+		} else {
+			clip[0] = win->left.i;
+			clip[1] = win->left.j;
+		}
 		glEnable(GL_CLIP_PLANE0);
 		glClipPlane(GL_CLIP_PLANE0, clip);
 	} else {
@@ -397,8 +446,12 @@ void RenderRasterize_Shader::clip_to_window(clipping_window_data *win)
 	
     glRotatef(0.2, 0., 0., 1.); // breathing room for right-hand clip
 	if (win->right.i != rightmost_clip.i || win->right.j != rightmost_clip.j) {
-		clip[0] = win->right.i;
-		clip[1] = win->right.j;
+		if (exact && win->has_right_vertex) {
+			exact_vector(win->right_vertex, true, clip);
+		} else {
+			clip[0] = win->right.i;
+			clip[1] = win->right.j;
+		}
 		glEnable(GL_CLIP_PLANE1);
 		glClipPlane(GL_CLIP_PLANE1, clip);
 	} else {

@@ -114,6 +114,23 @@ typedef struct {
 	                        //   (ammo/health/oxygen) in toward you instead of leaving them flat out
 	                        //   in the periphery. 0 = flat.
 	float mapCurvature;     // ditto for the overhead map overlay. 0 = flat.
+	float resolutionScale;  // multiplies the runtime's RECOMMENDED per-eye resolution, clamped to the
+	                        // runtime maximum. Note the recommended size is well below the physical
+	                        // panel (e.g. 1440x1584 against an 1832x1920 panel on Quest 2), so at 1.0 the
+	                        // compositor is UPSCALING our image ~1.4x to fill the display -- which is
+	                        // the dominant source of edge aliasing and blur. Raising this is the
+	                        // single biggest image-quality lever; it costs fill rate. Defaults to
+	                        // 1.0 (how the port rendered before this existed); raise it per device.
+	int   msaaSamples;      // MSAA samples on the eye buffers: 0/1 = off, 2, 4, 8. Default 4.
+	                        // Resolved inside tile memory via GL_EXT_multisampled_render_to_texture,
+	                        // so on Adreno it never round-trips a multisample buffer through main
+	                        // memory. Applied at swapchain creation -- changing it needs a restart.
+	// Compositor layer filtering (XR_FB_composition_layer_settings). The two families are
+	// independent bits and may be combined, so they get one control each.
+	int   layerSharpening;  // 0 = off, 1 = normal (3-tap), 2 = Meta Quest Super Resolution (MQSR).
+	                        // Recovers apparent detail lost when the eye buffer is resampled.
+	int   layerSupersample; // 0 = off, 1 = normal (2-tap), 2 = quality (4-tap).
+	                        // Reduces shimmer/flicker where the layer is downsampled.
 } vr_settings_t;
 
 vr_settings_t* VR_Settings(void);
@@ -157,6 +174,11 @@ bool VR_InitEGL(void);
 
 // Eye (per-view) framebuffer resolution chosen by the runtime; valid after the first frame. Used as
 // the engine's logical screen size in VR. Returns false until known.
+// Rebuild the eye framebuffers at the next frame boundary (after changing msaaSamples).
+void VR_RequestEyeBufferRebuild(void);
+// Recreate the eye swapchains at the next frame boundary (after changing resolutionScale).
+void VR_RequestSwapchainRebuild(void);
+
 bool VR_GetEyeResolution(int* w, int* h);
 
 // Head orientation from the last located HMD pose, in Marathon angle units (512 = full circle),
