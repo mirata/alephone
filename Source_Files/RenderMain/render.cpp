@@ -1649,8 +1649,21 @@ void render_view(
 						// gated by _endpoint_has_been_visited, and that cached transform is only
 						// valid for the cone_yaw it was computed with.
 						const int sectors = vr_vis_sector_count(view);
-						for (int sector = 0; sector < sectors; ++sector)
+						for (int si = 0; si < sectors; ++si)
 						{
+							// Draw the PRIMARY sector LAST. Sprites go down with the depth test OFF (BSP painter's
+							// order), so anything drawn after them simply covers them -- and the floor beneath your
+							// feet lands in EVERY sector's tree, because directly below you spans every azimuth. With
+							// the primary drawn first, the extra sectors repainted that floor straight over the ground
+							// sprites the moment the sweep engaged (pitch past ~34 deg): the sprites were still being
+							// placed and drawn every frame, just buried. Surfaces that happened not to land in an extra
+							// sector's tree kept theirs, which is why they vanished patchily rather than all at once.
+							//
+							// The extras use render_tree_diffuse_only(), which skips the shader/uniform setup the full
+							// render_tree() does, so they now inherit it from the OTHER eye's pass in the same frame
+							// rather than this eye's. Those uniforms are frame-global (fog, brightness, bloom); the
+							// per-draw matrices come through the GLES shim per draw call, not from here.
+							const int sector = (si + 1 < sectors) ? (si + 1) : 0;
 							view->cone_yaw  = NORMALIZE_ANGLE(base_cone_yaw + vr_vis_sector_offset(sector));
 							view->half_cone = vr_vis_sector_half_cone(sector);
 							angle th = NORMALIZE_ANGLE(view->cone_yaw - view->half_cone);
