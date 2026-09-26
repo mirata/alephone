@@ -67,6 +67,7 @@ extern "C" void VR_FinishEye(int)       {}
 extern "C" void VR_GetEyeProjection(int, float*, float, float) {}
 extern "C" void VR_GetEyeViewMetres(int, float*) {}
 extern "C" void VR_SubmitFrame(void)    {}
+extern "C" bool VR_EyeResolutionForScale(float, int*, int*) { return false; }
 extern "C" int  VR_EyeWidth(void)       { return 0; }
 extern "C" int  VR_EyeHeight(void)      { return 0; }
 extern "C" unsigned VR_CurrentEyeFramebuffer(void) { return 0; }

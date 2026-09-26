@@ -1060,6 +1060,41 @@ static const char *bobbing_view_labels[] = {
 // bobs actually differs, so offer just that. Index 0 -> no camera bob, index 1 -> camera_and_weapon.
 static const char *vr_bobbing_labels[] = { "None", "Camera", NULL };
 
+// Per-eye render resolution, as a multiple of the runtime's RECOMMENDED size. That recommendation is
+// a performance-oriented default rather than the panel resolution, so 1.0 typically renders FEWER
+// pixels than the display can show and the compositor magnifies the result. Raising it is the single
+// biggest image-quality lever, and it costs fill rate.
+//
+// The labels are built at runtime (vr_build_res_scale_labels) because a bare percentage means nothing
+// without this headset's recommended size -- the same 125% is a different pixel count on every
+// device. Each entry shows what it actually produces, including the clamp to the runtime maximum.
+static const float vr_res_scale_values[] = { 1.0f, 1.25f, 1.5f, 1.75f, 2.0f };
+static const int   vr_res_scale_percent[] = { 100, 125, 150, 175, 200 };
+enum { NUM_VR_RES_SCALES = 5 };
+static char        vr_res_scale_text[NUM_VR_RES_SCALES][32];
+static const char* vr_res_scale_labels[NUM_VR_RES_SCALES + 1];
+
+static void vr_build_res_scale_labels()
+{
+	for (int i = 0; i < NUM_VR_RES_SCALES; ++i) {
+		int w = 0, h = 0;
+		if (VR_EyeResolutionForScale(vr_res_scale_values[i], &w, &h) && w > 0 && h > 0)
+			sprintf(vr_res_scale_text[i], "%dx%d (%d%%)", w, h, vr_res_scale_percent[i]);
+		else
+			sprintf(vr_res_scale_text[i], "%d%%", vr_res_scale_percent[i]);
+		vr_res_scale_labels[i] = vr_res_scale_text[i];
+	}
+	vr_res_scale_labels[NUM_VR_RES_SCALES] = NULL;
+}
+
+static int vr_res_scale_index(float v)
+{
+	int best = 0;
+	for (int i = 1; i < NUM_VR_RES_SCALES; ++i)
+		if (std::fabs(vr_res_scale_values[i] - v) < std::fabs(vr_res_scale_values[best] - v)) best = i;
+	return best;
+}
+
 #endif
 
 #if defined(__ANDROID__)
@@ -2026,6 +2061,11 @@ static void vr_graphics_dialog(void *arg)
 
 	table = world_table;
 
+	vr_build_res_scale_labels();
+	w_select *res_scale_w = new w_select(vr_res_scale_index(vr->resolutionScale), vr_res_scale_labels);
+	table->dual_add(res_scale_w->label("Render Resolution"), d);
+	table->dual_add(res_scale_w, d);
+	
 	// In VR this shared pref is the ONLY view-bob control (the old VR-only "Disable View Bob" toggle
 	// was folded into it). bob_index maps the 3-way pref onto the 2 behaviours VR can tell apart.
 	const int bob_index =
@@ -2050,10 +2090,11 @@ static void vr_graphics_dialog(void *arg)
 
 	table->add_row(new w_spacer(), true);
 	table->dual_add_row(new w_button("RESET WORLD DEFAULTS",
-		[bobbing_w, teleport_distortion_w, brightness_w, vrd](void*) {
+		[bobbing_w, teleport_distortion_w, brightness_w, res_scale_w, vrd](void*) {
 			bobbing_w->set_selection(0);   // BobbingType::none is the VR default
 			teleport_distortion_w->set_selection(vrd->teleportDistortion ? 1 : 0);
 			brightness_w->set_selection(DEFAULT_GAMMA_LEVEL);
+			res_scale_w->set_selection(vr_res_scale_index(vrd->resolutionScale));
 		}, nullptr), d);
 
 	tabs_placer->add(hud_table, true);
@@ -2105,6 +2146,14 @@ static void vr_graphics_dialog(void *arg)
 		vr->hudCurvature     = vr_panel_curve_values[hud_curve_w->get_selection()];
 		vr->mapCurvature     = vr_panel_curve_values[map_curve_w->get_selection()];
 		vr->teleportDistortion = teleport_distortion_w->get_selection() ? 1 : 0;
+
+		// The eye swapchains are sized from this, so the VR layer recreates them at a frame boundary
+		// rather than here -- tearing the render target down mid-dialog would hit an in-flight frame.
+		const float new_scale = vr_res_scale_values[res_scale_w->get_selection()];
+		if (new_scale != vr->resolutionScale) {
+			vr->resolutionScale = new_scale;
+			VR_RequestSwapchainRebuild();
+		}
 
 
 		// Only rewrite bobbing_type when the choice actually changed: a stored "Weapon Only" behaves

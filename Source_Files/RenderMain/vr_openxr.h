@@ -337,6 +337,9 @@ void VR_GetEyeViewMetres(int eye, float* view16);
 // Submit the frame to the compositor (xrEndFrame). Pairs with VR_BeginFrame.
 void VR_SubmitFrame(void);
 
+// Per-eye resolution a given resolutionScale would produce (clamped to the runtime maximum).
+// False before the view configuration has been enumerated.
+bool VR_EyeResolutionForScale(float scale, int* w, int* h);
 int  VR_EyeWidth(void);
 int  VR_EyeHeight(void);
 unsigned VR_CurrentEyeFramebuffer(void);   // GL FBO id bound for the current eye (for the blit target)

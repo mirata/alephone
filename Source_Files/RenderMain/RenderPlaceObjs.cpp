@@ -790,7 +790,13 @@ void RenderPlaceObjsClass::build_aggregate_render_object_clipping_window(
 				{ 
 					// Window overlaps or abuts last-added window from a prior node (both windows overlap base_left);
 					// tentatively use its right-clip
+					// The exact map vertex behind a clip vector must travel WITH it. Replacing `right` while
+					// leaving the previous right_vertex in place left the window claiming a vertex that
+					// described a different edge, and clip_to_window would then rebuild the plane from the
+					// wrong corner -- sprites clipped against an edge that wasn't theirs.
 					ClippingWindows.back().right = win->right;
+					ClippingWindows.back().right_vertex = win->right_vertex;
+					ClippingWindows.back().has_right_vertex = win->has_right_vertex;
 					ClippingWindows.back().x1 = win->x1;
 				} 
 				else

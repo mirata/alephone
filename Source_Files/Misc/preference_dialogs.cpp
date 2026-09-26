@@ -181,15 +181,6 @@ OpenGLDialog::~OpenGLDialog()
 }
 
 #if defined(__ANDROID__)
-// Per-eye render resolution, as a multiple of the runtime's RECOMMENDED size. That recommendation
-// sits well below the physical panel (1440x1584 vs 2064x2208 per eye on Quest 3), so at 100% the
-// compositor upscales our image ~1.4x to fill the display -- the main reason edges still look
-// aliased even with MSAA on. Clamped to the runtime maximum, so picking more than the hardware
-// allows simply lands on the ceiling. Costs fill rate.
-static const char *vr_res_scale_labels[] = {
-    "100% (default)", "125%", "150%", "175%", "200%", NULL };
-static const float vr_res_scale_values[] = { 1.0f, 1.25f, 1.5f, 1.75f, 2.0f };
-
 // Anti-aliasing on the eye buffers. Resolved in tile memory via GL_EXT_multisampled_render_to_texture,
 // so on Quest the cost is modest; the value is clamped to GL_MAX_SAMPLES at apply time.
 static const char *vr_msaa_labels[] = { "Off", "2x", "4x (default)", "8x", NULL };
@@ -209,17 +200,10 @@ static const char *vr_supersample_labels[] = { "Off", "Normal", "Quality", NULL 
 // is the same kind of setting). Held as file statics rather than routed through BinderSet because
 // they target VR_Settings(), not graphics_preferences, so the Bindable machinery doesn't apply.
 // Null whenever the rows weren't built (i.e. not in VR).
-static w_select* s_vrResScaleW    = nullptr;
 static w_select* s_vrMsaaW        = nullptr;
 static w_select* s_vrSharpenW     = nullptr;
 static w_select* s_vrSupersampleW = nullptr;
 
-static int vr_res_scale_index(float v) {
-	int best = 0;
-	for (int i = 1; i < 5; ++i)
-		if (std::fabs(vr_res_scale_values[i] - v) < std::fabs(vr_res_scale_values[best] - v)) best = i;
-	return best;
-}
 static int vr_msaa_index(int samples) {
 	for (int i = 0; i < 4; ++i) if (vr_msaa_values[i] == samples) return i;
 	return 2;   // 4x
@@ -309,18 +293,13 @@ void OpenGLDialog::OpenGLPrefsByRunning ()
 		// migrate prefs and save
 		binders.migrate_all_first_to_second ();
 #if defined(__ANDROID__)
-		if (s_vrResScaleW) {
+		if (s_vrMsaaW) {
 			vr_settings_t* vr = VR_Settings();
 			// Compositor filtering is re-read on every frame submit, so it applies immediately.
 			vr->layerSharpening  = s_vrSharpenW->get_selection();
 			vr->layerSupersample = s_vrSupersampleW->get_selection();
-			// These two own GPU resources; the VR layer rebuilds them at a frame boundary rather
-			// than here, where tearing down the render target would hit an in-flight frame.
-			const float new_scale = vr_res_scale_values[s_vrResScaleW->get_selection()];
-			if (new_scale != vr->resolutionScale) {
-				vr->resolutionScale = new_scale;
-				VR_RequestSwapchainRebuild();
-			}
+			// MSAA owns GPU resources; the VR layer rebuilds the eye buffers at a frame boundary
+			// rather than here, where tearing down the render target would hit an in-flight frame.
 			const int new_msaa = vr_msaa_values[s_vrMsaaW->get_selection()];
 			if (new_msaa != vr->msaaSamples) {
 				vr->msaaSamples = new_msaa;
@@ -541,11 +520,6 @@ public:
 		{
 			advanced_table->dual_add_row(new w_static_text("VR Sampling"), m_dialog);
 
-			s_vrResScaleW = new w_select(vr_res_scale_index(VR_Settings()->resolutionScale),
-				                             vr_res_scale_labels);
-			advanced_table->dual_add(s_vrResScaleW->label("Render Resolution"), m_dialog);
-			advanced_table->dual_add(s_vrResScaleW, m_dialog);
-
 			s_vrMsaaW = new w_select(vr_msaa_index(VR_Settings()->msaaSamples), vr_msaa_labels);
 			advanced_table->dual_add(s_vrMsaaW->label("Anti-Aliasing"), m_dialog);
 			advanced_table->dual_add(s_vrMsaaW, m_dialog);
@@ -565,7 +539,7 @@ public:
 		}
 		else
 		{
-			s_vrResScaleW = s_vrMsaaW = s_vrSharpenW = s_vrSupersampleW = nullptr;
+			s_vrMsaaW = s_vrSharpenW = s_vrSupersampleW = nullptr;
 		}
 #endif
 

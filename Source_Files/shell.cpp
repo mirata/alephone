@@ -30,6 +30,7 @@
 #include "player.h"
 #include "render.h"
 #include "shell.h"
+#include <fstream>
 #include "interface.h"
 #include "SoundManager.h"
 #include "fades.h"
@@ -557,6 +558,31 @@ void initialize_application(void)
 	image_cache_dir.MakeDirectory();
 	recordings_dir.MakeDirectory();
 	screenshots_dir.MakeDirectory();
+
+#if defined(__ANDROID__)
+	// Create the Plugins directory (the engine only ever READS it, so on a store install it
+	// never existed) and drop a readme inside. Both halves matter for a headset: a user adding
+	// a plugin browses the device from a PC over MTP, where Explorer refuses to create folders
+	// -- "New folder" is greyed out -- so if we don't make it, they have nowhere to put one.
+	// And an EMPTY directory is commonly not listed over MTP at all, so the readme is what makes
+	// the folder actually visible, as well as saying what to do with it.
+	{
+		DirectorySpecifier plugins_dir = local_data_dir;
+		plugins_dir += "Plugins";
+		plugins_dir.MakeDirectory();
+		FileSpecifier readme = plugins_dir + "README.txt";
+		if (!readme.Exists())
+		{
+			std::ofstream f(readme.GetPath(), std::ios::binary);
+			f << "Put Aleph One plugins in this folder." "\r\n";
+			f << "\r\n";
+			f << "A plugin is either a .zip file or a folder containing Plugin.xml --" "\r\n";
+			f << "copy it in here as-is. There is no need to unzip it." "\r\n";
+			f << "\r\n";
+			f << "Then start the game and switch it on under Preferences > Plugins." "\r\n";
+		}
+	}
+#endif
 	
 	WadImageCache::instance()->initialize_cache();
 
@@ -836,9 +862,29 @@ void main_event_loop(void)
 			// Mirrors the desktop _key_activate_console behaviour (chat in netgames, Lua console in solo),
 			// and shows/hides our floating VR keyboard alongside it. Press again to dismiss both.
 			{
+				// The edge detector tracks the RAW button, not the gated one. Those differ when the button
+				// is also bound to something else: a terminal binds this same button to back/abort, and the
+				// press that ABORTS the terminal is still physically held for a few frames afterwards. If
+				// `prev` only ever saw the gated value, that lingering hold looked like a brand-new press the
+				// instant the gate reopened, and the console popped up on terminal exit. Tracking the raw
+				// state means a press that began while suppressed can never fire; the button must be
+				// released and pressed again. (Same reasoning as the advance/back edge tracking in vbl.cpp.)
+				//
+				// Terminals are excluded outright too. game_state stays _game_in_progress inside a terminal,
+				// so without this the console was toggling behind the terminal on every page-back press --
+				// invisible at the time, and left open or closed depending on how many times you pressed.
 				static bool s_vrConsolePrev = false;
-				const bool consoleBtn = (game_state == _game_in_progress) && VR_ActionHeld(VR_ACT_CONSOLE);
-				if (consoleBtn && !s_vrConsolePrev) {
+				const bool consoleRaw = VR_ActionHeld(VR_ACT_CONSOLE);
+				// local_player_index is NONE outside a game, and get_player_terminal_data() vasserts on
+				// an out-of-range index rather than returning null -- so calling this during teardown
+				// aborts the process (SIGABRT). game_state can still read _game_in_progress while the
+				// player has already been torn down, so the state check alone does not make it safe.
+				const bool consoleAllowed = (game_state == _game_in_progress) &&
+				                            local_player_index != NONE &&
+				                            !player_in_terminal_mode(local_player_index);
+				const bool consoleRising = consoleRaw && !s_vrConsolePrev;
+				s_vrConsolePrev = consoleRaw;   // ALWAYS, regardless of the gate
+				if (consoleRising && consoleAllowed) {
 					if (Console::instance()->input_active()) {
 						Console::instance()->abort();          // cancel -> stops SDL text input
 						VR_SetInGameKeyboard(false);
@@ -861,7 +907,6 @@ void main_event_loop(void)
 						}
 					}
 				}
-				s_vrConsolePrev = consoleBtn;
 			}
 
 			// Bound "2D Offset Test" button (VR_ACT_DIAG2D) -> arm/disarm the deliberate 2D-image

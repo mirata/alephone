@@ -1506,6 +1506,26 @@ extern "C" void VR_SubmitFrame(void)
 	s_frameBegun = false;
 }
 
+// What per-eye resolution a given resolutionScale would actually produce, including the clamp to
+// the runtime maximum. Lets the preferences UI label each choice with real pixels instead of a
+// bare percentage, which is meaningless without knowing this headset's recommended size.
+extern "C" bool VR_EyeResolutionForScale(float scale, int* w, int* h)
+{
+	const uint32_t recW = s_viewConfig[0].recommendedImageRectWidth;
+	const uint32_t recH = s_viewConfig[0].recommendedImageRectHeight;
+	if (!recW || !recH) return false;   // view config not enumerated yet
+	const uint32_t maxW = s_viewConfig[0].maxImageRectWidth;
+	const uint32_t maxH = s_viewConfig[0].maxImageRectHeight;
+	if (!(scale > 0.1f)) scale = 1.0f;
+	uint32_t ww = (uint32_t)(recW * scale + 0.5f);
+	uint32_t hh = (uint32_t)(recH * scale + 0.5f);
+	if (maxW && ww > maxW) ww = maxW;
+	if (maxH && hh > maxH) hh = maxH;
+	if (w) *w = (int)ww;
+	if (h) *h = (int)hh;
+	return true;
+}
+
 extern "C" int VR_EyeWidth(void)  { return s_eyeW; }
 extern "C" int VR_EyeHeight(void) { return s_eyeH; }
 extern "C" int VR_CurrentEye(void) { return s_curEye; }
@@ -1899,7 +1919,20 @@ namespace {
 	// World-locked 2D panel (placed in stage space when a menu/terminal is shown). Vectors in stage m.
 	float s_panelC[3] = {0,0,0}, s_panelR[3] = {1,0,0}, s_panelU[3] = {0,1,0}, s_panelN[3] = {0,0,1};
 	float s_panelHalfW = 1, s_panelHalfH = 1;
+	// s_panelPlaced means specifically "the panel globals hold a MENU/terminal placement" -- ONLY
+	// placePanel() sets it, and every world frame clears it so the next 2D screen re-anchors to
+	// where the player is now looking.
+	//
+	// placeConsolePanel() writes the SAME globals (the in-game console keyboard reuses this panel
+	// machinery to hang itself off) but must NOT claim to be a menu placement. It used to set
+	// s_panelPlaced = true, so a 2D screen opened after the in-game console skipped placePanel()
+	// and inherited the console's geometry: a 5 cm sliver 0.42 m below eye level. The menu still
+	// drew, but updatePointer() ray-cast against that sliver, missed it from every angle, and the
+	// hand pointers silently vanished until a world frame happened to clear the flag.
 	bool  s_panelPlaced = false;
+	// The panel basis/extent is populated at all (by either placer) -- what geometry hanging off
+	// the panel needs, as opposed to "is this a menu".
+	bool  s_panelBasisValid = false;
 	// True while the 2D panel is showing a terminal rather than a menu. Pushed from screen.cpp.
 	bool  s_panelIsTerminal = false;
 	// Per-hand pointer result (computed in VR_PresentScreenLayer): each controller's ray hit on the panel.
@@ -1922,12 +1955,20 @@ extern "C" bool VR_TakeWorldFramePresented(void) { bool v = s_worldFramePresente
 // VR_GetPointerScreen must be called before VR_GetPointerClick each frame (screen.cpp does this).
 extern "C" bool VR_GetPointerScreen(int* x, int* y) {
 	int dom = s_settings.dominantHand ? 0 : 1, off = 1 - dom;
-	// If no click in progress, check whether one is starting now.
+	// A click may only BEGIN on a trigger that was just pressed -- never on one already held.
+	// Otherwise any trigger still down across a screen change (clicking YES on a dialog, say)
+	// immediately re-locks on whatever screen replaced it and delivers a second, unintended click
+	// there. Same rule as the console button in shell.cpp: an input that began under one screen
+	// must not be re-consumed by the next one.
+	static bool s_trigPrev[2] = { false, false };
+	const bool trigNow[2] = { s_trigger[0] > 0.5f, s_trigger[1] > 0.5f };
+	const bool trigRising[2] = { trigNow[0] && !s_trigPrev[0], trigNow[1] && !s_trigPrev[1] };
+	s_trigPrev[0] = trigNow[0]; s_trigPrev[1] = trigNow[1];
 	if (s_ptrClickHand < 0) {
 		const int order[2] = {dom, off};
 		for (int i = 0; i < 2; ++i) {
 			int h = order[i];
-			if (s_ptr[h].active && s_trigger[h] > 0.5f) { s_ptrClickHand = h; break; }
+			if (s_ptr[h].active && trigRising[h]) { s_ptrClickHand = h; break; }
 		}
 	}
 	// Use locked click hand for consistent DOWN/UP position; VR_GetPointerClick clears lock on release.
@@ -2418,6 +2459,7 @@ namespace {
 		s_panelHalfH = 0.5f*s_settings.screenHeightM;
 		s_panelHalfW = s_panelHalfH * (float)kScreenW/(float)kScreenH;
 		s_panelPlaced = true;
+		s_panelBasisValid = true;
 		// DIAG (menu-out-of-alignment): persistent log of the head pose the panel was placed from and the
 		// resulting panel centre. If the menu is still off after this, the numbers show whether the head
 		// stage-pose was sane (e.g. corrupted by crossing the guardian) or the placement math is at fault.
@@ -2904,7 +2946,7 @@ namespace {
 	// toward the head. Anchored to the menu bottom edge, brought toward the user; the top edge stays
 	// put as recline changes. Done once per dialog (persists across field focus changes).
 	void kbPlace() {
-		if (!s_panelPlaced) return;
+		if (!s_panelBasisValid) return;
 		const float th = kKbReclineDeg * (3.14159265358979f / 180.0f);
 		const float ct = std::cos(th), st = std::sin(th);
 		s_kbHalfW = s_panelHalfW * kKbWidthScale;
@@ -3076,7 +3118,8 @@ namespace {
 		const float menuHalfW = 0.5f * s_settings.screenHeightM * (float)kScreenW / (float)kScreenH;
 		s_panelHalfW = menuHalfW * (kConD / s_settings.screenDistanceM);
 		s_panelHalfH = 0.05f;   // keyboard top hangs just below this (undrawn) panel centre
-		s_panelPlaced = true;
+		// Deliberately NOT s_panelPlaced: this is not a menu placement. See its declaration.
+		s_panelBasisValid = true;
 	}
 
 	// A thin world-locked strip that shows the console line (Console::displayBuffer). Drawn VERTICAL
@@ -3234,7 +3277,13 @@ extern "C" void VR_PresentScreenLayer(void)
 		// panel -- and the keyboard, which is placed relative to it -- to the player's new facing.
 		if (s_panelRecenterPending) { s_panelPlaced = false; s_kbPlaced = false; s_panelRecenterPending = false; }
 		if (!s_panelPlaced && s_headPoseValid) placePanel();
-		updatePointer();   // ray-cast both controllers onto the world-locked panel
+		// Only ray-cast against a real menu placement. If the head pose wasn't valid above there is
+		// nothing to point at -- but LEAVE the previous hits alone rather than clearing them. Forcing
+		// them inactive drops s_ptrClickHand mid-click, and a still-held trigger then re-locks and
+		// fires a SECOND mouse-down at the new cursor position: clicking YES on the quit dialog was
+		// landing a second click on the main menu underneath it, which sits on Quit -> the whole app
+		// exited. A click must never survive a screen change; see the rising-edge lock below.
+		if (s_panelPlaced) updatePointer();   // ray-cast both controllers onto the world-locked panel
 		kbUpdate();        // on-screen keyboard: place/hover/click + suppress menu pointer when on it
 
 		// DIAG (menu-out-of-alignment): ~1/sec persistent log of the LIVE head-vs-panel relationship while
@@ -3448,6 +3497,7 @@ extern "C" void VR_FinishEye(int)       {}
 extern "C" void VR_GetEyeProjection(int, float*, float, float) {}
 extern "C" void VR_GetEyeViewMetres(int, float*) {}
 extern "C" void VR_SubmitFrame(void)    {}
+extern "C" bool VR_EyeResolutionForScale(float, int*, int*) { return false; }
 extern "C" int  VR_EyeWidth(void)       { return 0; }
 extern "C" int  VR_EyeHeight(void)      { return 0; }
 extern "C" unsigned VR_CurrentEyeFramebuffer(void) { return 0; }

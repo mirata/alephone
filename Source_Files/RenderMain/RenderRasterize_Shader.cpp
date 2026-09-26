@@ -399,6 +399,7 @@ void RenderRasterize_Shader::clip_to_window(clipping_window_data *win)
     float anchorX = view->origin.x, anchorY = view->origin.y;
     bool  exact = false;
     float cy = 1.0f, sy = 0.0f;
+    float dI = 0.0f, dJ = 0.0f;   // (P - O) in the cone-rotated frame; see below
 #if defined(__ANDROID__)
     if (VR_IsActive())
     {
@@ -411,6 +412,16 @@ void RenderRasterize_Shader::clip_to_window(clipping_window_data *win)
 
         const float yaw = float(view->cone_yaw) * float(2.0 * M_PI / FULL_CIRCLE);
         cy = cosf(yaw); sy = sinf(yaw);
+        // delta = P - O, rotated into the transformed-endpoint frame. Needed for any plane we can NOT
+        // rebuild exactly: win->left/right are R(-yaw)*(E - O), i.e. relative to the INTEGER origin,
+        // while the matrix below is anchored at P. Using them raw there translates the plane by delta
+        // without rotating it back, leaving it wrong by the very amount this code exists to remove.
+        // Object/sprite windows are exactly the ones with no vertex to rebuild from -- which is why
+        // dead sprites began showing through a wall a fraction before the corner actually cleared them.
+        const float dx = anchorX - float(view->origin.x);
+        const float dy = anchorY - float(view->origin.y);
+        dI =  dx * cy + dy * sy;
+        dJ = -dx * sy + dy * cy;
         exact = true;
     }
 #endif
@@ -435,8 +446,9 @@ void RenderRasterize_Shader::clip_to_window(clipping_window_data *win)
 		if (exact && win->has_left_vertex) {
 			exact_vector(win->left_vertex, false, clip);
 		} else {
-			clip[0] = win->left.i;
-			clip[1] = win->left.j;
+			// No vertex to rebuild from: re-base the O-relative vector onto the P anchor.
+			clip[0] = win->left.i - dI;
+			clip[1] = win->left.j - dJ;
 		}
 		glEnable(GL_CLIP_PLANE0);
 		glClipPlane(GL_CLIP_PLANE0, clip);
@@ -449,8 +461,9 @@ void RenderRasterize_Shader::clip_to_window(clipping_window_data *win)
 		if (exact && win->has_right_vertex) {
 			exact_vector(win->right_vertex, true, clip);
 		} else {
-			clip[0] = win->right.i;
-			clip[1] = win->right.j;
+			// win->right carries the negated vector, so the re-basing term negates with it.
+			clip[0] = win->right.i + dI;
+			clip[1] = win->right.j + dJ;
 		}
 		glEnable(GL_CLIP_PLANE1);
 		glClipPlane(GL_CLIP_PLANE1, clip);
