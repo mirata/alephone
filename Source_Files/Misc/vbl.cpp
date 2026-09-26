@@ -1756,17 +1756,39 @@ bool setup_replay_from_random_resource()
 typedef bool (*timer_func)(void);
 
 static timer_func tm_func = NULL;	// The installed timer task
-static uint64_t tm_period;			// Ticks between two calls of the timer task
-static uint64_t tm_last = 0, tm_accum = 0;
+// MICROSECONDS, not milliseconds. This is the clock that lays down the 30 Hz game-tick grid, and
+// 1000/30 truncates to 33 -- so the sim actually ran at 30.30 Hz while every consumer of the grid
+// (TICKS_PER_SECOND, get_heartbeat_fraction) divided by 33.33 ms. The 1% mismatch meant the
+// interpolation fraction never quite reached the next tick before that tick landed, and the
+// millisecond accumulator quantised the grid on top of that.
+static uint64_t tm_period_us;		// Microseconds between two calls of the timer task
+static uint64_t tm_last_us = 0, tm_accum_us = 0;
+// Nominal (on-grid) time of the most recent task invocation, i.e. when the tick became DUE rather
+// than when the main loop got round to noticing it. See machine_tick_nominal_us().
+static uint64_t tm_nominal_us = 0;
 
 timer_task_proc install_timer_task(short tasks_per_second, timer_func func)
 {
 	// We only handle one task, which is enough
-	tm_period = 1000 / tasks_per_second;
+	tm_period_us = 1000000 / tasks_per_second;
 	tm_func = func;
-	tm_last = machine_tick_count();
-	tm_accum = 0;
+	tm_last_us = machine_tick_count_us();
+	tm_accum_us = 0;
+	tm_nominal_us = tm_last_us;
 	return (timer_task_proc)tm_func;
+}
+
+/*
+ *  When the most recent game tick became DUE, on the same clock as machine_tick_count_us().
+ *
+ *  Ticks fall on an even grid, but they are only executed when the main loop next comes round, so
+ *  a tick runs 0..one-frame late and that lateness differs every tick. Anything pacing rendering
+ *  against the tick grid (the 30 Hz -> display-rate interpolation) must use this, not "now at the
+ *  moment the tick ran", or it folds that random lateness into its phase.
+ */
+uint64_t machine_tick_nominal_us(void)
+{
+	return tm_nominal_us;
 }
 
 void remove_timer_task(timer_task_proc proc)
@@ -1774,7 +1796,7 @@ void remove_timer_task(timer_task_proc proc)
 	tm_func = NULL;
 }
 
-void execute_timer_tasks(uint64_t time)
+void execute_timer_tasks(uint64_t time_us)
 {
 	if (tm_func) {
 		if (Movie::instance()->IsRecording()) {
@@ -1786,12 +1808,23 @@ void execute_timer_tasks(uint64_t time)
 			return;
 		}
 		
-		auto now = time;
-		tm_accum += now - tm_last;
-		tm_last = now;
+		auto now = time_us;
+		// Drop a backlog bigger than a second rather than catching up on it: that only happens
+		// when the app was suspended (headset off/removed, level load), and grinding through
+		// hundreds of ticks on the frame we come back is itself a hitch. The sim is separately
+		// capped at MAXIMUM_TIME_DIFFERENCE ticks ahead, so nothing is lost.
+		if (now > tm_last_us && now - tm_last_us > 1000000) {
+			tm_last_us = now;
+			tm_accum_us = 0;
+		}
+		tm_accum_us += now - tm_last_us;
+		tm_last_us = now;
 		bool first_time = true;
-		while (tm_accum >= tm_period) {
-			tm_accum -= tm_period;
+		while (tm_accum_us >= tm_period_us) {
+			tm_accum_us -= tm_period_us;
+			// What is left in the accumulator is how far past this tick's boundary we already
+			// are, so "now minus the remainder" is the boundary itself.
+			tm_nominal_us = now - tm_accum_us;
 			if (first_time) {
 				if(get_keyboard_controller_status())
 					mouse_idle(input_preferences->input_device);

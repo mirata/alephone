@@ -773,6 +773,7 @@ namespace {
 		/* hudTextScale    */ 1.4f,   // global Lua HUD text multiplier (1.0 = unchanged; >1 enlarges HUD text) -- Large tier
 		/* mapPlayerUp     */ 1,      // overhead map rotation: 0=north-up, 1=player-facing-up (default on for VR)
 		/* teleportDistortion */ 1,   // horizontal-stretch/vertical-compress warp on teleport (may cause nausea)
+		/* showFPS          */ 0,     // off by default; a diagnostic readout, not a game element
 		/* showLaserSight   */ 0,
 		/* showAimGizmos    */ 0,     // controller aim diagnostic gizmos (OFF; debug-only, flip to 1 to show)
 		/* buttonAction     */ {      // default button map (matches the old hardcoded stopgap)

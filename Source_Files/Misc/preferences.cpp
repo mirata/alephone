@@ -1992,13 +1992,18 @@ static void vr_graphics_dialog(void *arg)
 	table->dual_add(laser_sight_w->label("Laser Sight"), d);
 	table->dual_add(laser_sight_w, d);
 
+	w_toggle *show_fps_w = new w_toggle(vr->showFPS != 0);
+	table->dual_add(show_fps_w->label("Frame Rate"), d);
+	table->dual_add(show_fps_w, d);
+
 	// Per-tab reset. Values come from VR_DefaultSettings() (and the engine's own graphics defaults)
 	// rather than being restated here, so they cannot drift from the real defaults. The HUD Plugin is
 	// deliberately left alone: which HUD to run is a content choice, not a tuning value, and the
 	// "default" plugin is whatever the loaded scenario enables.
 	table->add_row(new w_spacer(), true);
 	table->dual_add_row(new w_button("RESET HUD DEFAULTS",
-		[hud_w, hud_size_w, hud_dist_w, hud_tilt_w, hud_text_scale_w, hud_curve_w, laser_sight_w, vrd](void*) {
+		[hud_w, hud_size_w, hud_dist_w, hud_tilt_w, hud_text_scale_w, hud_curve_w, laser_sight_w,
+		 show_fps_w, vrd](void*) {
 			hud_w->set_selection(1);   // screen_mode.hud defaults to true
 			hud_size_w->set_selection(vr_closest_index(vr_hud_size_values, 5, vrd->hudSizeM));
 			hud_dist_w->set_selection(vr_closest_index(vr_hud_distance_values, 4, vrd->hudDistanceM));
@@ -2006,6 +2011,7 @@ static void vr_graphics_dialog(void *arg)
 			hud_text_scale_w->set_selection(vr_closest_index(vr_hud_text_scale_values, 4, vrd->hudTextScale));
 			hud_curve_w->set_selection(vr_closest_index(vr_panel_curve_values, 5, vrd->hudCurvature));
 			laser_sight_w->set_selection(vrd->showLaserSight ? 1 : 0);
+			show_fps_w->set_selection(vrd->showFPS ? 1 : 0);
 		}, nullptr), d);
 
 	// The stock "Terminal Size" (screen_mode.term_scale_level) is deliberately not offered in VR: it
@@ -2139,6 +2145,7 @@ static void vr_graphics_dialog(void *arg)
 		vr->hudTextScale     = vr_hud_text_scale_values[hud_text_scale_w->get_selection()];
 		g_lua_hud_font_scale = vr->hudTextScale;
 		vr->showLaserSight   = laser_sight_w->get_selection() ? 1 : 0;
+		vr->showFPS          = show_fps_w->get_selection() ? 1 : 0;
 		vr->mapPlayerUp      = map_player_up_w->get_selection() ? 1 : 0;
 		vr->screenDistanceM  = vr_screen_distance_values[screen_dist_w->get_selection()];
 		vr->screenHeightM    = vr_screen_height_values[screen_height_w->get_selection()];
@@ -4862,6 +4869,7 @@ InfoTree vr_preferences_tree()
 	root.put_attr("msaa_samples", vr->msaaSamples);
 	root.put_attr("layer_sharpening", vr->layerSharpening);
 	root.put_attr("layer_supersample", vr->layerSupersample);
+	root.put_attr("show_fps", vr->showFPS);
 	root.put_attr("laser_sight", vr->showLaserSight);
 	root.put_attr("punch_speed", vr->punchSpeed);
 	root.put_attr("lean_give_fraction", vr->leanGiveFraction);
@@ -5992,6 +6000,7 @@ void parse_vr_preferences(InfoTree root, std::string version)
 	// The first build to ship this used one combined 0-4 control; clamp any stored value from it.
 	if (vr->layerSharpening  < 0 || vr->layerSharpening  > 2) vr->layerSharpening  = 0;
 	if (vr->layerSupersample < 0 || vr->layerSupersample > 2) vr->layerSupersample = 0;
+	root.read_attr("show_fps", vr->showFPS);
 	root.read_attr("laser_sight", vr->showLaserSight);
 	root.read_attr("punch_speed", vr->punchSpeed);
 	root.read_attr("lean_give_fraction", vr->leanGiveFraction);

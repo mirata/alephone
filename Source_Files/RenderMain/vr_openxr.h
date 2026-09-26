@@ -91,6 +91,9 @@ typedef struct {
 	                        //   unchanged; >1 enlarges HUD text (ammo counts etc.) for readability.
 	int   mapPlayerUp;      // 1 = rotate the overhead map so the player's facing direction is always at the top
 	int   teleportDistortion; // 1 = apply horizontal-stretch/vertical-compress warp during teleport fold effect
+	int   showFPS;          // 1 = draw a frame-rate readout on the head-locked HUD. Useful when
+	                        // dialling in the render settings, since the cost of resolution scale
+	                        // and MSAA is otherwise invisible from inside the headset.
 	int   showLaserSight;   // 1 = draw the laser-sight dot at the controller aim point; default 0 (off)
 	int   showAimGizmos;    // 1 = draw controller diagnostic gizmos (grip markers + aim rays + two-handed
 	                        //     aim vector) in world space. CODE-ONLY debug flag: no preferences UI and

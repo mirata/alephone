@@ -48,6 +48,9 @@ static uint64_t start_machine_tick_us;
 
 extern struct view_data* world_view;
 
+// From vbl.cpp: grid time of the most recent timer-task invocation, i.e. when the tick became due.
+uint64_t machine_tick_nominal_us(void);
+
 // ticks positions line up with 30 fps ticks
 struct TickObjectData {
 	world_point3d location;
@@ -236,7 +239,28 @@ void enter_interpolated_world()
 		return;
 	}
 	
-	start_machine_tick_us = machine_tick_count_us();
+	// Phase-lock the interpolation to the tick GRID, not to the wall-clock moment we happened to
+	// notice the tick. Ticks become due on an even 33.33 ms grid, but update_world() only runs them
+	// when the main loop next comes round, so a tick is processed 0..one-frame late -- and that
+	// lateness is a different number every tick. Resetting the phase to "now" folded it straight
+	// into the interpolation fraction: at 72 Hz against 30 Hz ticks the rendered stride came out
+	// .417 .417 .167 instead of an even .417, and whenever three frames fell inside one tick the
+	// fraction hit the 1.0 clamp and the camera sat still for a frame or two before jumping. That
+	// is translation judder, and only translation -- head rotation comes from the headset pose and
+	// never goes through this clock, which is exactly the asymmetry that was reported.
+	//
+	// Using the grid time instead makes the fraction exactly linear in wall time across tick
+	// boundaries. This is render-only (get_heartbeat_fraction feeds nothing but interpolation), so
+	// it cannot affect the simulation or netplay determinism.
+	const uint64_t now_us = machine_tick_count_us();
+	const uint64_t nominal_us = machine_tick_nominal_us();
+	const uint64_t period_us = 1000000 / TICKS_PER_SECOND;
+	// Sanity window: fall back to "now" if the grid time is not a plausible reference for this tick
+	// -- a networked game gates ticks on net time rather than the local timer, and a level load or
+	// a resume can leave the grid stale.
+	start_machine_tick_us = (nominal_us <= now_us && now_us - nominal_us < period_us)
+		? nominal_us
+		: now_us;
 	
 	previous_tick_objects.assign(current_tick_objects.begin(),
 								 current_tick_objects.end());

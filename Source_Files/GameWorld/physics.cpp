@@ -510,8 +510,17 @@ uint32 process_aim_input(uint32 action_flags, fixed_yaw_pitch delta)
 	player->camera_location= new_location;
 	if (PLAYER_IS_DEAD(player) && new_location.z<adjusted_floor_height) new_location.z= adjusted_floor_height;
 	player->location= new_location;
-	player->camera_location.z+= FIXED_TO_WORLD(step_height+variables->actual_height-constants->camera_height);
-	player->step_height = FIXED_TO_WORLD(step_height);
+	const _fixed eye_height = variables->actual_height - constants->camera_height;
+	player->camera_location.z+= FIXED_TO_WORLD(step_height+eye_height);
+	// step_height exists ONLY so the consumers that don't want camera bob (VR, where it is the
+	// default, and the chase cam) can subtract it back off camera_location.z. Truncating the bob on
+	// its own does NOT invert the truncation of the sum above: floor(S+E) - floor(S) != floor(E) --
+	// it flips by +-1 world unit as the bob's fractional part wraps. The bob sweeps several unit
+	// boundaries per tick while moving, so that left a 1 WU (~2.6 mm) vertical square wave on the
+	// camera at the step cadence: rock steady standing still, wobbling the moment you walked or
+	// strafed. Publishing the EXACT difference of the two truncations makes the subtraction land
+	// back on the unbobbed height to the unit.
+	player->step_height = FIXED_TO_WORLD(step_height+eye_height) - FIXED_TO_WORLD(eye_height);
 	player->camera_polygon_index= legs->polygon;
 
 #if defined(__ANDROID__)
@@ -520,7 +529,7 @@ uint32 process_aim_input(uint32 action_flags, fixed_yaw_pitch delta)
 	// This anchors the player to the floor (reaching the real floor lands on the game floor) and renders
 	// them at their true height instead of the fixed ~1.2 m the old 512 scale produced.
 	if (VR_IsActive())
-		VR_SetGameEyeHeightWU(FIXED_TO_WORLD(variables->actual_height - constants->camera_height));
+		VR_SetGameEyeHeightWU(FIXED_TO_WORLD(eye_height));
 	// Feed the local player's ACTUAL collision radius (from the physics model, not a constant) so the VR
 	// head-follow can size its lean "give" as a fraction of it -- see VR_LatchHeadMove. Local player only:
 	// it's a local-viewpoint concept and only the local player's body follows a head.

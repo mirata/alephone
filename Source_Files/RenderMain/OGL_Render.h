@@ -126,8 +126,11 @@ bool OGL_RenderTextCursor(const SDL_Rect& rect, unsigned char r = 0xff, unsigned
 // FBO instead of the screen, so engine messages ("Game saved", etc.) show in VR. Point the cached
 // screen projection at the FBO's pixel space (top-left origin) then restore it. Caller binds the FBO +
 // sets its viewport. See screen.cpp's VR HUD-layer block.
-void OGL_PushVRHudTextProjection(int width, int height, int offsetX, int offsetY);
-void OGL_PopVRHudTextProjection(void);
+// Establish a 2D pixel-space projection for an FBO pass (text, overhead map), origin shifted
+// to (offsetX, offsetY). Sets both the cached Screen_2_Clip and the live GL projection, and
+// the matching Pop restores both -- so a pass can never leak its matrix to whatever draws next.
+void OGL_PushVR2DProjection(int width, int height, int offsetX, int offsetY);
+void OGL_PopVR2DProjection(void);
 
 // Render rectangles (set color beforehand)
 void OGL_RenderRect(float x, float y, float w, float h);

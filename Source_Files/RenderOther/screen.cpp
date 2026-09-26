@@ -1607,6 +1607,43 @@ static void apply_vr_view_offsets()
 
 extern bool is_network_pregame;
 
+#if defined(__ANDROID__)
+// Frame-rate readout on the head-locked HUD (VR only, opt-in via the "Frame Rate" preference).
+// Exists so the cost of Render Resolution / Anti-Aliasing is visible from inside the headset while
+// dialling them in -- otherwise there is no way to tell what a setting actually costs.
+//
+// Two deliberate choices:
+//  * Its OWN FpsCounter, not the shared fps_counter. update_fps_display() calls fps_counter.reset()
+//    on every frame that `displaying_fps` is off, which is always in VR, so the shared one reads 0.
+//  * Its OWN projection scope, with offsets distinct from the messages'. That keeps this readout
+//    from being dragged around by a "Game saved" message -- and, just as importantly, from dragging
+//    anything else, since Push/PopVR2DProjection restores both the cached and live matrices.
+static void vr_draw_fps_overlay()
+{
+	if (!VR_Settings()->showFPS) return;
+
+	static FpsCounter vr_fps_counter;
+	vr_fps_counter.update();
+
+	char text[32];
+	if (!vr_fps_counter.ready())
+		strcpy(text, "-- fps");
+	else
+		sprintf(text, "%.0f fps", vr_fps_counter.get());
+
+	FontSpecifier& Font = GetOnScreenFont();
+	DisplayTextFont = Font.Info;
+	DisplayTextStyle = Font.Style;
+
+	// Sits above the message line (which uses 340) in the same column, so the two never overlap.
+	const int kVRFpsOffsetX = 220;
+	const int kVRFpsOffsetY = 270;
+	OGL_PushVR2DProjection(VR_HudLayerWidth(), VR_HudLayerHeight(), kVRFpsOffsetX, kVRFpsOffsetY);
+	OGL_RenderText(0, 0, text, 0xff, 0xff, 0x80);
+	OGL_PopVR2DProjection();
+}
+#endif
+
 void render_screen(short ticks_elapsed)
 {
 	// Make whatever changes are necessary to the world_view structure based on whichever player is frontmost
@@ -1828,10 +1865,12 @@ void render_screen(short ticks_elapsed)
 			// visible lower-centre of the head-locked HUD. Tunable -- adjust to taste on device.
 			const int kVRMsgOffsetX = 220;   // FBO px right (FBO = VR_HudLayerWidth() = 1280 wide)
 			const int kVRMsgOffsetY = 340;   // FBO px down  (FBO = VR_HudLayerHeight() = 1024 tall)
-			OGL_PushVRHudTextProjection(VR_HudLayerWidth(), VR_HudLayerHeight(), kVRMsgOffsetX, kVRMsgOffsetY);
+			OGL_PushVR2DProjection(VR_HudLayerWidth(), VR_HudLayerHeight(), kVRMsgOffsetX, kVRMsgOffsetY);
 			DisplayMessages(world_pixels);
-			OGL_PopVRHudTextProjection();
+			OGL_PopVR2DProjection();
 			a1ff2DGuard("after hud messages", 0);
+			vr_draw_fps_overlay();
+			a1ff2DGuard("after hud fps", 0);
 			// NOTE: the console input line is NOT drawn here -- in VR it's a world-locked strip anchored
 			// above the keyboard (vr_openxr.cpp conDrawEye), so it stays put with the keyboard rather than
 			// following the head like these messages.
@@ -1848,6 +1887,12 @@ void render_screen(short ticks_elapsed)
 			glDisable(GL_SCISSOR_TEST);
 			glClearColor(0.f, 0.f, 0.f, 1.f);
 			glClear(GL_COLOR_BUFFER_BIT);
+
+			// Own the projection for this pass rather than inheriting whatever was last loaded. The map
+			// renders into an FBO of its own dimensions and never asks for a screen projection, so it
+			// silently adopted the previous matrix -- which is how the "Game saved" message (drawn just
+			// above with a deliberate 220/340 px offset) shifted the whole map and its title.
+			OGL_PushVR2DProjection(VR_MapLayerWidth(), VR_MapLayerHeight(), 0, 0);
 
 			struct overhead_map_data map_data;
 			map_data.half_width      = VR_MapLayerWidth() >> 1;
@@ -1892,6 +1937,7 @@ void render_screen(short ticks_elapsed)
 			if (vrMapPlayerUp)
 				glPopMatrix();
 
+			OGL_PopVR2DProjection();
 			screen_mode.translucent_map = prevTranslucent;
 			OGL_MapActive = prevMapActive;
 			a1ff2DGuard("after map fbo", 0);

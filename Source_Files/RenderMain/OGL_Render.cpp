@@ -847,7 +847,7 @@ bool OGL_SetWindow(Rect &ScreenBounds, Rect &ViewBounds, bool UseBackBuffer)
 // the desktop message overlay.
 static GLdouble Saved_Screen_2_Clip_VRHud[16];
 static GLdouble Saved_GLProjection_VRHud[16];
-void OGL_PushVRHudTextProjection(int width, int height, int offsetX, int offsetY)
+void OGL_PushVR2DProjection(int width, int height, int offsetX, int offsetY)
 {
 	if (!OGL_IsActive()) return;
 	memcpy(Saved_Screen_2_Clip_VRHud, Screen_2_Clip, sizeof(Screen_2_Clip));
@@ -865,9 +865,16 @@ void OGL_PushVRHudTextProjection(int width, int height, int offsetX, int offsetY
 	glOrtho(-offsetX, width - offsetX, height - offsetY, -offsetY, -1, 1);
 	glGetDoublev(GL_PROJECTION_MATRIX, Screen_2_Clip);
 	glPopMatrix();
+	// Load it live as well. Text goes through SetProjectionType(Projection_Screen) and would pick
+	// this up from the cache anyway, but the overhead map draws into its own FBO without ever
+	// asking for a screen projection -- it just uses whatever is currently loaded. Setting both
+	// makes this a complete projection scope that any 2D FBO pass can rely on.
+	glMatrixMode(GL_PROJECTION);
+	glLoadMatrixd(Screen_2_Clip);
+	glMatrixMode(GL_MODELVIEW);
 	ProjectionType = Projection_NONE;   // force SetProjectionType(Projection_Screen) to reload the matrix
 }
-void OGL_PopVRHudTextProjection()
+void OGL_PopVR2DProjection()
 {
 	if (!OGL_IsActive()) return;
 	memcpy(Screen_2_Clip, Saved_Screen_2_Clip_VRHud, sizeof(Screen_2_Clip));

@@ -156,7 +156,7 @@ extern bool get_default_music_spec(FileSpecifier &file);
 extern bool get_default_theme_spec(FileSpecifier& file);
 
 // From vbl_sdl.cpp
-void execute_timer_tasks(uint64_t time);
+void execute_timer_tasks(uint64_t time_us);
 
 // Prototypes
 static void initialize_marathon_music_handler(void);
@@ -1007,7 +1007,8 @@ void main_event_loop(void)
 #endif
 		}
 
-		execute_timer_tasks(machine_tick_count());
+		// Microseconds: the game-tick grid is 33.33 ms, so a millisecond quantum is 3% of a tick.
+		execute_timer_tasks(machine_tick_count_us());
 		idle_game_state(machine_tick_count());
 
 		auto fps_target = get_fps_target();

@@ -99,5 +99,7 @@ typedef void *timer_task_proc;
 
 timer_task_proc install_timer_task(short tasks_per_second, bool (*func)(void));
 void remove_timer_task(timer_task_proc proc);
+// Grid time of the most recent timer-task invocation (same clock as machine_tick_count_us()).
+uint64_t machine_tick_nominal_us(void);
 
 #endif
