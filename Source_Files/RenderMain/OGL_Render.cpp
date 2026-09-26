@@ -846,11 +846,16 @@ bool OGL_SetWindow(Rect &ScreenBounds, Rect &ViewBounds, bool UseBackBuffer)
 // must have the FBO bound and its viewport set. Screen coords are top-left origin (y down), matching
 // the desktop message overlay.
 static GLdouble Saved_Screen_2_Clip_VRHud[16];
+static GLdouble Saved_GLProjection_VRHud[16];
 void OGL_PushVRHudTextProjection(int width, int height, int offsetX, int offsetY)
 {
 	if (!OGL_IsActive()) return;
 	memcpy(Saved_Screen_2_Clip_VRHud, Screen_2_Clip, sizeof(Screen_2_Clip));
 	glMatrixMode(GL_PROJECTION);
+	// Remember the LIVE GL projection too, not just our cached copy: DisplayMessages draws through
+	// SetProjectionType(Projection_Screen), which loads the offset ortho below into GL_PROJECTION,
+	// and restoring only the cached copy leaves that offset sitting in GL for whoever draws next.
+	glGetDoublev(GL_PROJECTION_MATRIX, Saved_GLProjection_VRHud);
 	glPushMatrix();
 	glLoadIdentity();
 	// Shift the screen origin to (offsetX, offsetY) in FBO pixels so the messages (which position
@@ -866,6 +871,13 @@ void OGL_PopVRHudTextProjection()
 {
 	if (!OGL_IsActive()) return;
 	memcpy(Screen_2_Clip, Saved_Screen_2_Clip_VRHud, sizeof(Screen_2_Clip));
+	// Put the live GL projection back as well. The map overlay draws into its own FBO right after
+	// this without re-establishing a projection, so leaving the messages' offset ortho loaded
+	// shifts the whole map -- and its title -- by that offset, but only on frames where a message
+	// happens to be on screen.
+	glMatrixMode(GL_PROJECTION);
+	glLoadMatrixd(Saved_GLProjection_VRHud);
+	glMatrixMode(GL_MODELVIEW);
 	ProjectionType = Projection_NONE;   // next screen-projection user reloads the restored matrix
 }
 
