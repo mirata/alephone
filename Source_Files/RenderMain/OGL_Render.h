@@ -92,7 +92,10 @@ bool OGL_RenderSprite(rectangle_definition& RenderRectangle);
 // VR: render a weapon sprite as a textured world-space quad (Marathon world units, Z-up).
 // verts[4][3]: TL, TR, BR, BL corners. Call while world projection/modelview are active
 // (after render_tree, before SetForeground). Android-only.
-bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3]);
+// worldSprite: the shape is a WORLD sprite (e.g. a magazine pickup drawn in a VR ammo pouch) rather
+// than an in-hand weapon, so it must be loaded as an inhabitant texture like any other world sprite.
+// The in-hand texture path does not colour world collections -- they come out solid white.
+bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3], bool worldSprite = false);
 
 // VR: render a 3D model attached to the controller in world space.
 // wrx/wup/wfwd are the controller's right/up/forward unit vectors in Marathon world space.

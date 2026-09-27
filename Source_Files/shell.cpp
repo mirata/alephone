@@ -42,6 +42,7 @@
 #include "tags.h" /* for scenario file type.. */
 #include "mouse.h"
 #include "vr_openxr.h"
+#include "vr_weapons.h"   // VR weapon handling: holster setup mode
 #include "joystick.h"
 #include "screen_drawing.h"
 #include "computer_interface.h"
@@ -685,6 +686,29 @@ static void initialize_marathon_music_handler(void)
 		Music::instance()->SetupIntroMusic(file);
 }
 
+// VR weapon handling: the exit button's menu. 1 = toggle holster/pouch setup, 2 = quit, 0 = cancel.
+static int s_vrWeaponMenuChoice = 0;
+static void vr_weapon_menu_setup(void* arg) { s_vrWeaponMenuChoice = 1; dialog_ok(arg); }
+static void vr_weapon_menu_quit(void* arg)  { s_vrWeaponMenuChoice = 2; dialog_ok(arg); }
+static void vr_weapon_menu_reset(void* arg) { s_vrWeaponMenuChoice = 3; dialog_ok(arg); }
+static int vr_weapon_mode_menu(bool setupOn)
+{
+	s_vrWeaponMenuChoice = 0;
+	dialog d;
+	vertical_placer *placer = new vertical_placer;
+	placer->dual_add(new w_static_text("VR WEAPON HANDLING"), d);
+	placer->add(new w_spacer(), true);
+	w_button *setup = new w_button(setupOn ? "EXIT HOLSTER SETUP" : "HOLSTER & POUCH SETUP", vr_weapon_menu_setup, &d);
+	placer->dual_add(setup, d);
+	placer->dual_add(new w_button("RESET HOLSTERS TO DEFAULT", vr_weapon_menu_reset, &d), d);
+	placer->dual_add(new w_button("QUIT GAME", vr_weapon_menu_quit, &d), d);
+	placer->dual_add(new w_button("CANCEL", dialog_cancel, &d), d);
+	d.activate_widget(setup);
+	d.set_widget_placer(placer);
+	d.run();
+	return s_vrWeaponMenuChoice;
+}
+
 bool quit_without_saving(void)
 {
 	dialog d;
@@ -855,7 +879,27 @@ void main_event_loop(void)
 			// Left-controller menu button -> in-game quit with confirmation (same as the desktop
 			// Quit menu item: pauses, shows the "quit without saving?" dialog, resumes or closes).
 			if (VR_TakeMenuButton() && game_state == _game_in_progress) {
-				do_menu_item_command(mGame, iQuitGame, false);
+				// VR weapon handling (single-player only): a small menu first, so the holster/pouch setup
+				// has somewhere to live. Quit still goes through the normal quit path and its dialog.
+				if (VR_PhysicalWeaponsActive()) {
+					pause_game();
+					show_cursor();
+					const int choice = vr_weapon_mode_menu(VR_GetHolsterSetupMode());
+					hide_cursor();
+					resume_game();
+					if (choice == 1) {
+						const bool leaving = VR_GetHolsterSetupMode();
+						VR_SetHolsterSetupMode(!leaving);
+						if (leaving) write_preferences();      // keep what was set up
+					} else if (choice == 3) {
+						VR_ClearHolsterOverrides();             // back to the built-in defaults
+						write_preferences();
+					} else if (choice == 2) {
+						do_menu_item_command(mGame, iQuitGame, false);
+					}
+				} else {
+					do_menu_item_command(mGame, iQuitGame, false);
+				}
 			}
 
 			// Bound console button (VR_ACT_CONSOLE) -> toggle the in-game console + on-screen keyboard.

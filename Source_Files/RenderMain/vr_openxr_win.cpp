@@ -53,6 +53,14 @@ extern "C" bool VR_GetAdvance(void)            { return false; }
 extern "C" bool VR_GetBack(void)               { return false; }
 extern "C" bool VR_GetButtonX(void)            { return false; }
 extern "C" bool VR_GetButtonY(void)            { return false; }
+extern "C" bool VR_GetRawHandInput(int, float*, float*, float*, float*, bool*) { return false; }
+extern "C" bool VR_GetOffhandWeaponFire(void) { return false; }
+extern "C" bool VR_GetOffhandWeaponSecondaryFire(void) { return false; }
+extern "C" bool VR_GetHandVelocityStage(int, float*) { return false; }
+extern "C" void VR_SetTwoHandedGrabInRange(bool) {}
+extern "C" void VR_SetSupportSecondaryFire(bool) {}
+extern "C" void VR_SetHandChargeMode(int, bool) {}
+extern "C" bool VR_GetHeadFwdStage(float*) { return false; }
 extern "C" bool VR_GetMoveStickClick(void)     { return false; }
 extern "C" bool VR_GetTurnStickClick(void)     { return false; }
 extern "C" bool VR_ActionHeld(int)             { return false; }

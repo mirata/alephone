@@ -3611,7 +3611,7 @@ void OGL_RenderVRDebugBox(float cwx, float cwy, float cwz,
 // projection + modelview that Rasterizer_Shader::SetView() loaded for the current VR eye.
 // Called after render_tree() / render_vr_aim_debug() while those matrices are still active.
 // verts[4][3]: TL, TR, BR, BL in world units. Depth test disabled so sprite is always visible.
-bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3])
+bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3], bool worldSprite)
 {
 	if (!OGL_IsActive()) return false;
 
@@ -3623,7 +3623,7 @@ bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3])
 	TMgr.TransferMode = RR.transfer_mode;
 	TMgr.TransferData = RR.transfer_data;
 	TMgr.IsShadeless  = (RR.flags & _SHADELESS_BIT) != 0;
-	TMgr.TextureType  = OGL_Txtr_WeaponsInHand;
+	TMgr.TextureType  = worldSprite ? OGL_Txtr_Inhabitant : OGL_Txtr_WeaponsInHand;
 	if (IsInfravisionActive()) {
 		// Load the normal texture into the infravision CLUT slot so that
 		// sprite_infravision.frag can convert it to greyscale × tint.
@@ -3654,7 +3654,12 @@ bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3])
 	glEnableClientState(GL_VERTEX_ARRAY);
 	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 	glDisableClientState(GL_COLOR_ARRAY);
-	glDisable(GL_DEPTH_TEST);  // weapon sprite always in front
+	// In-hand weapon sprites always draw in front. World sprites (a magazine on the floor or in a pouch)
+	// must be hidden by walls and by the guns in your hands -- which DO write depth -- so they keep the
+	// depth test, but don't write depth themselves: their transparent edges would punch boxes into
+	// whatever draws after them.
+	if (worldSprite) { glEnable(GL_DEPTH_TEST); glDepthMask(GL_FALSE); }
+	else             glDisable(GL_DEPTH_TEST);
 	glDisable(GL_CULL_FACE);   // visible from both sides
 
 	float amb = std::min(1.0f, std::max(0.0f, float(RR.ambient_shade) / float(FIXED_ONE)));
@@ -3707,6 +3712,7 @@ bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3])
 		}
 	}
 
+	glDepthMask(GL_TRUE);
 	TMgr.RestoreTextureMatrix();
 	SetBlend(OGL_BlendType_Crossfade);
 	glEnable(GL_CULL_FACE);

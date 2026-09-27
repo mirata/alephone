@@ -97,6 +97,7 @@ Feb 20, 2002 (Woody Zenfell):
 #include "key_definitions.h"
 #include "tags.h"
 #include "vbl.h"
+#include "vr_weapons.h"   // VR physical weapons: holster grab -> weapon select
 #include "FileHandler.h"
 #include "Packing.h"
 #include "ActionQueues.h"
@@ -1481,9 +1482,18 @@ uint32 parse_keymap(void)
 				const bool aPrev = VR_ActionHeld(VR_ACT_PREV_WEAPON);
 				const bool aMap  = VR_ActionHeld(VR_ACT_TOGGLE_MAP);
 				const bool aRc   = VR_ActionHeld(VR_ACT_RECENTER);
+				const bool aEject = VR_ActionHeld(VR_ACT_EJECT_MAG);
 				const bool aInvP = VR_ActionHeld(VR_ACT_INVENTORY_PREV);
 				const bool aInvN = VR_ActionHeld(VR_ACT_INVENTORY_NEXT);
 				// const bool aShot = VR_ActionHeld(VR_ACT_SCREENSHOT); // screenshot promo feature DISABLED
+				{
+					static bool prevEject = false;
+					// Magazine release is a HOLD: pressing loosens the mag, and while held it can be pulled or
+					// flicked out; letting go with the mag still there clicks it back home.
+					if (aEject && !prevEject) vr_eject_magazine(current_player_index);
+					if (!aEject && prevEject) vr_reseat_loose_magazine(current_player_index);
+					prevEject = aEject;
+				}
 				if (aNext && !prevNext) flags |= _cycle_weapons_forward;
 				if (aPrev && !prevPrev) flags |= _cycle_weapons_backward;
 				if (aMap  && !prevMap)  flags |= _toggle_map;
@@ -1537,6 +1547,18 @@ uint32 parse_keymap(void)
 	} else
 	  special->persistence = FLOOR(special->persistence-1, 0);
       }
+
+	  // VR physical weapons: a hand gripped near an occupied body holster selects that weapon.
+	  // Routed through the same hotkey encoding a number key uses (see VR_SetHolsterGrabRequest).
+	  if (!hotkey_sequence[0])
+	  {
+		  short grabbed = NONE;
+		  if (VR_TakeHolsterGrabRequest(&grabbed))
+		  {
+			  const short order = get_weapon_ordering_index(grabbed);
+			  if (order != NONE) encode_hotkey_sequence(order);
+		  }
+	  }
 
 	  if (!hotkey_sequence[0])
 	  {

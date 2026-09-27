@@ -52,6 +52,7 @@ enum {
 	VR_ACT_SCREENSHOT,       // capture a clean single-eye screenshot to the Screenshots folder
 	VR_ACT_CONSOLE,          // toggle the in-game console (+ the on-screen keyboard) for chat / lua commands
 	VR_ACT_DIAG2D,           // diagnostic: arm/disarm the deliberate "2D image drawn shifted" repro
+	VR_ACT_EJECT_MAG,        // physical weapons: drop the magazine out of the weapon in your hand
 	VR_ACT_COUNT
 };
 
@@ -99,6 +100,16 @@ typedef struct {
 	                        //     aim vector) in world space. CODE-ONLY debug flag: no preferences UI and
 	                        //     not persisted -- flip the default in vr_openxr.cpp s_settings to enable.
 	                        //     default 0 (off)
+	int   experimentalWeapons; // 1 = PHYSICAL WEAPONS master switch (docs/VR_PHYSICAL_WEAPONS.md):
+	                        //     per-hand weapons, grip-to-hold, body holsters, throwing, manual
+	                        //     magazine reloads. Opt-in and single-player only -- forced off in
+	                        //     netgames and film playback, where the per-hand weapon state has no
+	                        //     wire representation. Query VR_PhysicalWeaponsActive(), never this
+	                        //     field directly, so the SP gate is never accidentally bypassed.
+	int   showAttachGizmos; // 1 = draw physical-weapon attach-point gizmos + enable the in-headset tuner
+	                        //     (docs/VR_PHYSICAL_WEAPONS.md). CODE-ONLY authoring aid: no preference,
+	                        //     not persisted, and only active while experimentalWeapons is on -- flip
+	                        //     the default in vr_openxr.cpp s_settings to place attach points.
 	int   buttonAction[VR_BTN_COUNT]; // in-game action (VR_ACT_*) bound to each bindable button (VR_BTN_*)
 	int   punchWithFists;   // 1 = thrust a fist forward fast to punch (velocity-driven), in addition to the
 	                        //     trigger; each hand punches independently along where it points. default 1
@@ -291,6 +302,28 @@ bool VR_GetTurnStickClick(void);       // press of the turn thumbstick -- the OP
 // actions (weapon cycle / map / recenter) is done tick-side by the caller.
 bool VR_ActionHeld(int action);
 
+// Raw PHYSICAL per-hand controller state (hand: 0 = left, 1 = right), bypassing the handedness /
+// switchSticks routing that VR_GetMove/VR_GetTurn/VR_GetFire apply. Physical weapons needs this
+// because an action must follow the hand actually holding the gun, not the hand that happens to be
+// the configured move or dominant hand. Any out pointer may be null. Returns false if unavailable.
+// Physical weapons: trigger of the hand holding the SECOND weapon (the one not holding the primary).
+bool VR_GetOffhandWeaponFire(void);
+bool VR_GetOffhandWeaponSecondaryFire(void);
+// Controller linear velocity, stage/room space, metres per second.
+bool VR_GetHandVelocityStage(int hand, float v3[3]);   // the second hand's weapon charging (hold-to-charge)
+// Per-frame facts from the renderer (which knows what each hand holds):
+void VR_SetTwoHandedGrabInRange(bool inRange);  // support hand is inside the weapon's two-handed grab spot
+void VR_SetSupportSecondaryFire(bool enabled);  // two-handed weapon whose support trigger fires secondary
+void VR_SetHandChargeMode(int hand, bool on);   // that hand holds a tap-to-fire / hold-to-charge weapon
+
+bool VR_GetRawHandInput(int hand, float* stickX, float* stickY,
+                        float* trigger, float* grip, bool* stickClick);
+
+// True when the experimental PHYSICAL WEAPONS mode is actually in force: the pref is on AND the
+// session is one it is allowed in (single-player, not a film). Every physical-weapons code path
+// gates on this rather than on the raw pref, so the single-player restriction holds in one place.
+bool VR_PhysicalWeaponsActive(void);
+
 // Screenshot request (VR_ACT_SCREENSHOT). The input tick calls VR_RequestScreenshot() on the button
 // edge; the render eye-loop calls VR_TakeScreenshotIfRequested() once per frame and, if true, reads
 // one eye's framebuffer to a PNG (a clean, undistorted capture -- unlike the compositor grab). A
@@ -444,6 +477,8 @@ bool VR_GetHandTracking(int hand, bool* tracked, float* speed);
 // Head position this frame in STAGE space (metres, Y-up). The aim-debug uses controller-minus-head so
 // it doesn't double-count the head offset (which the renderer applies to view.origin, not the eye matrix).
 bool VR_GetHeadPosStage(float pos3[3]);
+// Head forward direction (unit, stage/room space, Y up). False until the head pose is located.
+bool VR_GetHeadFwdStage(float fwd3[3]);
 
 // The dominant controller's aim direction as a Marathon-world unit vector (x/y horizontal, z up) --
 // the same direction the aim-debug ray uses. Weapons fire along this instead of the player facing.

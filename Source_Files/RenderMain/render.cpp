@@ -243,6 +243,11 @@ extern WindowPtr screen_window;
 #include "Rasterizer_Shader.h"
 #include "vr_openxr.h"
 #include "vr_weapons.h"
+#include "items.h"         // physical weapons: magazine item pictures (get_item_shape)
+#include "Logging.h"   // attach-point tuner MML dump -> on-device log
+#include <vector>
+#include <algorithm>
+#include <string>
 #include "vr_net.h"
 #endif
 #include "preferences.h"
@@ -634,6 +639,29 @@ static void render_vr_aim_reticle(view_data* view)
 //     direction (thick yellow, from the dominant hand along VR_GetTwoHandedFwdStage)
 // Purpose: separate an orientation problem from a hit/geometry problem and see exactly where the
 // two-handed model points vs where the player thinks the gun is aimed. Toggle: VR "Aim Debug Gizmos".
+// ---- VR physical weapons: live weapon pose capture ---------------------------------------------
+// render_vr_weapon_sprites_3d works out where each hand's weapon model actually sits (anchor +
+// orthonormal basis, Marathon world units). The attach-point gizmos -- and later the grab/seat
+// proximity tests -- need model-local points to land exactly on the rendered mesh, so rather than
+// re-deriving that transform (and drifting out of sync with it), the render pass stashes it here.
+// See docs/VR_PHYSICAL_WEAPONS.md.
+struct vr_weapon_pose
+{
+	bool  valid;
+	short weapon_type;
+	float anchor[3];                  // world position of the model origin / grip
+	float right[3], up[3], fwd[3];    // orthonormal basis, world space
+};
+static vr_weapon_pose s_vrWeaponPose[2];   // indexed by hand (0 = right, 1 = left)
+
+// Map a MODEL-LOCAL point in metres (+X right, +Y up, +Z forward down the barrel) to world space.
+static void vr_weapon_local_to_world(const vr_weapon_pose& pose, float W,
+                                     float lx, float ly, float lz, float out[3])
+{
+	for (int i = 0; i < 3; ++i)
+		out[i] = pose.anchor[i] + (lx * pose.right[i] + ly * pose.up[i] + lz * pose.fwd[i]) * W;
+}
+
 static void render_vr_aim_gizmos(view_data* view)
 {
 	if (!VR_IsActive()) return;
@@ -760,6 +788,1739 @@ static void render_vr_aim_gizmos(view_data* view)
 	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 }
 
+// ---- VR physical weapons: the body frame ----------------------------------------------------------
+// Holsters hang off the BODY, which has to be derived from the head: the port tracks the head, not the
+// torso. The trap here: view->virtual_yaw is the ROOM's rotation into the world (the snap/smooth-turn
+// offset) -- head yaw rides in via the eye pose, not through it (vr_openxr.h). Hands are measured in
+// room space, so they are right to use it. Body offsets are not: laid out along the room's axes they
+// ignore where you are looking, and "forward" is wherever the play area's forward happens to point --
+// which put the pistols backwards and the chest rifle on your back when that was behind you.
+//
+// So: a torso direction in ROOM space that follows the head's horizontal facing -- with a little lag
+// and a hard 35 degree leash, so glancing sideways does not swing your hips around, but turning does
+// -- then the same room->world mapping the hands use. Snap turns rotate room->world, so they carry the
+// body along automatically.
+static float s_torsoYaw      = 0.f;     // room-space azimuth of the torso's forward, radians
+static bool  s_torsoYawValid = false;
+
+// Once per frame (eye 0): ease the torso toward the head's facing.
+static void vr_update_torso(void)
+{
+	float hf[3];
+	if (!VR_GetHeadFwdStage(hf)) return;
+	const float lh = sqrtf(hf[0]*hf[0] + hf[2]*hf[2]);
+	if (lh < 0.2f) return;                       // looking straight up/down: keep the last facing
+	const float headYaw = atan2f(hf[0], -hf[2]);   // 0 = room -Z (room forward), + = toward room +X
+	if (!s_torsoYawValid) { s_torsoYaw = headYaw; s_torsoYawValid = true; return; }
+
+	const float kPi = 3.14159265f;
+	float d = headYaw - s_torsoYaw;
+	while (d >  kPi) d -= 2.f * kPi;
+	while (d < -kPi) d += 2.f * kPi;
+	const float kLeash = 35.f * kPi / 180.f;     // never more than this far behind the head
+	if (d >  kLeash) { s_torsoYaw += d - kLeash; d = kLeash; }
+	if (d < -kLeash) { s_torsoYaw += d + kLeash; d = -kLeash; }
+	s_torsoYaw += d * 0.06f;                     // and drift the rest of the way in over ~a quarter second
+}
+
+struct vr_body_frame
+{
+	float origin[3];                  // head position, world units
+	float W;                          // world units per metre
+	float right[3], up[3], fwd[3];    // body axes in ROOM (stage) space, unit length
+	double cyw, syw;                  // room -> world rotation (same as the hands)
+};
+
+static bool vr_get_body_frame(const view_data* view, vr_body_frame& bf)
+{
+	bf.W = (float)VR_Settings()->worldScaleWUM;
+	const double yaw = view->virtual_yaw * (360.0 / (double(FIXED_ONE) * double(FULL_CIRCLE))) * (8.0 * atan(1.0) / 360.0);
+	bf.cyw = cos(yaw); bf.syw = sin(yaw);
+
+	bf.origin[0] = (float)view->origin.x; bf.origin[1] = (float)view->origin.y; bf.origin[2] = (float)view->origin.z;
+	float rcx, rcy, rcz;
+	if (VR_GetRenderCamera(&rcx, &rcy, &rcz)) { bf.origin[0] = rcx; bf.origin[1] = rcy; bf.origin[2] = rcz + VR_GetEyeZOffset(); }
+
+	if (!s_torsoYawValid) vr_update_torso();
+	const float t = s_torsoYawValid ? s_torsoYaw : 0.f;
+	// room space: +X right, +Y up, -Z forward
+	bf.fwd[0] = sinf(t);  bf.fwd[1] = 0.f; bf.fwd[2] = -cosf(t);
+	bf.up[0]  = 0.f;      bf.up[1]  = 1.f; bf.up[2]  = 0.f;
+	bf.right[0] = -bf.fwd[2]; bf.right[1] = 0.f; bf.right[2] = bf.fwd[0];   // cross(fwd, up)
+	return true;
+}
+
+// A room-space DIRECTION to world (rotation only).
+static void vr_room_dir_to_world(const vr_body_frame& bf, const float s[3], float out[3])
+{
+	const double zx = -s[0], zy = -s[2], zz = s[1];      // same axis swap the hands use
+	out[0] = (float)(zx * bf.cyw - zy * bf.syw);
+	out[1] = (float)(zx * bf.syw + zy * bf.cyw);
+	out[2] = (float)zz;
+}
+
+// A body-space offset in metres (+X right, +Y up, +Z forward) from the head, to a world position.
+static void vr_body_to_world(const vr_body_frame& bf, float bx, float by, float bz, float out[3])
+{
+	float s[3], w[3];
+	for (int k = 0; k < 3; ++k) s[k] = bx * bf.right[k] + by * bf.up[k] + bz * bf.fwd[k];
+	vr_room_dir_to_world(bf, s, w);
+	for (int k = 0; k < 3; ++k) out[k] = bf.origin[k] + w[k] * bf.W;
+}
+
+// How a weapon hangs in a slot, as a WORLD-space model basis. Built in room space and mapped through,
+// because the room->world axis swap is a reflection: cross products taken after mapping would flip.
+//   sides (hips/thighs/chest): barrel down, top of the slide facing forward -- a drawn gun pitched down
+//   front centre: slung flat across the chest, muzzle down toward the off-hand side, side facing you
+//   backs: barrel up over the shoulder, top facing back
+static void vr_holster_model_basis(const vr_body_frame& bf, int slot, float wr[3], float wu[3], float wf[3])
+{
+	// The anchor's own hang (a set-up override, or the slot's default), already mirrored for left-handers,
+	// as body-space directions. Expanded into room space, orthonormalised there, and only then mapped to
+	// the world -- the room->world axis swap is a reflection, so a cross product taken after it would flip.
+	vr_holster_anchor a;
+	VR_GetHolsterAnchorForPlayer(slot, VR_EyeHeightM(), &a);
+	float f[3], u[3], r[3];
+	for (int k = 0; k < 3; ++k) {
+		f[k] = a.fwd[0] * bf.right[k] + a.fwd[1] * bf.up[k] + a.fwd[2] * bf.fwd[k];
+		u[k] = a.up[0]  * bf.right[k] + a.up[1]  * bf.up[k] + a.up[2]  * bf.fwd[k];
+	}
+	float lf = sqrtf(f[0]*f[0] + f[1]*f[1] + f[2]*f[2]);
+	if (lf < 1e-4f) { f[0] = -bf.up[0]; f[1] = -bf.up[1]; f[2] = -bf.up[2]; lf = 1.f; }
+	for (int k = 0; k < 3; ++k) f[k] /= lf;
+	const float d = u[0]*f[0] + u[1]*f[1] + u[2]*f[2];
+	for (int k = 0; k < 3; ++k) u[k] -= d * f[k];
+	float lu = sqrtf(u[0]*u[0] + u[1]*u[1] + u[2]*u[2]);
+	if (lu < 1e-4f) { u[0] = bf.fwd[0]; u[1] = bf.fwd[1]; u[2] = bf.fwd[2]; lu = 1.f; }
+	for (int k = 0; k < 3; ++k) u[k] /= lu;
+	r[0] = f[1]*u[2] - f[2]*u[1]; r[1] = f[2]*u[0] - f[0]*u[2]; r[2] = f[0]*u[1] - f[1]*u[0];  // cross(fwd, up)
+	vr_room_dir_to_world(bf, r, wr);
+	vr_room_dir_to_world(bf, u, wu);
+	vr_room_dir_to_world(bf, f, wf);
+}
+
+// ---- VR physical weapons: holstered weapons on the body ----------------------------------------
+// Every weapon the player is carrying is drawn at its assigned body anchor, and gripping a hand
+// near one draws it. This is the visible half of the feature; the engine still runs a single
+// current_weapon underneath, so drawing from a holster is an ordinary weapon select. Per-hand
+// weapons (Phase 1) later upgrade this from "select that weapon" to "put it in THAT hand".
+//
+// The grab request is produced here, where the controller poses live, but is CONSUMED in the input
+// tick (vbl.cpp) and issued through encode_hotkey_sequence() -- the same 3-tick action-flag path a
+// number key uses. Going through the action stream rather than poking ready_weapon() directly keeps
+// weapon selection on one code path and leaves the door open for netplay later.
+static bool  s_holsterGripPrev[2] = { false, false };
+
+// Position of a body anchor in world space. Body space is metres from the head, +X right / +Y up /
+// +Z forward, routed through the same stage->world mapping the hands use so anchors and hands agree.
+static void vr_holster_world_pos(const view_data* view, int slot, float out[3])
+{
+	vr_body_frame bf;
+	vr_get_body_frame(view, bf);
+	vr_holster_anchor a;
+	VR_GetHolsterAnchorForPlayer(slot, VR_EyeHeightM(), &a);
+	vr_body_to_world(bf, a.x, a.y, a.z, out);
+}
+
+// True if the player is carrying this weapon (so its holster should show something).
+static bool vr_player_has_weapon(short weapon_type)
+{
+	const short item = get_weapon_item_type(weapon_type);
+	if (item == NONE) return false;
+	const player_data* player = get_player_data(current_player_index);
+	return player->items[item] > 0;
+}
+
+// Which weapon hangs on a slot, accounting for two-fisted pairs. A weapon the player is carrying
+// TWO of (magnum, shotgun) also hangs on the mirrored anchor, so there is one on each hip and the
+// hand you reach with is the hand that gets it. The mirror is only borrowed when it is genuinely
+// free -- if another carried weapon is assigned there it keeps it, and the pair degrades to a
+// single. Eight anchors cannot hold eight weapons plus mirrors; see docs/VR_PHYSICAL_WEAPONS.md.
+static short vr_holster_occupant(int slot)
+{
+	const short direct = VR_GetHolsterSlotWeapon(slot);
+	if (direct != NONE && vr_player_has_weapon(direct)) return direct;
+
+	// Getting past the check above means this slot is genuinely free right now: either nothing is
+	// assigned to it, or what is assigned is not being carried. Either way it can host the second
+	// half of a two-fisted pair. (An earlier version bailed out whenever ANYTHING was assigned here,
+	// which meant the second magnum never appeared -- the flamethrower nominally owns the other hip,
+	// so the mirror was permanently blocked whether or not you had a flamethrower.)
+	const int mirror = VR_GetMirrorHolsterSlot(slot);
+	if (mirror == VR_HOLSTER_NONE) return NONE;
+	const short paired = VR_GetHolsterSlotWeapon(mirror);
+	if (paired == NONE || !weapon_is_twofisted(paired)) return NONE;
+	const short item = get_weapon_item_type(paired);
+	if (item == NONE) return NONE;
+	const player_data* player = get_player_data(current_player_index);
+	return (player->items[item] >= 2) ? paired : (short)NONE;   // only when actually carrying two
+}
+
+// Defined with the rest of the magazine code below; a grip that finds no weapon holster falls
+// through to the ammo pouches, and that check lives here.
+static bool vr_try_grab_magazine(const view_data* view, int hand, float hx, float hy, float hz);
+static int  vr_nearest_dispensing_pouch(const view_data* view, int hand, float hx, float hy, float hz, float* d2Out);
+static bool vr_primary_magwell(float W, int excludeHand, short* weapon, float well[3], float ins[3],
+                               float* radius, float* angleTol, bool secondWell = false);
+static void vr_loose_mag_pos(float W, const float well[3], const float ins[3], float out[3]);
+static bool vr_hand_world_pose(const vr_body_frame& bf, int hand,
+                               float pos[3], float wr[3], float wu[3], float wf[3]);
+
+// What the two hands are holding right now, in real weapon types (the dual-wield pseudo-types folded
+// back to the weapon, with a count of two).
+struct vr_hands_state
+{
+	int   heldHand;        // hand holding the primary weapon, -1 when empty-handed
+	short primary;         // primary weapon type, NONE when empty-handed
+	int   primaryCount;    // 2 while a two-fisted pair is up
+	short offhand;         // the second hand's own weapon, NONE if none
+};
+
+static void vr_get_hands_state(vr_hands_state& hs)
+{
+	hs.heldHand = VR_GetHeldWeaponHand();
+	short t = NONE, mode = 0;
+	get_player_weapon_mode_and_type(current_player_index, &t, &mode);
+	hs.primaryCount = 1;
+	if (t == _weapon_doublefisted_pistols)  { t = _weapon_pistol;  hs.primaryCount = 2; }
+	if (t == _weapon_doublefisted_shotguns) { t = _weapon_shotgun; hs.primaryCount = 2; }
+	if (hs.heldHand < 0 || t == _weapon_fist) { t = NONE; hs.primaryCount = 0; }
+	hs.primary = t;
+	hs.offhand = vr_get_offhand_weapon(current_player_index);
+}
+
+// Which physical side of the body a slot is on for THIS player: 1 = right, 0 = left, -1 = centre line.
+static int vr_holster_slot_side(int slot)
+{
+	if (VR_HolsterSlotIsCenter(slot)) return -1;
+	vr_holster_anchor a;
+	VR_GetHolsterAnchorForPlayer(slot, VR_EyeHeightM(), &a);
+	return (a.x >= 0.f) ? 1 : 0;
+}
+
+// The weapon each slot is visibly holding right now: its occupant, minus whatever the hands have
+// taken. A weapon in a hand empties the slot on THAT hand's side first, so drawing your left pistol
+// empties your left hip and the right one stays put. Shared by the renderer and the grab test, so what
+// you can grab is exactly what you can see.
+static void vr_visible_holsters(short out[VR_HOLSTER_COUNT])
+{
+	vr_hands_state hs;
+	vr_get_hands_state(hs);
+	for (int slot = 0; slot < VR_HOLSTER_COUNT; ++slot)
+		out[slot] = VR_HolsterSlotIsPouch(slot) ? (short)NONE : vr_holster_occupant(slot);
+
+	auto takeFromBody = [&](short wt, int count, int hand) {
+		for (int pass = 0; pass < 2 && count > 0; ++pass) {        // pass 0: that hand's side only
+			for (int slot = 0; slot < VR_HOLSTER_COUNT && count > 0; ++slot) {
+				if (out[slot] != wt) continue;
+				if (pass == 0 && hand >= 0 && vr_holster_slot_side(slot) != hand) continue;
+				out[slot] = NONE;
+				--count;
+			}
+		}
+	};
+	if (hs.primary != NONE) takeFromBody(hs.primary, hs.primaryCount, hs.primaryCount >= 2 ? -1 : hs.heldHand);
+	if (hs.offhand != NONE) takeFromBody(hs.offhand, 1, hs.heldHand >= 0 ? 1 - hs.heldHand : -1);
+}
+
+// ---- VR physical weapons: holster & pouch setup mode ---------------------------------------------
+// Entered from the in-game menu (the exit button, shell.cpp). Every body anchor -- holsters and both
+// ammo pouches -- shows as a box in its own orientation with its weapon hanging in it. Grip near one and it
+// follows your hand like a picked-up object: position AND rotation, so turning your wrist turns the
+// holster. Let go to leave it there. Weapon and magazine grabs are off while setting up. What you set is
+// the player's OVERRIDE: saved in the preferences on leaving setup, and written to the log as MML --
+// converted back to right-handed reference values -- so it can become the built-in defaults.
+static bool  s_vrMagMustClear[2] = { false, false };   // a mag just pulled from a well must leave it first
+static int   s_setupDragSlot[2]  = { -1, -1 };
+static float s_setupGrabPos[2][3];    // the anchor's position in the grabbing hand's local frame, metres
+static float s_setupGrabFwd[2][3];    // its barrel direction in that frame
+static float s_setupGrabUp[2][3];     // and the direction the top of the gun faces
+static bool  s_setupGripPrev[2]  = { false, false };
+static bool  s_setupWasOn        = false;
+
+// A hand's position relative to the head, in the current BODY frame (metres, +X right / +Y up / +Z fwd).
+static bool vr_hand_body_coords(const vr_body_frame& bf, int hand, float out[3])
+{
+	float hp[3], ps[3], fs[3];
+	if (!VR_GetHeadPosStage(hp) || !VR_GetAimPoseStage(hand, ps, fs)) return false;
+	const float d[3] = { ps[0]-hp[0], ps[1]-hp[1], ps[2]-hp[2] };
+	out[0] = d[0]*bf.right[0] + d[1]*bf.right[1] + d[2]*bf.right[2];
+	out[1] = d[0]*bf.up[0]    + d[1]*bf.up[1]    + d[2]*bf.up[2];
+	out[2] = d[0]*bf.fwd[0]   + d[1]*bf.fwd[1]   + d[2]*bf.fwd[2];
+	return true;
+}
+
+static void vr_log_attach_mml(const char* why)
+{
+	const std::string mml = VR_DumpAttachPointsMML();
+	logWarning("VRATTACH ---- %s ----", why);
+	size_t start = 0;
+	while (start < mml.size()) {
+		size_t nl = mml.find('\n', start);
+		if (nl == std::string::npos) nl = mml.size();
+		if (nl > start) {
+			const std::string line = mml.substr(start, nl - start);
+			__android_log_print(ANDROID_LOG_INFO, "A1VR", "MML %s", line.c_str());
+			logWarning("VRATTACH %s", line.c_str());
+		}
+		start = nl + 1;
+	}
+}
+
+static inline float vr_dot3(const float a[3], const float b[3]) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
+
+// Once per frame. Returns true while setup mode is on (the caller then skips weapon/magazine grabs).
+static bool vr_update_anchor_setup(const view_data* view)
+{
+	const bool on = VR_GetHolsterSetupMode();
+	if (!on) {
+		if (s_setupWasOn) {
+			vr_log_attach_mml("holster setup");
+			screen_printf("holster positions saved");
+		}
+		s_setupWasOn = false;
+		s_setupDragSlot[0] = s_setupDragSlot[1] = -1;
+		return false;
+	}
+	if (!s_setupWasOn) screen_printf("setup: grip a box to move and turn it");
+	s_setupWasOn = true;
+
+	vr_body_frame bf;
+	vr_get_body_frame(view, bf);
+	float head[3];
+	if (!VR_GetHeadPosStage(head)) return true;
+
+	for (int hand = 0; hand < 2; ++hand) {
+		float grip = 0.f;
+		if (!VR_GetRawHandInput(hand, nullptr, nullptr, nullptr, &grip, nullptr)) continue;
+		const bool down = grip > 0.5f;
+		const bool rising = down && !s_setupGripPrev[hand];
+		s_setupGripPrev[hand] = down;
+
+		// The hand's full pose in room space.
+		float hpos[3], hf[3], hr[3], hu[3];
+		if (!VR_GetAimPoseStage(hand, hpos, hf) || !VR_GetAimOrientStage(hand, hr, hu)) continue;
+
+		if (!down) {
+			if (s_setupDragSlot[hand] >= 0) {
+				screen_printf("%s placed", VR_HolsterSlotDisplayName(s_setupDragSlot[hand]));
+				VR_Vibrate(hand, 30, 0.4f);
+			}
+			s_setupDragSlot[hand] = -1;
+			continue;
+		}
+
+		if (rising) {
+			float hb[3];
+			if (!vr_hand_body_coords(bf, hand, hb)) continue;
+			// Nearest anchor whose box the hand is in.
+			int best = -1; float bestD2 = 0.f;
+			for (int slot = 0; slot < VR_HOLSTER_COUNT; ++slot) {
+				vr_holster_anchor a;
+				VR_GetHolsterAnchorForPlayer(slot, VR_EyeHeightM(), &a);
+				const float dx = hb[0]-a.x, dy = hb[1]-a.y, dz = hb[2]-a.z;
+				const float d2 = dx*dx + dy*dy + dz*dz;
+				if (d2 > a.radius * a.radius) continue;
+				if (best < 0 || d2 < bestD2) { best = slot; bestD2 = d2; }
+			}
+			if (best >= 0 && best != s_setupDragSlot[1 - hand]) {
+				vr_holster_anchor a;
+				VR_GetHolsterAnchorForPlayer(best, VR_EyeHeightM(), &a);
+				// The anchor's pose in room space...
+				float pa[3], fa[3], ua[3];
+				for (int k = 0; k < 3; ++k) {
+					pa[k] = head[k] + a.x * bf.right[k] + a.y * bf.up[k] + a.z * bf.fwd[k];
+					fa[k] = a.fwd[0] * bf.right[k] + a.fwd[1] * bf.up[k] + a.fwd[2] * bf.fwd[k];
+					ua[k] = a.up[0]  * bf.right[k] + a.up[1]  * bf.up[k] + a.up[2]  * bf.fwd[k];
+				}
+				// ...captured in the hand's own frame, so from now on it moves and turns with the hand.
+				const float rel[3] = { pa[0]-hpos[0], pa[1]-hpos[1], pa[2]-hpos[2] };
+				s_setupGrabPos[hand][0] = vr_dot3(rel, hr); s_setupGrabPos[hand][1] = vr_dot3(rel, hu); s_setupGrabPos[hand][2] = vr_dot3(rel, hf);
+				s_setupGrabFwd[hand][0] = vr_dot3(fa, hr);  s_setupGrabFwd[hand][1] = vr_dot3(fa, hu);  s_setupGrabFwd[hand][2] = vr_dot3(fa, hf);
+				s_setupGrabUp[hand][0]  = vr_dot3(ua, hr);  s_setupGrabUp[hand][1]  = vr_dot3(ua, hu);  s_setupGrabUp[hand][2]  = vr_dot3(ua, hf);
+				s_setupDragSlot[hand] = best;
+				screen_printf("moving %s", VR_HolsterSlotDisplayName(best));
+				VR_Vibrate(hand, 40, 0.6f);
+			}
+		}
+
+		const int slot = s_setupDragSlot[hand];
+		if (slot < 0) continue;
+		// Rebuild the anchor from the hand's current pose, then express it in the body frame.
+		float pa[3], fa[3], ua[3];
+		for (int k = 0; k < 3; ++k) {
+			pa[k] = hpos[k] + s_setupGrabPos[hand][0]*hr[k] + s_setupGrabPos[hand][1]*hu[k] + s_setupGrabPos[hand][2]*hf[k];
+			fa[k] = s_setupGrabFwd[hand][0]*hr[k] + s_setupGrabFwd[hand][1]*hu[k] + s_setupGrabFwd[hand][2]*hf[k];
+			ua[k] = s_setupGrabUp[hand][0]*hr[k]  + s_setupGrabUp[hand][1]*hu[k]  + s_setupGrabUp[hand][2]*hf[k];
+		}
+		const float d[3] = { pa[0]-head[0], pa[1]-head[1], pa[2]-head[2] };
+		const float fb[3] = { vr_dot3(fa, bf.right), vr_dot3(fa, bf.up), vr_dot3(fa, bf.fwd) };
+		const float ub[3] = { vr_dot3(ua, bf.right), vr_dot3(ua, bf.up), vr_dot3(ua, bf.fwd) };
+		VR_SetHolsterAnchorFromPlayer(slot, VR_EyeHeightM(),
+			vr_dot3(d, bf.right), vr_dot3(d, bf.up), vr_dot3(d, bf.fwd), fb, ub);
+	}
+	return true;
+}
+
+// Once per frame: grip near an occupied holster draws that weapon.
+static void vr_update_holster_grabs(const view_data* view)
+{
+	if (!VR_PhysicalWeaponsActive()) {
+		s_holsterGripPrev[0] = s_holsterGripPrev[1] = false;
+		return;
+	}
+
+	// Empty hands mean the fist. The engine always has SOME current weapon, and a new game, a loaded
+	// save or a respawn comes up holding whatever it last selected -- a gun nobody grabbed, which you
+	// then had to swap away. With no hand holding anything, put the fist up. Asked for at most every
+	// half second or so, so a switch still in flight through the hotkey path is not re-requested
+	// every frame.
+	{
+		static int s_fistRequestCooldown = 0;
+		if (s_fistRequestCooldown > 0) --s_fistRequestCooldown;
+		if (VR_GetHeldWeaponHand() < 0 && !PLAYER_IS_DEAD(get_player_data(current_player_index))) {
+			if (vr_get_offhand_weapon(current_player_index) != NONE) vr_clear_offhand_weapon(current_player_index);
+			short t = NONE, m = 0;
+			get_player_weapon_mode_and_type(current_player_index, &t, &m);
+			if (t != _weapon_fist && s_fistRequestCooldown == 0) {
+				VR_SetHolsterGrabRequest(_weapon_fist);
+				s_fistRequestCooldown = 45;
+			}
+		}
+	}
+	const float W = (float)VR_Settings()->worldScaleWUM;
+
+	// Holster & pouch setup: grips drag anchors instead of grabbing weapons or magazines.
+	const bool setupMode = vr_update_anchor_setup(view);
+
+	// Facts the input layer needs about what each hand holds, pushed once per frame.
+	{
+		vr_hands_state hs0;
+		vr_get_hands_state(hs0);
+		for (int h = 0; h < 2; ++h) {
+			short wt = NONE;
+			if (hs0.heldHand >= 0) wt = (h == hs0.heldHand) ? hs0.primary : hs0.offhand;
+			VR_SetHandChargeMode(h, wt != NONE && weapon_charges_on_secondary(wt));
+		}
+		VR_SetSupportSecondaryFire(hs0.primary != NONE && hs0.offhand == NONE &&
+		                           weapon_has_distinct_secondary(hs0.primary));
+
+		// Two-handing only engages with the support hand AT the weapon's two-handed grab spot.
+		bool inRange = false;
+		if (hs0.heldHand >= 0 && hs0.offhand == NONE && s_vrWeaponPose[hs0.heldHand].valid) {
+			const vr_weapon_pose& wp = s_vrWeaponPose[hs0.heldHand];
+			const vr_attach_point* fg = VR_GetForegripOrDefault(wp.weapon_type);
+			float target[3];
+			vr_weapon_local_to_world(wp, W, fg->x, fg->y, fg->z, target);
+			vr_body_frame bf0;
+			vr_get_body_frame(view, bf0);
+			float hp0[3], r0[3], u0[3], f0[3];
+			if (vr_hand_world_pose(bf0, 1 - hs0.heldHand, hp0, r0, u0, f0)) {
+				const float dx = hp0[0]-target[0], dy = hp0[1]-target[1], dz = hp0[2]-target[2];
+				inRange = (dx*dx + dy*dy + dz*dz) <= (fg->radius * W) * (fg->radius * W);
+			}
+		}
+		VR_SetTwoHandedGrabInRange(inRange);
+	}
+
+	for (int hand = 0; hand < 2; ++hand) {
+		float grip = 0.f;
+		if (!VR_GetRawHandInput(hand, nullptr, nullptr, nullptr, &grip, nullptr)) continue;
+		const bool down = grip > 0.5f;
+		const bool rising = down && !s_holsterGripPrev[hand];
+		s_holsterGripPrev[hand] = down;
+		if (!rising || setupMode) continue;
+
+		float hp[3], ps[3], fs[3];
+		if (!VR_GetHeadPosStage(hp) || !VR_GetAimPoseStage(hand, ps, fs)) continue;
+
+		// Hand position in world, via the same transform the weapon anchor uses.
+		const double yaw = view->virtual_yaw * (360.0 / (double(FIXED_ONE) * double(FULL_CIRCLE))) * (8.0 * atan(1.0) / 360.0);
+		const double cyw = cos(yaw), syw = sin(yaw);
+		float camx = (float)view->origin.x, camy = (float)view->origin.y, camz = (float)view->origin.z;
+		float rcx, rcy, rcz;
+		if (VR_GetRenderCamera(&rcx, &rcy, &rcz)) { camx = rcx; camy = rcy; camz = rcz + VR_GetEyeZOffset(); }
+		const float qx = (ps[0] - hp[0]) * W, qsy = (ps[1] - hp[1]) * W, qz = (ps[2] - hp[2]) * W;
+		const float rx = -qx, ry = -qz;
+		const float hx = camx + (float)(rx * cyw - ry * syw);
+		const float hy = camy + (float)(rx * syw + ry * cyw);
+		const float hz = camz + qsy;
+
+		// A LOOSENED magazine: the free hand pulls it out, rounds and all.
+		// Checked first, because the magwell is on the gun and would otherwise read as a steadying grip.
+		if (VR_GetHeldWeaponHand() >= 0 && VR_GetHeldWeaponHand() != hand &&
+		    vr_get_offhand_weapon(current_player_index) == NONE && VR_GetHandMagazine(hand) == NONE) {
+			short lw = NONE; float lwell[3], lins[3], lr = 0.f;
+			if (vr_primary_magwell(W, hand, &lw, lwell, lins, &lr, nullptr) && VR_GetMagState(lw) == VR_MAG_LOOSE) {
+				float mp[3];
+				vr_loose_mag_pos(W, lwell, lins, mp);
+				const float dx = hx-mp[0], dy = hy-mp[1], dz = hz-mp[2];
+				const float rr = (lr > 0.10f * W ? lr : 0.10f * W);
+				if (dx*dx + dy*dy + dz*dz <= rr * rr) {
+					VR_SetHandMagazine(hand, get_player_weapon_ammo_type(current_player_index, lw, _primary_weapon));
+					VR_SetHandMagazineRounds(hand, VR_GetLooseMagRounds(lw));   // it keeps its rounds
+					s_vrMagMustClear[hand] = true;   // your hand is in the well: don't re-seat it on the spot
+					VR_SetMagState(lw, VR_MAG_OUT);
+					VR_Vibrate(hand, 40, 0.6f);
+					continue;
+				}
+			}
+		}
+
+		// Nearest VISIBLE holster within its own radius wins -- a slot the hands have emptied has
+		// nothing in it to grab.
+		short visible[VR_HOLSTER_COUNT];
+		vr_visible_holsters(visible);
+		vr_body_frame bfGrab;
+		vr_get_body_frame(view, bfGrab);
+		float hb[3];
+		const bool haveHb = vr_hand_body_coords(bfGrab, hand, hb);
+		short best = NONE; float bestD2 = 0.f;
+		for (int slot = 0; slot < VR_HOLSTER_COUNT; ++slot) {
+			const short wt = visible[slot];
+			if (wt == NONE) continue;
+			vr_holster_anchor ha; VR_GetHolsterAnchorForPlayer(slot, VR_EyeHeightM(), &ha);
+			float d2, r;
+			const bool backSlot = slot == VR_HOLSTER_RIGHT_BACK || slot == VR_HOLSTER_LEFT_BACK ||
+			                      slot == VR_HOLSTER_BACK_CENTER;
+			if (backSlot && haveHb) {
+				// Over-the-shoulder weapons: reaching ANYWHERE up and over your head gets them. Being above
+				// the anchor costs nothing; only the horizontal distance (and dropping below it) counts, so
+				// the side you reach over picks which of the back weapons you take.
+				const float dx = hb[0] - ha.x, dz = hb[2] - ha.z;
+				const float dy = (hb[1] < ha.y) ? (ha.y - hb[1]) : 0.f;
+				d2 = (dx*dx + dy*dy + dz*dz) * W * W;
+				r  = 0.40f * W;
+			} else {
+				float c[3]; vr_holster_world_pos(view, slot, c);
+				const float dx = hx - c[0], dy = hy - c[1], dz = hz - c[2];
+				d2 = dx*dx + dy*dy + dz*dz;
+				r  = ha.radius * W;
+			}
+			if (d2 > r * r) continue;
+			if (best == NONE || d2 < bestD2) { best = wt; bestD2 = d2; }
+		}
+		// If this hand is reaching for the weapon the OTHER hand is holding, and that weapon is nearer
+		// than any holster, it is a steadying grip -- leave it to the two-handed latch. Comparing
+		// against the holster distance (not just a radius) keeps a hip draw working while the other
+		// hand holds its gun down by your side.
+		vr_hands_state hs;
+		vr_get_hands_state(hs);
+		if (hs.heldHand >= 0 && hs.heldHand != hand && hs.offhand == NONE &&
+		    s_vrWeaponPose[hs.heldHand].valid) {
+			const vr_weapon_pose& wp = s_vrWeaponPose[hs.heldHand];
+			// Prefer the authored foregrip; fall back to the weapon anchor when none is set yet.
+			const vr_attach_point* fg = VR_GetForegripOrDefault(wp.weapon_type);
+			float target[3];
+			vr_weapon_local_to_world(wp, W, fg->x, fg->y, fg->z, target);
+			const float gx = hx-target[0], gy = hy-target[1], gz = hz-target[2];
+			const float gd2 = gx*gx + gy*gy + gz*gz;
+			const float gr = fg->radius * W;
+			if (gd2 <= gr*gr && (best == NONE || gd2 < bestD2)) continue;   // steadying, not grabbing
+		}
+
+		// A pouch nearer than any holster wins. The pouches sit out by the off-hand hip, and reaching
+		// into one must not pull the second magnum off that hip instead.
+		if (hs.heldHand >= 0 && hs.heldHand != hand && hs.offhand == NONE && VR_GetHandMagazine(hand) == NONE) {
+			float pd2 = 0.f;
+			if (vr_nearest_dispensing_pouch(view, hand, hx, hy, hz, &pd2) >= 0 && (best == NONE || pd2 < bestD2)) {
+				vr_try_grab_magazine(view, hand, hx, hy, hz);
+				continue;
+			}
+		}
+
+		if (best != NONE) {
+			if (hs.heldHand < 0) {
+				// Empty-handed: this becomes the primary weapon, in this hand.
+				VR_SetHolsterGrabRequest(best);
+				VR_SetHeldWeaponHand(hand);
+				VR_Vibrate(hand, 40, 0.6f);
+			} else if (hs.heldHand != hand && hs.offhand == NONE) {
+				// The other hand already holds the primary. The same two-fisted weapon pairs up (dual
+				// magnums); anything else goes into THIS hand as its own weapon, and the primary stays
+				// exactly where it is.
+				const bool took = (best == hs.primary && weapon_is_twofisted(best))
+				                ? vr_raise_second_weapon(current_player_index)
+				                : vr_set_offhand_weapon(current_player_index, best);
+				if (took) VR_Vibrate(hand, 40, 0.6f);
+			}
+		} else if (hs.heldHand != hand && hs.offhand == NONE && VR_GetHandMagazine(hand) == NONE) {
+			// Not on a weapon holster, and this hand is free: try the ammo pouches.
+			vr_try_grab_magazine(view, hand, hx, hy, hz);
+		}
+	}
+
+	// ---- release: a weapon nobody is holding goes back on the body -------------------------
+	// No dropping and no throwing -- letting go simply re-holsters. If the OTHER hand still has a
+	// grip closed we keep the weapon in play and hand ownership over to it: that hand becomes the
+	// pivot the weapon hangs from, so a two-handed hold survives releasing the main handle and you
+	// can re-grip it. Switching to the fist is how "holding nothing" is expressed to the engine,
+	// which always has some current weapon.
+	{
+		vr_hands_state hs;
+		vr_get_hands_state(hs);
+		const int held = hs.heldHand;
+		if (held >= 0) {
+			float heldGrip = 0.f, otherGrip = 0.f;
+			VR_GetRawHandInput(held,     nullptr, nullptr, nullptr, &heldGrip,  nullptr);
+			VR_GetRawHandInput(1 - held, nullptr, nullptr, nullptr, &otherGrip, nullptr);
+			const bool heldUp = heldGrip <= 0.5f, otherUp = otherGrip <= 0.5f;
+
+			if (hs.offhand != NONE) {
+				// Two different weapons. Each hand letting go puts ITS weapon back. If the primary
+				// hand lets go but the other keeps hold, the other weapon becomes the primary (and the
+				// one the HUD shows) in place, with no raise.
+				if (otherUp) {
+					vr_clear_offhand_weapon(current_player_index);
+					VR_Vibrate(1 - held, 30, 0.4f);
+				}
+				if (heldUp) {
+					if (!otherUp && vr_promote_offhand_weapon(current_player_index)) {
+						VR_SetHeldWeaponHand(1 - held);
+					} else {
+						VR_SetHeldWeaponHand(-1);
+						VR_SetHolsterGrabRequest(_weapon_fist);
+					}
+					VR_Vibrate(held, 30, 0.4f);
+				}
+			} else if (hs.primaryCount >= 2 && heldUp != otherUp) {
+				// A dual-wielded pair lost one hand: the pistol in the releasing hand goes back on the
+				// body and the other stays up. The engine always drops the SECOND copy, so ownership moves
+				// to the hand still gripping -- the survivor is then the one the primary trigger fires.
+				vr_lower_second_weapon(current_player_index);
+				if (heldUp) VR_SetHeldWeaponHand(1 - held);
+				VR_Vibrate(heldUp ? held : 1 - held, 30, 0.4f);
+			} else if (heldUp) {
+				if (!otherUp) {
+					VR_SetHeldWeaponHand(1 - held);      // pivot to the supporting hand
+					VR_Vibrate(1 - held, 25, 0.4f);
+				} else {
+					VR_SetHeldWeaponHand(-1);
+					VR_SetHolsterGrabRequest(_weapon_fist);
+					VR_Vibrate(held, 30, 0.4f);
+				}
+			}
+		}
+	}
+}
+
+// Draw every carried weapon at its holster. The weapon currently in hand is skipped -- it is
+// already being drawn on the controller by render_vr_weapon_sprites_3d.
+static void render_vr_holstered_weapons(view_data* view)
+{
+	if (!VR_PhysicalWeaponsActive()) return;
+	if (!OGL_IsActive()) return;
+	if (PLAYER_IS_DEAD(get_player_data(current_player_index))) return;
+
+	const float W = (float)VR_Settings()->worldScaleWUM;
+	short visible[VR_HOLSTER_COUNT];
+	vr_visible_holsters(visible);
+
+	// Body frame (follows the head, see vr_get_body_frame), for anchor positions and how each weapon hangs.
+	vr_body_frame body;
+	vr_get_body_frame(view, body);
+	float bRight[3], bUp[3];
+	vr_room_dir_to_world(body, body.right, bRight);
+	vr_room_dir_to_world(body, body.up,    bUp);
+
+	for (int slot = 0; slot < VR_HOLSTER_COUNT; ++slot) {
+		const short wt = visible[slot];     // already excludes pouches and whatever the hands hold
+		if (wt == NONE) continue;
+
+		short coll = NONE, shape = NONE, lowShape = NONE;
+		if (!get_weapon_idle_shape(wt, &coll, &shape, &lowShape)) continue;
+
+		shape_information_data* si = extended_get_shape_information(coll, lowShape);
+		bitmap_definition* bmp = nullptr; void* shade = nullptr;
+		extended_get_shape_bitmap_and_shading_table(coll, lowShape, &bmp, &shade, view->shading_mode);
+		if (!si || !bmp) continue;
+
+		float c[3]; vr_holster_world_pos(view, slot, c);
+
+		rectangle_definition rect;
+		rect.ModelPtr        = nullptr;
+		rect.Opacity         = 1;
+		rect.ShapeDesc       = BUILD_DESCRIPTOR(coll, 0);
+		rect.LowLevelShape   = lowShape;
+		rect.texture         = bmp;
+		rect.shading_tables  = shade;
+		rect.transfer_mode   = _textured_transfer;
+		rect.transfer_data   = 0;
+		rect.flags           = 0;
+		rect.flip_horizontal = false;
+		rect.flip_vertical   = false;
+		rect.depth           = 0;
+		rect.ambient_shade   = get_light_intensity(
+			get_polygon_data(view->origin_polygon_index)->floor_lightsource_index);
+		rect.ambient_shade   = MAX(si->minimum_light_intensity, rect.ambient_shade);
+		if (view->shading_mode == _shading_infravision) rect.flags |= _SHADELESS_BIT;
+		// takes a HIGH-level mode (_xfer_*). Passing _textured_transfer (3) here meant
+		// _xfer_subtle_invisibility -> tinted -> silhouette colour table -> solid white.
+		instantiate_rectangle_transfer_mode(view, &rect, _xfer_normal, 0);
+
+		short modelSeq = NONE;
+		vector<OGL_ModelData>* allModels = OGL_GetAllModels(coll, shape, modelSeq);
+		OGL_ModelData* mdl = (allModels && !allModels->empty()) ? &(*allModels)[0] : nullptr;
+
+		if (mdl) {
+			float mR[3], mU[3], mF[3];
+			vr_holster_model_basis(body, slot, mR, mU, mF);
+			OGL_RenderVRWeaponModel(rect, coll, 0, mdl, c[0], c[1], c[2], mR, mU, mF,
+			                        rect.transfer_mode == _static_transfer, 0, 0.f, -1);
+		} else {
+			// No 3D model for this weapon: fall back to a camera-facing sprite so the holster is
+			// still visibly occupied rather than silently empty.
+			const float wpx = fabsf(float(si->world_right - si->world_left));
+			const float wpy = fabsf(float(si->world_bottom - si->world_top));
+			const float hw = ((wpx > 4.f ? wpx : 512.f) / 1024.f) * 0.5f * W * 0.5f;
+			const float hh = ((wpy > 4.f ? wpy : 512.f) / 1024.f) * 0.5f * W * 0.5f;
+			float verts[4][3] = {
+				{ c[0] - hw*bRight[0] + hh*bUp[0], c[1] - hw*bRight[1] + hh*bUp[1], c[2] - hw*bRight[2] + hh*bUp[2] },
+				{ c[0] + hw*bRight[0] + hh*bUp[0], c[1] + hw*bRight[1] + hh*bUp[1], c[2] + hw*bRight[2] + hh*bUp[2] },
+				{ c[0] + hw*bRight[0] - hh*bUp[0], c[1] + hw*bRight[1] - hh*bUp[1], c[2] + hw*bRight[2] - hh*bUp[2] },
+				{ c[0] - hw*bRight[0] - hh*bUp[0], c[1] - hw*bRight[1] - hh*bUp[1], c[2] - hw*bRight[2] - hh*bUp[2] }
+			};
+			OGL_RenderVRWeaponQuad(rect, verts);
+		}
+	}
+}
+
+// ---- VR physical weapons: magazines ------------------------------------------------------------
+// Reach into an ammo pouch and grip to get a magazine for whatever is in your other hand; bring it
+// to that weapon's magwell to seat it. Nothing is deducted from the ammo pool at grab time -- the
+// engine's own reload_weapon() does the accounting when the mag actually goes in, so grabbing and
+// releasing a magazine costs nothing and cannot duplicate ammo.
+
+// Which magazine a pouch hands you: the ammunition for the weapon in the OTHER hand. Left pouch
+// gives its primary ammo, right its secondary (the assault rifle's grenades) -- so nine ammo types
+// need only two pouches. NONE when there is nothing sensible to hand over.
+// The ammunition a pouch is FOR right now: the weapon in the primary hand's primary ammo (primary
+// pouch) or its second-trigger ammo when that differs (secondary pouch -- rifle grenades). Regardless
+// of whether any is left; NONE when the pouch has no job for this weapon.
+static short vr_pouch_ammo_type(int pouchSlot, int reachingHand)
+{
+	const int weaponHand = VR_GetHeldWeaponHand();
+	if (weaponHand < 0 || weaponHand == reachingHand) return NONE;
+	if (!s_vrWeaponPose[weaponHand].valid) return NONE;
+	const short wt = s_vrWeaponPose[weaponHand].weapon_type;
+	if (wt == NONE || VR_WeaponUsesSpinReload(wt)) return NONE;   // shotgun reloads by spinning
+
+	const short primaryAmmo = get_player_weapon_ammo_type(current_player_index, wt, _primary_weapon);
+	if (pouchSlot != VR_HOLSTER_RIGHT_POUCH) return primaryAmmo;
+	const short secondaryAmmo = get_player_weapon_ammo_type(current_player_index, wt, _secondary_weapon);
+	return (secondaryAmmo == primaryAmmo) ? (short)NONE : secondaryAmmo;
+}
+
+// The magazine a pouch will actually hand over: its ammo, if there is any left.
+static short vr_pouch_magazine_for(int pouchSlot, int reachingHand)
+{
+	const short item = vr_pouch_ammo_type(pouchSlot, reachingHand);
+	if (item == NONE) return NONE;
+	return get_player_data(current_player_index)->items[item] > 0 ? item : (short)NONE;
+}
+
+// Grip near a pouch takes a magazine out of it.
+// The nearest pouch within reach that would actually hand this hand a magazine, or -1.
+static int vr_nearest_dispensing_pouch(const view_data* view, int hand, float hx, float hy, float hz, float* d2Out)
+{
+	const float W = (float)VR_Settings()->worldScaleWUM;
+	int best = -1; float bestD2 = 0.f;
+	for (int slot = 0; slot < VR_HOLSTER_COUNT; ++slot) {
+		if (!VR_HolsterSlotIsPouch(slot)) continue;
+		if (vr_pouch_magazine_for(slot, hand) == NONE) continue;
+		float c[3]; vr_holster_world_pos(view, slot, c);
+		vr_holster_anchor ha; VR_GetHolsterAnchorForPlayer(slot, VR_EyeHeightM(), &ha);
+		const float dx = hx - c[0], dy = hy - c[1], dz = hz - c[2];
+		const float d2 = dx*dx + dy*dy + dz*dz;
+		const float r = ha.radius * W;
+		if (d2 > r * r) continue;
+		if (best < 0 || d2 < bestD2) { best = slot; bestD2 = d2; }
+	}
+	if (d2Out) *d2Out = bestD2;
+	return best;
+}
+
+static bool vr_try_grab_magazine(const view_data* view, int hand, float hx, float hy, float hz)
+{
+	const int slot = vr_nearest_dispensing_pouch(view, hand, hx, hy, hz, nullptr);
+	if (slot < 0) return false;
+	VR_SetHandMagazine(hand, vr_pouch_magazine_for(slot, hand));
+	s_vrMagMustClear[hand] = false;
+	VR_Vibrate(hand, 35, 0.5f);
+	return true;
+}
+
+static bool vr_hand_world_pose(const vr_body_frame& bf, int hand,
+                               float pos[3], float wr[3], float wu[3], float wf[3]);   // with the hand visuals
+
+// ---- magazines falling away (visual only) ----------------------------------------------------
+// A magazine you let go of, or one shaken loose, drops and fades. Purely a picture: nothing was
+// deducted to get a fresh mag, and a spent one has already been emptied.
+struct vr_falling_mag { short item; float pos[3]; float vel[3]; float age; float floorZ; bool landed; };
+static std::vector<vr_falling_mag> s_fallingMags;
+static uint64_t s_fallingLastMs = 0;
+
+static void vr_spawn_falling_mag(const float pos[3], const float vel[3], short item)
+{
+	if (item == NONE) return;
+	if (s_fallingMags.size() >= 8) s_fallingMags.erase(s_fallingMags.begin());
+	vr_falling_mag m;
+	m.item = item; m.age = 0.f; m.landed = false;
+	// Lands at the player's feet: close enough for a magazine dropped or tossed nearby.
+	m.floorZ = (float)get_player_data(current_player_index)->location.z;
+	for (int k = 0; k < 3; ++k) { m.pos[k] = pos[k]; m.vel[k] = vel[k]; }
+	s_fallingMags.push_back(m);
+}
+
+static void vr_update_falling_mags(float W)
+{
+	const uint64_t now = machine_tick_count();
+	float dt = s_fallingLastMs ? float(now - s_fallingLastMs) / 1000.f : 0.f;
+	s_fallingLastMs = now;
+	if (dt > 0.05f) dt = 0.05f;
+	for (auto& m : s_fallingMags) {
+		m.age += dt;
+		if (m.landed) continue;
+		m.vel[2] -= 9.8f * W * dt;                          // world Z is up; W = world units per metre
+		for (int k = 0; k < 3; ++k) m.pos[k] += m.vel[k] * dt;
+		// Rest a centimetre above the floor so it isn't half-swallowed by it now that it depth-tests.
+		if (m.pos[2] <= m.floorZ + 0.01f * W) { m.pos[2] = m.floorZ + 0.01f * W; m.landed = true; }
+	}
+	s_fallingMags.erase(std::remove_if(s_fallingMags.begin(), s_fallingMags.end(),
+		[](const vr_falling_mag& m) { return m.age > 3.0f; }), s_fallingMags.end());
+}
+
+// The magwell of the weapon in the PRIMARY hand, in world space: position, insertion direction (the
+// way a magazine travels going IN), and its seat tolerances. excludeHand = the hand that would be
+// doing the loading, which cannot also be the hand holding the gun.
+static bool vr_primary_magwell(float W, int excludeHand, short* weapon, float well[3], float ins[3],
+                               float* radius, float* angleTol, bool secondWell)
+{
+	const int held = VR_GetHeldWeaponHand();
+	if (held < 0 || held == excludeHand) return false;
+	const vr_weapon_pose& wp = s_vrWeaponPose[held];
+	if (!wp.valid || wp.weapon_type == NONE) return false;
+	const vr_attach_point* mw = secondWell ? VR_GetMagwell2OrDefault(wp.weapon_type)
+	                                       : VR_GetMagwellOrDefault(wp.weapon_type);
+	vr_weapon_local_to_world(wp, W, mw->x, mw->y, mw->z, well);
+	// Straight up into the weapon from below, swung by the authored angles.
+	const float cp  = cosf(mw->pitch * 0.01745329f), sp  = sinf(mw->pitch * 0.01745329f);
+	const float cy2 = cosf(mw->yaw   * 0.01745329f), sy2 = sinf(mw->yaw   * 0.01745329f);
+	for (int k = 0; k < 3; ++k)
+		ins[k] = wp.up[k]*cp - wp.fwd[k]*sp*cy2 - wp.right[k]*sp*sy2;
+	if (weapon)   *weapon   = wp.weapon_type;
+	if (radius)   *radius   = mw->radius * W;
+	if (angleTol) *angleTol = mw->angle_tolerance;
+	return true;
+}
+
+// Whether a magazine of this ammo can go into this weapon right now. The main magazine needs the old
+// one OUT first -- ejected and then pulled or shaken free. A second-trigger magazine (the rifle's
+// grenades) has no eject of its own, so it goes in once that trigger has fired its last round.
+static bool vr_magwell_accepts(short weapon, short mag)
+{
+	const short primaryAmmo = get_player_weapon_ammo_type(current_player_index, weapon, _primary_weapon);
+	if (mag == primaryAmmo) return VR_GetMagState(weapon) == VR_MAG_OUT;
+	return get_player_weapon_ammo_count(current_player_index, weapon, _secondary_weapon) <= 0;
+}
+
+// Where a loosened magazine hangs: a few centimetres out of the magwell, back along the insertion path.
+static void vr_loose_mag_pos(float W, const float well[3], const float ins[3], float out[3])
+{
+	for (int k = 0; k < 3; ++k) out[k] = well[k] - ins[k] * 0.04f * W;
+}
+
+// Once per frame: seat magazines, drop released ones, shake loose ones free.
+static void vr_update_magazine_seating(view_data* view)
+{
+	if (!VR_PhysicalWeaponsActive() || VR_GetHolsterSetupMode()) return;
+	vr_body_frame bf;
+	vr_get_body_frame(view, bf);
+	const float W = bf.W;
+	vr_update_falling_mags(W);
+
+	// A loose magazine comes free with a flick of the gun hand: a snap in the direction the magazine
+	// comes OUT (the mag keeps going when the gun stops), or a sharp roll of the wrist around the barrel,
+	// John Wick style. The rounds go with it -- it is on the floor.
+	{
+		static float    s_prevUp[3];
+		static bool     s_prevUpValid = false;
+		static uint64_t s_prevUpMs = 0;
+		const int held = VR_GetHeldWeaponHand();
+		const uint64_t now = machine_tick_count();
+
+		// Roll rate of the gun hand around its own pointing direction, degrees per second.
+		float rollRate = 0.f;
+		float ps[3], f[3], r[3], u[3];
+		if (held >= 0 && VR_GetAimPoseStage(held, ps, f) && VR_GetAimOrientStage(held, r, u)) {
+			if (s_prevUpValid && now > s_prevUpMs) {
+				const float* p = s_prevUp;
+				const float cx = p[1]*u[2] - p[2]*u[1], cy = p[2]*u[0] - p[0]*u[2], cz = p[0]*u[1] - p[1]*u[0];
+				const float deg = atan2f(cx*f[0] + cy*f[1] + cz*f[2], p[0]*u[0] + p[1]*u[1] + p[2]*u[2]) * 57.2957795f;
+				rollRate = deg / (float(now - s_prevUpMs) / 1000.f);
+			}
+			s_prevUp[0] = u[0]; s_prevUp[1] = u[1]; s_prevUp[2] = u[2];
+			s_prevUpValid = true;
+			s_prevUpMs = now;
+		} else {
+			s_prevUpValid = false;
+		}
+
+		short w = NONE; float well[3], ins[3];
+		if (held >= 0 && vr_primary_magwell(W, -1, &w, well, ins, nullptr, nullptr) &&
+		    VR_GetMagState(w) == VR_MAG_LOOSE) {
+			float hv[3], wv[3] = { 0.f, 0.f, 0.f };
+			if (VR_GetHandVelocityStage(held, hv)) vr_room_dir_to_world(bf, hv, wv);
+			const float outSpeed = -(wv[0]*ins[0] + wv[1]*ins[1] + wv[2]*ins[2]);   // m/s, out of the well
+			if (outSpeed > 1.1f || fabsf(rollRate) > 450.f) {
+				float p[3], v[3];
+				vr_loose_mag_pos(W, well, ins, p);
+				for (int k = 0; k < 3; ++k) v[k] = (wv[k] - ins[k] * 1.0f) * W;   // carried off by the flick
+				// A wrist roll slings it off sideways: tangential velocity omega x r about the barrel axis.
+				// Room->world is a reflection, and angular velocity is a pseudovector, so the axis flips
+				// sign on the way across.
+				float hpos[3], hr[3], hu[3], hf[3];
+				if (vr_hand_world_pose(bf, held, hpos, hr, hu, hf)) {
+					const float wz = -rollRate * 0.01745329f;             // rad/s about the world barrel axis
+					const float om[3] = { hf[0]*wz, hf[1]*wz, hf[2]*wz };
+					const float rr[3] = { p[0]-hpos[0], p[1]-hpos[1], p[2]-hpos[2] };   // world units
+					v[0] += om[1]*rr[2] - om[2]*rr[1];
+					v[1] += om[2]*rr[0] - om[0]*rr[2];
+					v[2] += om[0]*rr[1] - om[1]*rr[0];
+				}
+				vr_spawn_falling_mag(p, v, get_player_weapon_ammo_type(current_player_index, w, _primary_weapon));
+				VR_SetMagState(w, VR_MAG_OUT);
+				VR_Vibrate(held, 45, 0.7f);
+			}
+		}
+	}
+
+	for (int hand = 0; hand < 2; ++hand) {
+		const short mag = VR_GetHandMagazine(hand);
+		if (mag == NONE) continue;
+
+		float pos[3], wr[3], wu[3], wf[3];
+		if (!vr_hand_world_pose(bf, hand, pos, wr, wu, wf)) continue;
+
+		// Letting go drops it -- a fresh mag costs nothing until it is seated, a spent one is empty.
+		float grip = 0.f;
+		VR_GetRawHandInput(hand, nullptr, nullptr, nullptr, &grip, nullptr);
+		if (grip <= 0.5f) {
+			// Thrown with the hand's velocity at the moment it lets go, so a toss carries.
+			float hv[3], wv[3] = { 0.f, 0.f, 0.f };
+			if (VR_GetHandVelocityStage(hand, hv)) {
+				vr_room_dir_to_world(bf, hv, wv);
+				for (int k = 0; k < 3; ++k) wv[k] *= W;
+			}
+			vr_spawn_falling_mag(pos, wv, mag);
+			VR_SetHandMagazine(hand, NONE);
+			s_vrMagMustClear[hand] = false;
+			continue;
+		}
+
+		// Main-ammo magazines go in the main magwell; second-trigger ammo (grenades) in the second one.
+		const int gunHand = VR_GetHeldWeaponHand();
+		const short gunType = (gunHand >= 0 && s_vrWeaponPose[gunHand].valid) ? s_vrWeaponPose[gunHand].weapon_type : (short)NONE;
+		const bool secondWell = gunType != NONE &&
+			mag != get_player_weapon_ammo_type(current_player_index, gunType, _primary_weapon);
+		short w = NONE; float well[3], ins[3], r = 0.f, tol = 180.f;
+		if (!vr_primary_magwell(W, hand, &w, well, ins, &r, &tol, secondWell)) continue;
+		if (!vr_magwell_accepts(w, mag)) continue;
+
+		const float dx = pos[0]-well[0], dy = pos[1]-well[1], dz = pos[2]-well[2];
+		const float d2 = dx*dx + dy*dy + dz*dz;
+		// A magazine just pulled out of this well starts INSIDE its radius. It has to be taken clear of
+		// the well first; otherwise pulling it would re-seat it on the very next frame.
+		if (s_vrMagMustClear[hand]) {
+			if (d2 > (r * 1.6f) * (r * 1.6f)) s_vrMagMustClear[hand] = false;
+			continue;
+		}
+		if (d2 > r * r) continue;
+		// The magazine should be coming in along the insertion path, from outside the well -- not waved
+		// past sideways. angle_tolerance widens how sloppy that approach may be.
+		if (d2 > 1e-6f && tol < 179.f) {
+			const float inv = 1.0f / sqrtf(d2);
+			const float dot = -(dx*ins[0] + dy*ins[1] + dz*ins[2]) * inv;
+			if (dot < cosf(tol * 0.01745329f)) continue;
+		}
+
+		const short magRounds = VR_GetHandMagazineRounds(hand);
+		VR_SetHandMagazine(hand, NONE);
+		VR_RequestManualReload(w, mag, magRounds);                // loaded + reload sound, next tick
+		if (mag == get_player_weapon_ammo_type(current_player_index, w, _primary_weapon))
+			VR_SetMagState(w, VR_MAG_IN);
+		VR_Vibrate(hand, 60, 0.9f);
+		VR_Vibrate(1 - hand, 45, 0.7f);
+	}
+}
+
+
+// ---- VR physical weapons: flick reload (shotgun) --------------------------------------------------
+// The shotgun reloads with an UPWARD WRIST FLICK -- the snap that cocks a lever gun one-handed: the muzzle
+// whips up fast. Measured as the hand's pitch rate about its own right axis (muzzle-up positive; the
+// controller's right = forward x up, so a positive turn about it carries forward toward up). A continuous
+// upward swing faster than kFlickRate that covers kFlickDegrees reloads. Raising the gun to aim is never
+// that fast; slowing, stopping or swinging down starts over. (MML still calls it <vr_spin_reload>.)
+static const float kFlickRate    = 250.f;   // deg/s the muzzle must be rising at
+static const float kFlickDegrees = 35.f;    // how far it must rise at that speed
+static float    s_flickAccum[2]      = { 0.f, 0.f };
+static float    s_flickPrevFwd[2][3];
+static bool     s_flickPrevValid[2]  = { false, false };
+static uint64_t s_flickPrevMs[2]     = { 0, 0 };
+static uint64_t s_flickCooldownMs[2] = { 0, 0 };
+
+static void vr_update_spin_reload(void)
+{
+	if (!VR_PhysicalWeaponsActive()) return;
+	vr_hands_state hs;
+	vr_get_hands_state(hs);
+	const uint64_t now = machine_tick_count();
+
+	for (int hand = 0; hand < 2; ++hand) {
+		short w = NONE;
+		if (hs.heldHand >= 0) {
+			if (hand == hs.heldHand)          w = hs.primary;
+			else if (hs.offhand != NONE)      w = hs.offhand;
+			else if (hs.primaryCount >= 2)    w = hs.primary;     // a dual pair: both hands hold one
+		}
+		float ps[3], f[3], r[3], u[3];
+		if (w == NONE || !VR_WeaponUsesSpinReload(w) ||
+		    !VR_GetAimPoseStage(hand, ps, f) || !VR_GetAimOrientStage(hand, r, u)) {
+			s_flickPrevValid[hand] = false;
+			s_flickAccum[hand] = 0.f;
+			continue;
+		}
+
+		if (s_flickPrevValid[hand] && now > s_flickPrevMs[hand]) {
+			const float* p = s_flickPrevFwd[hand];
+			const float cx = p[1]*f[2] - p[2]*f[1], cy = p[2]*f[0] - p[0]*f[2], cz = p[0]*f[1] - p[1]*f[0];
+			const float dDeg = atan2f(cx*r[0] + cy*r[1] + cz*r[2], p[0]*f[0] + p[1]*f[1] + p[2]*f[2]) * 57.2957795f;
+			const float rate = dDeg / (float(now - s_flickPrevMs[hand]) / 1000.f);
+			if (rate > kFlickRate) s_flickAccum[hand] += dDeg;
+			else                   s_flickAccum[hand] = 0.f;
+			if (s_flickAccum[hand] >= kFlickDegrees && now >= s_flickCooldownMs[hand]) {
+				// A dual pair is one weapon with a trigger per hand: trigger 0 is the gun in the primary hand,
+				// trigger 1 the other. Name this hand's, so only the flicked shotgun reloads and animates.
+				const short trig = (hs.primaryCount >= 2) ? short(hand == hs.heldHand ? _primary_weapon : _secondary_weapon)
+				                                          : short(-1);
+				VR_RequestManualReload(w, get_player_weapon_ammo_type(current_player_index, w, _primary_weapon), -1, trig);
+				logWarning("VRRELOAD flick hand=%d weapon=%d trigger=%d (primaryHand=%d offhandWeapon=%d)",
+				           hand, (int)w, (int)trig, hs.heldHand, (int)hs.offhand);
+				VR_Vibrate(hand, 70, 1.0f);
+				s_flickAccum[hand] = 0.f;
+				s_flickCooldownMs[hand] = now + 400;
+			}
+		}
+		s_flickPrevFwd[hand][0] = f[0]; s_flickPrevFwd[hand][1] = f[1]; s_flickPrevFwd[hand][2] = f[2];
+		s_flickPrevValid[hand] = true;
+		s_flickPrevMs[hand] = now;
+	}
+}
+
+// ---- VR physical weapons: hands, ammo and reload cues ------------------------------------------
+// Everything the player needs to SEE to use the physical weapons without the debug gizmos:
+//   * a fist on each hand, always -- including a hand that is holding a gun
+//   * the magazine that each ammo pouch will hand out, drawn in the pouch; an empty pouch shows nothing
+//   * the magazine in your hand once you have taken one
+//   * a target ring at the magwell while you carry a magazine, green once you are close enough to seat
+
+// Which hands drew a fist through the engine's own weapon display this frame (empty-handed, the fist
+// IS the current weapon); render_vr_hand_visuals only adds fists to the hands that did not.
+static bool s_vrHandDrewFist[2] = { false, false };
+
+// One shape -- a weapon's idle frame, a magazine pickup -- at a world position and basis: its 3D model
+// when a plugin provides one, else its sprite as a quad in the right/up plane. weaponSized uses the
+// in-hand weapon sprite scale; otherwise the sprite is drawn at its true world size.
+static void vr_draw_shape_at(view_data* view, short coll, short seq, short lowShape,
+                             const float pos[3], const float wr[3], const float wu[3], const float wf[3],
+                             bool flipH, bool weaponSized, float sizeScale, float shadeScale = 1.0f)
+{
+	shape_information_data* si = extended_get_shape_information(coll, lowShape);
+	bitmap_definition* bmp = nullptr; void* shade = nullptr;
+	extended_get_shape_bitmap_and_shading_table(coll, lowShape, &bmp, &shade, view->shading_mode);
+	if (!si || !bmp) return;
+
+	rectangle_definition rect;
+	rect.ModelPtr        = nullptr;
+	rect.Opacity         = 1;
+	rect.ShapeDesc       = BUILD_DESCRIPTOR(coll, 0);
+	rect.LowLevelShape   = lowShape;
+	rect.texture         = bmp;
+	rect.shading_tables  = shade;
+	rect.transfer_mode   = _textured_transfer;
+	rect.transfer_data   = 0;
+	rect.flags           = 0;
+	rect.flip_horizontal = flipH;
+	rect.flip_vertical   = false;
+	rect.depth           = 0;
+	rect.ambient_shade   = get_light_intensity(get_polygon_data(view->origin_polygon_index)->floor_lightsource_index);
+	rect.ambient_shade   = MAX(si->minimum_light_intensity, rect.ambient_shade);
+	rect.ambient_shade   = (_fixed)(rect.ambient_shade * shadeScale);   // < 1 = darkened (an empty pouch)
+	if (view->shading_mode == _shading_infravision) rect.flags |= _SHADELESS_BIT;
+	// takes a HIGH-level mode (_xfer_*). Passing _textured_transfer (3) here meant
+		// _xfer_subtle_invisibility -> tinted -> silhouette colour table -> solid white.
+		instantiate_rectangle_transfer_mode(view, &rect, _xfer_normal, 0);
+
+	short modelSeq = NONE;
+	vector<OGL_ModelData>* allModels = OGL_GetAllModels(coll, seq, modelSeq);
+	OGL_ModelData* mdl = (allModels && !allModels->empty()) ? &(*allModels)[0] : nullptr;
+	if (mdl) {
+		OGL_RenderVRWeaponModel(rect, coll, 0, mdl, pos[0], pos[1], pos[2], wr, wu, wf,
+		                        false, 0, 0.f, -1);
+		return;
+	}
+
+	const float W  = (float)VR_Settings()->worldScaleWUM;
+	float ww = fabsf(float(si->world_right - si->world_left));
+	float wh = fabsf(float(si->world_bottom - si->world_top));
+	if (ww < 4.f) ww = weaponSized ? 512.f : 128.f;
+	if (wh < 4.f) wh = weaponSized ? 512.f : 128.f;
+	const float k  = weaponSized ? (W / 4096.f) : 0.5f;    // weapon: same scale as the in-hand quad
+	const float hw = ww * k * sizeScale, hh = wh * k * sizeScale;
+	float verts[4][3];
+	for (int i = 0; i < 3; ++i) {
+		verts[0][i] = pos[i] - hw*wr[i] + hh*wu[i];
+		verts[1][i] = pos[i] + hw*wr[i] + hh*wu[i];
+		verts[2][i] = pos[i] + hw*wr[i] - hh*wu[i];
+		verts[3][i] = pos[i] - hw*wr[i] - hh*wu[i];
+	}
+	OGL_RenderVRWeaponQuad(rect, verts, !weaponSized);   // items are world sprites, not in-hand art
+}
+
+// A magazine ITEM's picture, as an item appears in the world. Items are placed by their animation
+// SEQUENCE, so the low-level frame comes from the sequence's first view.
+static void vr_draw_item_at(view_data* view, short item,
+                            const float pos[3], const float wr[3], const float wu[3], const float wf[3],
+                            float sizeScale, float shadeScale = 1.0f)
+{
+	const shape_descriptor d = get_item_shape(item);
+	if (d == UNONE) return;
+	shape_animation_data* anim = get_shape_animation_data(d);
+	if (!anim || anim->frames_per_view <= 0) return;
+	vr_draw_shape_at(view, GET_DESCRIPTOR_COLLECTION(d), GET_DESCRIPTOR_SHAPE(d),
+	                 anim->low_level_shape_indexes[0], pos, wr, wu, wf, false, false, sizeScale, shadeScale);
+}
+
+// A controller's position and orientation in world space: the same mapping the weapon anchor uses,
+// with up rebuilt as cross(forward, right) exactly as the in-hand weapon does.
+static bool vr_hand_world_pose(const vr_body_frame& bf, int hand,
+                               float pos[3], float wr[3], float wu[3], float wf[3])
+{
+	float hp[3], ps[3], fs[3], sr[3], su[3];
+	if (!VR_GetHeadPosStage(hp) || !VR_GetAimPoseStage(hand, ps, fs) || !VR_GetAimOrientStage(hand, sr, su))
+		return false;
+	const float d[3] = { ps[0]-hp[0], ps[1]-hp[1], ps[2]-hp[2] };
+	float wd[3];
+	vr_room_dir_to_world(bf, d, wd);
+	for (int k = 0; k < 3; ++k) pos[k] = bf.origin[k] + wd[k] * bf.W;
+	vr_room_dir_to_world(bf, sr, wr);
+	vr_room_dir_to_world(bf, fs, wf);
+	wu[0] = wf[1]*wr[2] - wf[2]*wr[1];
+	wu[1] = wf[2]*wr[0] - wf[0]*wr[2];
+	wu[2] = wf[0]*wr[1] - wf[1]*wr[0];
+	return true;
+}
+
+static short vr_pouch_magazine_for(int pouchSlot, int reachingHand);   // with the magazine code below
+
+static void render_vr_hand_visuals(view_data* view)
+{
+	if (!VR_PhysicalWeaponsActive() || !OGL_IsActive()) return;
+	if (PLAYER_IS_DEAD(get_player_data(current_player_index))) return;
+
+	vr_body_frame bf;
+	vr_get_body_frame(view, bf);
+	const int held = VR_GetHeldWeaponHand();
+
+	// ---- fists on both hands --------------------------------------------------------------------
+	short fColl = NONE, fSeq = NONE, fLow = NONE;
+	const bool haveFist = get_weapon_idle_shape(_weapon_fist, &fColl, &fSeq, &fLow);
+	for (int hand = 0; hand < 2; ++hand) {
+		float pos[3], wr[3], wu[3], wf[3];
+		if (!vr_hand_world_pose(bf, hand, pos, wr, wu, wf)) continue;
+
+		if (haveFist && !s_vrHandDrewFist[hand]) {
+			// The fist model is authored the opposite way round from the guns, so it mirrors on the RIGHT
+			// hand where a gun mirrors on the left. The same fist.md3 ships in all three scenarios, but
+			// Marathon 1 marks the fist <left_handed_weapon> in its vr_weapons.mml and M2/Infinity do not --
+			// that flag is the per-scenario difference, so honour it, inverted relative to the guns' rule.
+			// Confirmed on device for M2 (right hand mirrored, 2026-09-27); M1 follows from the flag.
+			const bool flip = (hand == 1) != VR_IsWeaponNaturallyLeftHanded(_weapon_fist);
+			vr_draw_shape_at(view, fColl, fSeq, fLow, pos, wr, wu, wf, flip, true, 1.0f);
+		}
+
+		// ---- a magazine in this hand -----------------------------------------------------------
+		const short mag = VR_GetHandMagazine(hand);
+		if (mag != NONE) {
+			float mp[3];
+			for (int k = 0; k < 3; ++k) mp[k] = pos[k] + wf[k] * 0.05f * bf.W;   // just past the knuckles
+			vr_draw_item_at(view, mag, mp, wr, wu, wf, 0.6f);
+		}
+	}
+
+	// ---- what each pouch will hand out -----------------------------------------------------------
+	// Only shown when it would actually dispense something for the gun in your primary hand, so an
+	// empty pouch (or one with nothing for this weapon) is simply empty.
+	if (held >= 0) {
+		float bR[3], bU[3], bF[3];
+		vr_room_dir_to_world(bf, bf.right, bR);
+		vr_room_dir_to_world(bf, bf.up,    bU);
+		vr_room_dir_to_world(bf, bf.fwd,   bF);
+		for (int slot = 0; slot < VR_HOLSTER_COUNT; ++slot) {
+			if (!VR_HolsterSlotIsPouch(slot)) continue;
+			// Shown whenever the pouch has a job for this gun -- dark when you are out, so you can see
+			// the grenade pouch is there even with no grenades to draw.
+			const short item = vr_pouch_ammo_type(slot, 1 - held);
+			if (item == NONE) continue;
+			const bool empty = get_player_data(current_player_index)->items[item] <= 0;
+			vr_holster_anchor a;
+			VR_GetHolsterAnchorForPlayer(slot, VR_EyeHeightM(), &a);
+			float c[3];
+			vr_body_to_world(bf, a.x, a.y, a.z, c);
+			// Billboarded toward your head, so you can see what is in the pouch as you reach for it.
+			float t[3] = { c[0]-bf.origin[0], c[1]-bf.origin[1], c[2]-bf.origin[2] };
+			const float tl = sqrtf(t[0]*t[0] + t[1]*t[1] + t[2]*t[2]);
+			float br[3] = { -t[1], t[0], 0.f };
+			const float brl = sqrtf(br[0]*br[0] + br[1]*br[1]);
+			if (tl > 1e-3f && brl > 1e-3f) {
+				for (int k = 0; k < 3; ++k) t[k] /= tl;
+				br[0] /= brl; br[1] /= brl;
+				float bu[3] = { t[1]*br[2] - t[2]*br[1], t[2]*br[0] - t[0]*br[2], t[0]*br[1] - t[1]*br[0] };
+				vr_draw_item_at(view, item, c, br, bu, t, 0.525f, empty ? 0.2f : 1.0f);
+			} else {
+				vr_draw_item_at(view, item, c, bR, bU, bF, 0.525f, empty ? 0.2f : 1.0f);
+			}
+		}
+	}
+
+	// ---- a loosened magazine hanging out of the gun, and magazines falling away ---------------------
+	{
+		float bR[3], bU[3], bF[3];
+		vr_room_dir_to_world(bf, bf.right, bR);
+		vr_room_dir_to_world(bf, bf.up,    bU);
+		vr_room_dir_to_world(bf, bf.fwd,   bF);
+		short lw = NONE; float lwell[3], lins[3];
+		if (vr_primary_magwell(bf.W, -1, &lw, lwell, lins, nullptr, nullptr) && VR_GetMagState(lw) == VR_MAG_LOOSE) {
+			const vr_weapon_pose& wp = s_vrWeaponPose[held];
+			float mp[3];
+			vr_loose_mag_pos(bf.W, lwell, lins, mp);
+			vr_draw_item_at(view, get_player_weapon_ammo_type(current_player_index, lw, _primary_weapon),
+			                mp, wp.right, wp.up, wp.fwd, 0.6f);
+			// orange ring: this magwell needs clearing -- pull the mag out or flick it free
+			static int lpulse = 0; ++lpulse;
+			const float rr = 0.05f * bf.W * (0.85f + 0.15f * sinf(lpulse * 0.25f));
+			GLfloat v[24 * 2 * 3]; int n = 0;
+			for (int i = 0; i < 24; ++i) {
+				const float t0 = i * 6.2831853f / 24, t1 = (i + 1) * 6.2831853f / 24;
+				for (int k = 0; k < 3; ++k) v[n + k]     = mp[k] + rr * (cosf(t0) * wp.right[k] + sinf(t0) * wp.fwd[k]);
+				for (int k = 0; k < 3; ++k) v[n + 3 + k] = mp[k] + rr * (cosf(t1) * wp.right[k] + sinf(t1) * wp.fwd[k]);
+				n += 6;
+			}
+			glUseProgram(0);
+			glDisable(GL_TEXTURE_2D);
+			glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+			glDisableClientState(GL_COLOR_ARRAY);
+			glEnableClientState(GL_VERTEX_ARRAY);
+			glDisable(GL_DEPTH_TEST);
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+			glLineWidth(3.0f);
+			glColor4f(1.0f, 0.5f, 0.05f, 0.95f);
+			glVertexPointer(3, GL_FLOAT, 0, v);
+			glDrawArrays(GL_LINES, 0, n / 3);
+			glLineWidth(1.0f);
+			glDisable(GL_BLEND);
+			glEnable(GL_DEPTH_TEST);
+			glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+			glEnable(GL_TEXTURE_2D);
+			glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+		}
+		for (const auto& fm : s_fallingMags) vr_draw_item_at(view, fm.item, fm.pos, bR, bU, bF, 0.6f);
+	}
+
+	// ---- the magwell to aim for while you hold a magazine ------------------------------------------
+	for (int hand = 0; hand < 2; ++hand) {
+		if (VR_GetHandMagazine(hand) == NONE || held < 0 || held == hand) continue;
+		const vr_weapon_pose& wp = s_vrWeaponPose[held];
+		if (!wp.valid) continue;
+		const bool secondWell = VR_GetHandMagazine(hand) !=
+			get_player_weapon_ammo_type(current_player_index, wp.weapon_type, _primary_weapon);
+		const vr_attach_point* mw = secondWell ? VR_GetMagwell2OrDefault(wp.weapon_type)
+		                                       : VR_GetMagwellOrDefault(wp.weapon_type);
+
+		float well[3];
+		vr_weapon_local_to_world(wp, bf.W, mw->x, mw->y, mw->z, well);
+		float pos[3], wr[3], wu[3], wf[3];
+		if (!vr_hand_world_pose(bf, hand, pos, wr, wu, wf)) continue;
+		const float dx = pos[0]-well[0], dy = pos[1]-well[1], dz = pos[2]-well[2];
+		const float r  = mw->radius * bf.W;
+		const bool  inRange = (dx*dx + dy*dy + dz*dz) <= r*r;
+
+		// Ring in the plane across the magwell opening (perpendicular to the weapon's up axis, which is
+		// the default insertion direction), plus a line from the magazine to it.
+		static int pulse = 0; ++pulse;
+		const float rr = r * (0.85f + 0.15f * sinf(pulse * 0.2f));
+		GLfloat v[(24 + 1) * 2 * 3]; int n = 0;
+		auto push = [&](const float p[3]) { v[n++] = p[0]; v[n++] = p[1]; v[n++] = p[2]; };
+		for (int i = 0; i < 24; ++i) {
+			const float t0 = i * 6.2831853f / 24, t1 = (i + 1) * 6.2831853f / 24;
+			float a[3], b[3];
+			for (int k = 0; k < 3; ++k) {
+				a[k] = well[k] + rr * (cosf(t0) * wp.right[k] + sinf(t0) * wp.fwd[k]);
+				b[k] = well[k] + rr * (cosf(t1) * wp.right[k] + sinf(t1) * wp.fwd[k]);
+			}
+			push(a); push(b);
+		}
+		push(pos); push(well);
+
+		glUseProgram(0);
+		glDisable(GL_TEXTURE_2D);
+		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+		glDisableClientState(GL_COLOR_ARRAY);
+		glEnableClientState(GL_VERTEX_ARRAY);
+		glDisable(GL_DEPTH_TEST);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glLineWidth(3.0f);
+		const bool accepts = vr_magwell_accepts(wp.weapon_type, VR_GetHandMagazine(hand));
+		if (!accepts)     glColor4f(1.0f, 0.15f, 0.1f, 0.9f);   // red: the old mag is still in
+		else if (inRange) glColor4f(0.2f, 1.0f, 0.3f, 0.95f);   // green: let it seat
+		else              glColor4f(1.0f, 0.85f, 0.1f, 0.85f);  // yellow: bring it here
+		glVertexPointer(3, GL_FLOAT, 0, v);
+		glDrawArrays(GL_LINES, 0, n / 3);
+		glLineWidth(1.0f);
+		glDisable(GL_BLEND);
+		glEnable(GL_DEPTH_TEST);
+		glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+		glEnable(GL_TEXTURE_2D);
+		glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+	}
+}
+
+// ---- VR physical weapons: in-headset attach-point tuner ----------------------------------------
+// The model format carries no attachment points, so every grip / foregrip / magwell / muzzle and
+// every body anchor has to be positioned by eye. Doing that from outside the headset means a
+// build-deploy-"a bit left"-build round trip per number, and there are dozens of numbers. This
+// lets them be dialled in live and dumped straight out as MML.
+//
+// Engaged by HOLDING THE OFF-HAND GRIP while the gizmos are on, so nothing is stolen from normal
+// play the rest of the time:
+//     off-hand stick        nudge the selected point along the two active axes
+//     off-hand trigger      select the next target
+//     off-hand stick click  cycle the active axis pair
+//     dominant trigger      dump the whole tuned set to the log as <vr_weapons> MML
+//
+// Targets are the held weapon's five attach points followed by every body anchor. The selected one
+// is drawn pulsing white by render_vr_attach_gizmos.
+enum { VR_TUNE_AXES_XZ, VR_TUNE_AXES_Y_RADIUS, VR_TUNE_AXES_PITCH_YAW, VR_TUNE_AXES_COUNT };
+
+static int   s_tuneTarget   = 0;      // index into the target list built by vr_tuner_target()
+static int   s_tuneAxisMode = VR_TUNE_AXES_XZ;
+static bool  s_tunePrevTrigger = false, s_tunePrevClick = false, s_tunePrevDomTrigger = false;
+
+// The target list is [0 .. VR_ATTACH_COUNT-1] = attach points on the weapon in the dominant hand,
+// then [VR_ATTACH_COUNT ..] = the body anchors.
+static int vr_tuner_target_count(void) { return VR_ATTACH_COUNT + VR_HOLSTER_COUNT; }
+
+// Resolve the current target to something editable. Exactly one of *pt / *anchor comes back set.
+static void vr_tuner_resolve(short weapon_type, vr_attach_point** pt, vr_holster_anchor** anchor,
+                             const char** label)
+{
+	*pt = nullptr; *anchor = nullptr; *label = "?";
+	const int t = s_tuneTarget % vr_tuner_target_count();
+	if (t < VR_ATTACH_COUNT) {
+		if (weapon_type == NONE) return;          // nothing in hand: attach points aren't editable
+		*pt    = VR_GetAttachPointMutable(weapon_type, t);
+		*label = VR_AttachPointName(t);
+	} else {
+		const int slot = t - VR_ATTACH_COUNT;
+		*anchor = VR_GetHolsterAnchorMutable(slot);
+		*label  = VR_HolsterSlotName(slot);
+	}
+}
+
+// Once per frame (NOT per eye -- the render pass runs twice and would double every edge).
+static void vr_update_attach_tuner(void)
+{
+	if (!VR_IsActive() || !VR_Settings()->showAttachGizmos || !VR_PhysicalWeaponsActive()) return;
+
+	const int domHand = VR_Settings()->dominantHand ? 0 : 1;
+	const int offHand = 1 - domHand;
+
+	float offStickX = 0.f, offStickY = 0.f, offTrigger = 0.f, offGrip = 0.f;
+	bool  offClick = false;
+	if (!VR_GetRawHandInput(offHand, &offStickX, &offStickY, &offTrigger, &offGrip, &offClick)) return;
+	float domTrigger = 0.f;
+	VR_GetRawHandInput(domHand, nullptr, nullptr, &domTrigger, nullptr, nullptr);
+
+	const bool engaged = offGrip > 0.5f;
+	if (!engaged) {
+		s_tunePrevTrigger = s_tunePrevClick = s_tunePrevDomTrigger = false;
+		return;
+	}
+
+	// Whatever the dominant hand is holding is what we're tuning attach points on.
+	const short weapon_type = s_vrWeaponPose[domHand].valid ? s_vrWeaponPose[domHand].weapon_type
+	                                                        : (short)NONE;
+	vr_attach_point*   pt     = nullptr;
+	vr_holster_anchor* anchor = nullptr;
+	const char*        label  = "?";
+	vr_tuner_resolve(weapon_type, &pt, &anchor, &label);
+
+	const bool trigDown = offTrigger > 0.5f;
+	const bool domDown  = domTrigger > 0.5f;
+
+	// next target
+	if (trigDown && !s_tunePrevTrigger) {
+		s_tuneTarget = (s_tuneTarget + 1) % vr_tuner_target_count();
+		vr_tuner_resolve(weapon_type, &pt, &anchor, &label);
+		screen_printf("tune: %s", label);
+	}
+	// cycle axis pair -- pitch/yaw only means anything on the magwell
+	if (offClick && !s_tunePrevClick) {
+		s_tuneAxisMode = (s_tuneAxisMode + 1) % VR_TUNE_AXES_COUNT;
+		static const char* kAxisNames[VR_TUNE_AXES_COUNT] = { "X/Z", "Y/radius", "pitch/yaw" };
+		screen_printf("tune axes: %s", kAxisNames[s_tuneAxisMode]);
+	}
+	// dump
+	if (domDown && !s_tunePrevDomTrigger) {
+		const std::string mml = VR_DumpAttachPointsMML();
+		// Split on newlines: logcat truncates long lines, and line-per-element is what you want to
+		// paste anyway. Goes to both the A1VR tag and the on-device log file.
+		size_t start = 0;
+		while (start < mml.size()) {
+			size_t nl = mml.find('\n', start);
+			if (nl == std::string::npos) nl = mml.size();
+			if (nl > start) {
+				const std::string line = mml.substr(start, nl - start);
+				__android_log_print(ANDROID_LOG_INFO, "A1VR", "MML %s", line.c_str());
+				logWarning("VRATTACH %s", line.c_str());
+			}
+			start = nl + 1;
+		}
+		screen_printf("attach points dumped to log");
+	}
+
+	s_tunePrevTrigger    = trigDown;
+	s_tunePrevClick      = offClick;
+	s_tunePrevDomTrigger = domDown;
+
+	// ---- nudge -------------------------------------------------------------------------------
+	// Rate is per-frame and deliberately fine; a full stick deflection moves ~6 cm/sec at 72 Hz.
+	const float dead = 0.2f;
+	const float sx = (fabsf(offStickX) > dead) ? offStickX : 0.f;
+	const float sy = (fabsf(offStickY) > dead) ? offStickY : 0.f;
+	if (sx == 0.f && sy == 0.f) return;
+
+	const float linStep = 0.0008f;   // metres per frame at full deflection
+	const float angStep = 0.15f;     // degrees per frame at full deflection
+
+	float* a = nullptr; float* b = nullptr; float stepA = linStep, stepB = linStep;
+	if (pt) {
+		switch (s_tuneAxisMode) {
+			case VR_TUNE_AXES_XZ:       a = &pt->x;     b = &pt->z;      break;
+			case VR_TUNE_AXES_Y_RADIUS: a = &pt->radius; b = &pt->y;     break;
+			case VR_TUNE_AXES_PITCH_YAW:a = &pt->yaw;   b = &pt->pitch;
+			                            stepA = stepB = angStep;         break;
+		}
+		pt->defined = true;   // touching a point authors it
+	} else if (anchor) {
+		switch (s_tuneAxisMode) {
+			case VR_TUNE_AXES_XZ:       a = &anchor->x;      b = &anchor->z; break;
+			case VR_TUNE_AXES_Y_RADIUS: a = &anchor->radius; b = &anchor->y; break;
+			default: return;   // anchors carry no orientation
+		}
+	} else {
+		return;
+	}
+	if (a) *a += sx * stepA;
+	if (b) *b += sy * stepB;
+	if (s_tuneAxisMode == VR_TUNE_AXES_Y_RADIUS && a && *a < 0.01f) *a = 0.01f;  // keep radius sane
+}
+
+// ---- VR physical weapons: attach-point gizmos --------------------------------------------------
+// Aleph One's model loader has no MD3 tag support, so every point where a hand, a magazine or a
+// muzzle meets a weapon must be authored by hand in MML (see docs/VR_PHYSICAL_WEAPONS.md). This
+// draws those points in world space, on the live weapon, so they can actually be placed. Uses the
+// pose captured by render_vr_weapon_sprites_3d, so a gizmo sits exactly where the mesh does.
+//
+// grip       white cross          foregrip  cyan sphere at its grab radius
+// magwell    orange cross + arrow muzzle    red arrow down the barrel
+// mag grip   yellow cross         holsters  wireframe boxes, magenta assigned / green unassigned
+static void render_vr_attach_gizmos(view_data* view)
+{
+	if (!VR_IsActive() || !VR_PhysicalWeaponsActive()) return;
+	const bool setupBoxes = VR_GetHolsterSetupMode();
+	if (!VR_Settings()->showAttachGizmos && !setupBoxes) return;
+
+	const float  W   = (float)VR_Settings()->worldScaleWUM;
+	const double yaw = view->virtual_yaw * (360.0 / (double(FIXED_ONE) * double(FULL_CIRCLE))) * (8.0 * atan(1.0) / 360.0);
+	const double cyw = cos(yaw), syw = sin(yaw);
+
+	float camx = (float)view->origin.x, camy = (float)view->origin.y, camz = (float)view->origin.z;
+	{
+		float rcx, rcy, rcz;
+		if (VR_GetRenderCamera(&rcx, &rcy, &rcz)) { camx = rcx; camy = rcy; camz = rcz + VR_GetEyeZOffset(); }
+	}
+
+	// A body-space offset in metres (+X right, +Y up, +Z forward) -> world WU, anchored at the head.
+	// Routed through the same stage->world mapping the hands use, so holsters and hands agree.
+	// Same body frame the holsters use, so a gizmo box sits exactly on the weapon it describes.
+	vr_body_frame gizmoBody;
+	vr_get_body_frame(view, gizmoBody);
+	auto bodyToWorld = [&](float bx, float by, float bz, float out[3]) {
+		vr_body_to_world(gizmoBody, bx, by, bz, out);
+	};
+
+	std::vector<GLfloat> v;
+	auto seg = [&](const float a[3], const float b[3]) {
+		v.push_back(a[0]); v.push_back(a[1]); v.push_back(a[2]);
+		v.push_back(b[0]); v.push_back(b[1]); v.push_back(b[2]);
+	};
+	auto flush = [&](float r, float g, float b, float a, float width) {
+		if (v.empty()) return;
+		glColor4f(r, g, b, a);
+		glLineWidth(width);
+		glVertexPointer(3, GL_FLOAT, 0, v.data());
+		glDrawArrays(GL_LINES, 0, (GLsizei)(v.size() / 3));
+		v.clear();
+	};
+	auto cross = [&](const float p[3], float half) {
+		for (int ax = 0; ax < 3; ++ax) {
+			float a[3] = { p[0], p[1], p[2] }, b[3] = { p[0], p[1], p[2] };
+			a[ax] -= half; b[ax] += half;
+			seg(a, b);
+		}
+	};
+	// A ring around p, spanned by e0/e1 (world vectors already scaled to the radius).
+	auto ring = [&](const float p[3], const float e0[3], const float e1[3], int segs) {
+		const float step = 6.2831853f / segs;
+		for (int i = 0; i < segs; ++i) {
+			const float t0 = i * step, t1 = (i + 1) * step;
+			float a[3], b[3];
+			for (int k = 0; k < 3; ++k) {
+				a[k] = p[k] + e0[k] * cosf(t0) + e1[k] * sinf(t0);
+				b[k] = p[k] + e0[k] * cosf(t1) + e1[k] * sinf(t1);
+			}
+			seg(a, b);
+		}
+	};
+	auto arrow = [&](const float from[3], const float dir[3], float len, const float side[3]) {
+		float tip[3], base[3];
+		for (int k = 0; k < 3; ++k) { tip[k] = from[k] + dir[k] * len; base[k] = from[k]; }
+		seg(base, tip);
+		for (int sgn = -1; sgn <= 1; sgn += 2) {
+			float h[3];
+			for (int k = 0; k < 3; ++k)
+				h[k] = tip[k] - dir[k] * (len * 0.25f) + side[k] * (len * 0.12f * sgn);
+			seg(tip, h);
+		}
+	};
+
+	glUseProgram(0);
+	glDisable(GL_TEXTURE_2D);
+	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	glDisableClientState(GL_COLOR_ARRAY);
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glDisable(GL_DEPTH_TEST);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+	// ---- body holster anchors -------------------------------------------------------------
+	// Only draw what earns its place. A holster with a weapon actually hanging in it is already
+	// obvious from the weapon model, so its box is noise; ammo pouches have nothing to show and the
+	// tuning target has to be visible to aim at. Everything else is hidden.
+	const int selTarget = s_tuneTarget % (VR_ATTACH_COUNT + VR_HOLSTER_COUNT);
+	const int selSlot   = (selTarget >= VR_ATTACH_COUNT) ? (selTarget - VR_ATTACH_COUNT) : -1;
+	for (int slot = 0; slot < VR_HOLSTER_COUNT; ++slot) {
+		const bool isPouch   = VR_HolsterSlotIsPouch(slot);
+		const bool isSel     = (slot == selSlot);
+		const bool hasWeapon = !isPouch && vr_holster_occupant(slot) != NONE;
+		if (!setupBoxes && !isPouch && !isSel) continue;  // outside setup: only pouches + the tuner target
+		vr_holster_anchor a;
+		VR_GetHolsterAnchorForPlayer(slot, VR_EyeHeightM(), &a);
+		float c[3]; bodyToWorld(a.x, a.y, a.z, c);
+		const bool  pouch = VR_HolsterSlotIsPouch(slot);
+		const float h = a.radius * W;
+		// Oriented like the slot: the same basis the weapon hanging there is drawn with, so the box shows
+		// the holster's rotation. A pouch is a squat box (thin along its up) with an X on top.
+		float ar[3], au[3], af[3];
+		vr_holster_model_basis(gizmoBody, slot, ar, au, af);
+		const float ex = h, ey = pouch ? h * 0.45f : h, ez = pouch ? h * 0.85f : h;
+		auto corner = [&](int sx, int sy, int sz, float out[3]) {
+			for (int k = 0; k < 3; ++k)
+				out[k] = c[k] + sx * ex * ar[k] + sy * ey * au[k] + sz * ez * af[k];
+		};
+		for (int axis = 0; axis < 3; ++axis) {
+			for (int i = 0; i < 4; ++i) {
+				int s0[3], s1[3];
+				const int u = (axis + 1) % 3, w2 = (axis + 2) % 3;
+				s0[u]  = s1[u]  = (i & 1) ? 1 : -1;
+				s0[w2] = s1[w2] = (i & 2) ? 1 : -1;
+				s0[axis] = -1; s1[axis] = 1;
+				float p0[3], p1[3];
+				corner(s0[0], s0[1], s0[2], p0);
+				corner(s1[0], s1[1], s1[2], p1);
+				seg(p0, p1);
+			}
+		}
+		if (pouch) {
+			float t0[3], t1[3], t2[3], t3[3];
+			corner(-1, 1, -1, t0); corner(1, 1, 1, t1); corner(-1, 1, 1, t2); corner(1, 1, -1, t3);
+			seg(t0, t1); seg(t2, t3);
+		}
+		if (slot == s_setupDragSlot[0] || slot == s_setupDragSlot[1])
+			flush(1.0f, 1.0f, 1.0f, 1.0f, 3.5f);                      // white   = being moved
+		else if (pouch)
+			flush(slot == VR_HOLSTER_RIGHT_POUCH ? 1.0f : 1.0f,
+			      slot == VR_HOLSTER_RIGHT_POUCH ? 0.25f : 0.75f,
+			      slot == VR_HOLSTER_RIGHT_POUCH ? 0.1f : 0.0f, 1.0f, 3.5f);   // red / amber pouches
+		else if (VR_GetHolsterSlotWeapon(slot) != NONE)
+			flush(1.0f, 0.2f, 1.0f, 0.85f, 2.0f);                     // magenta = a weapon is assigned here
+		else
+			flush(0.2f, 0.9f, 0.3f, 0.45f, 1.0f);                     // green   = unassigned
+	}
+
+	// ---- per-weapon attach points ----------------------------------------------------------
+	for (int hand = 0; hand < 2 && VR_Settings()->showAttachGizmos; ++hand) {
+		const vr_weapon_pose& wp = s_vrWeaponPose[hand];
+		if (!wp.valid) continue;
+
+		auto localPt = [&](const vr_attach_point* pt, float out[3]) {
+			vr_weapon_local_to_world(wp, W, pt->x, pt->y, pt->z, out);
+		};
+
+		// grip -- white cross. Drawn faint at the model origin when not yet authored, so there is
+		// always something to aim the tuner at.
+		const vr_attach_point* grip = VR_GetAttachPoint(wp.weapon_type, VR_ATTACH_GRIP);
+		{
+			float p[3];
+			if (grip->defined) localPt(grip, p);
+			else { p[0] = wp.anchor[0]; p[1] = wp.anchor[1]; p[2] = wp.anchor[2]; }
+			cross(p, 0.05f * W);
+			flush(1.0f, 1.0f, 1.0f, grip->defined ? 0.95f : 0.35f, 2.0f);
+		}
+
+		// foregrip -- cyan sphere (three orthogonal rings) at the grab radius
+		const vr_attach_point* fore = VR_GetAttachPoint(wp.weapon_type, VR_ATTACH_FOREGRIP);
+		if (fore->defined) {
+			float p[3]; localPt(fore, p);
+			const float r = fore->radius * W;
+			float er[3], eu[3], ef[3];
+			for (int k = 0; k < 3; ++k) { er[k] = wp.right[k] * r; eu[k] = wp.up[k] * r; ef[k] = wp.fwd[k] * r; }
+			ring(p, er, eu, 20);
+			ring(p, eu, ef, 20);
+			ring(p, ef, er, 20);
+			flush(0.2f, 0.9f, 1.0f, 0.8f, 2.0f);
+		}
+
+		// magwell -- orange cross + ring + an arrow along the insertion direction
+		const vr_attach_point* mag = VR_GetAttachPoint(wp.weapon_type, VR_ATTACH_MAGWELL);
+		if (mag->defined) {
+			float p[3]; localPt(mag, p);
+			cross(p, 0.03f * W);
+			const float r = mag->radius * W;
+			float er[3], ef[3];
+			for (int k = 0; k < 3; ++k) { er[k] = wp.right[k] * r; ef[k] = wp.fwd[k] * r; }
+			ring(p, er, ef, 16);
+			// Insertion direction: straight down the weapon's -up, swung by the authored angles.
+			const float cp  = cosf(mag->pitch * 0.01745329f), sp  = sinf(mag->pitch * 0.01745329f);
+			const float cy2 = cosf(mag->yaw   * 0.01745329f), sy2 = sinf(mag->yaw   * 0.01745329f);
+			float dir[3];
+			for (int k = 0; k < 3; ++k)
+				dir[k] = -wp.up[k] * cp + wp.fwd[k] * sp * cy2 + wp.right[k] * sp * sy2;
+			arrow(p, dir, 0.12f * W, wp.right);
+			flush(1.0f, 0.55f, 0.1f, 0.9f, 2.5f);
+		}
+
+		// second magwell (grenade launcher) -- dark orange cross + ring
+		const vr_attach_point* mag2 = VR_GetAttachPoint(wp.weapon_type, VR_ATTACH_MAGWELL2);
+		if (mag2->defined) {
+			float p[3]; localPt(mag2, p);
+			cross(p, 0.03f * W);
+			const float r2 = mag2->radius * W;
+			float er[3], ef[3];
+			for (int k = 0; k < 3; ++k) { er[k] = wp.right[k] * r2; ef[k] = wp.fwd[k] * r2; }
+			ring(p, er, ef, 16);
+			flush(0.8f, 0.3f, 0.05f, 0.9f, 2.5f);
+		}
+
+		// muzzle -- red arrow down the barrel
+		const vr_attach_point* muz = VR_GetAttachPoint(wp.weapon_type, VR_ATTACH_MUZZLE);
+		if (muz->defined) {
+			float p[3]; localPt(muz, p);
+			arrow(p, wp.fwd, 0.15f * W, wp.right);
+			flush(1.0f, 0.15f, 0.15f, 0.9f, 2.5f);
+		}
+
+		// magazine grip point -- yellow cross, drawn relative to the magwell so the two can be
+		// eyeballed against each other while tuning.
+		const vr_attach_point* mgrip = VR_GetAttachPoint(wp.weapon_type, VR_ATTACH_MAG_GRIP);
+		if (mgrip->defined && mag->defined) {
+			float base[3]; localPt(mag, base);
+			float p[3];
+			for (int k = 0; k < 3; ++k)
+				p[k] = base[k] + (mgrip->x * wp.right[k] + mgrip->y * wp.up[k] + mgrip->z * wp.fwd[k]) * W;
+			cross(p, 0.025f * W);
+			flush(1.0f, 0.95f, 0.2f, 0.9f, 2.0f);
+		}
+	}
+
+	// ---- selected tuning target: pulsing white box, so you can see what you are editing ----
+	if (VR_Settings()->showAttachGizmos) {
+		static int pulse = 0; ++pulse;
+		const float amp = 0.75f + 0.25f * sinf(pulse * 0.25f);
+		const int   t   = s_tuneTarget % (VR_ATTACH_COUNT + VR_HOLSTER_COUNT);
+		float c[3]; bool have = false; float half = 0.05f * W;
+
+		if (t < VR_ATTACH_COUNT) {
+			const int domHand = VR_Settings()->dominantHand ? 0 : 1;
+			const vr_weapon_pose& wp = s_vrWeaponPose[domHand];
+			if (wp.valid) {
+				const vr_attach_point* pt = VR_GetAttachPoint(wp.weapon_type, t);
+				if (t == VR_ATTACH_MAG_GRIP) {
+					// authored relative to the magwell, so show it there
+					const vr_attach_point* mw = VR_GetAttachPoint(wp.weapon_type, VR_ATTACH_MAGWELL);
+					float base[3];
+					vr_weapon_local_to_world(wp, W, mw->x, mw->y, mw->z, base);
+					for (int k = 0; k < 3; ++k)
+						c[k] = base[k] + (pt->x * wp.right[k] + pt->y * wp.up[k] + pt->z * wp.fwd[k]) * W;
+				} else {
+					vr_weapon_local_to_world(wp, W, pt->x, pt->y, pt->z, c);
+				}
+				have = true;
+			}
+		} else {
+			vr_holster_anchor a;
+			VR_GetHolsterAnchorForPlayer(t - VR_ATTACH_COUNT, VR_EyeHeightM(), &a);
+			bodyToWorld(a.x, a.y, a.z, c);
+			half = a.radius * W * 1.15f;
+			have = true;
+		}
+
+		if (have) {
+			for (int axis = 0; axis < 3; ++axis) {
+				for (int i = 0; i < 4; ++i) {
+					const int u = (axis + 1) % 3, w2 = (axis + 2) % 3;
+					float p0[3] = { c[0], c[1], c[2] }, p1[3] = { c[0], c[1], c[2] };
+					p0[u]  += (i & 1) ? half : -half;  p1[u]  = p0[u];
+					p0[w2] += (i & 2) ? half : -half;  p1[w2] = p0[w2];
+					p0[axis] -= half; p1[axis] += half;
+					seg(p0, p1);
+				}
+			}
+			flush(1.0f, 1.0f, 1.0f, amp, 3.0f);
+		}
+	}
+
+	glLineWidth(1.0f);
+	glDisable(GL_BLEND);
+	glEnable(GL_DEPTH_TEST);
+	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	glEnable(GL_TEXTURE_2D);
+	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+}
+
 // ---- VR multi-sector visibility sweep ----------------------------------------------------------
 // Marathon's visibility cone cannot exceed ~162 deg: build_render_tree projects each endpoint onto a
 // 1D screen line (x = half_screen_width + j*world_to_screen_x / i) which requires i > 0 -- in front
@@ -813,6 +2574,10 @@ static angle vr_vis_sector_half_cone(int sector)
 // sprite 1 = secondary dual-wield weapon → non-dominant hand controller
 static void render_vr_weapon_sprites_3d(view_data* view)
 {
+	// Reset before any early return, so a frame that draws no weapon cannot leave stale "this hand
+	// already has a fist" flags behind for render_vr_hand_visuals.
+	s_vrHandDrewFist[0] = s_vrHandDrewFist[1] = false;
+
 	// Update input-routing flags unconditionally (before any early returns) so the game
 	// tick always sees current weapon state regardless of whether weapons are being drawn.
 	short weap_type = NONE, weap_mode = 0;
@@ -830,7 +2595,11 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 	VR_SetIsDualWield(weapon_is_dual);
 	// Pistol-style one-handers (magnum, fusion pistol) opt out of two-handed grip via MML
 	// (<no_two_handed_weapon>); keep them single-handed even when the hands come together.
-	VR_SetTwoHandedDisabled(VR_IsWeaponTwoHandedDisabled(weap_type));
+	// ...and while the second hand holds a weapon of its own: that grip is holding a gun, not steadying
+	// this one, so the two-handed latch must not engage when the hands happen to come close.
+	const short vrOffhandWeapon = VR_PhysicalWeaponsActive() ? vr_get_offhand_weapon(current_player_index)
+	                                                         : (short)NONE;
+	VR_SetTwoHandedDisabled(VR_IsWeaponTwoHandedDisabled(weap_type) || vrOffhandWeapon != NONE);
 	// Per-weapon two-handed angle offset (MML <two_handed_offset>): rotates BOTH the weapon model and
 	// the firing aim while the two-handed grip is engaged, for grips that don't lie along the barrel
 	// (pistol points up; the flamethrower's side handle swings the aim back onto the barrel). Pushed
@@ -872,7 +2641,13 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 		}
 	}
 
-	const int domHand = VR_Settings()->dominantHand ? 0 : 1;
+	// "domHand" here means the hand holding the PRIMARY weapon. Under physical weapons that is whichever
+	// hand grabbed it, not the configured dominant hand; dual pistols, casings and the second hand's
+	// weapon all key off it.
+	int domHandTmp = VR_Settings()->dominantHand ? 0 : 1;
+	const bool vrPhysical = VR_PhysicalWeaponsActive();
+	if (vrPhysical && VR_GetHeldWeaponHand() >= 0) domHandTmp = VR_GetHeldWeaponHand();
+	const int domHand = domHandTmp;
 	const int offHand = 1 - domHand;
 
 	float hp[3];
@@ -883,6 +2658,9 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 	bool player_left = (VR_Settings()->dominantHand == 1);
 	bool naturally_left = VR_IsWeaponNaturallyLeftHanded(weap_type);
 	bool should_flip = (player_left != naturally_left);
+
+	// Invalidate last frame's captured weapon poses; each hand re-publishes below if it draws.
+	s_vrWeaponPose[0].valid = s_vrWeaponPose[1].valid = false;
 
 	// Per-weapon-sprite VR hand index (not counting shell casings)
 	int vrWeaponIdx = 0;
@@ -1026,8 +2804,17 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 		// (→ domHand) and secondary left-of-centre (→ offHand). Single pistol after one
 		// runs dry: the engine repositions the survivor to idle_width (exact centre), so
 		// position is useless; use trigger validity instead to decide which hand survived.
+		// The weapon this item belongs to: the second hand's weapon for its items, else the primary
+		// (with the dual-wield pseudo-types folded back to the real weapon for attach-point lookups).
+		const bool itemOffhand = display_data.vr_offhand;
+		short itemWeapon = itemOffhand ? display_data.vr_weapon_type : weap_type;
+		if (itemWeapon == _weapon_doublefisted_pistols)  itemWeapon = _weapon_pistol;
+		if (itemWeapon == _weapon_doublefisted_shotguns) itemWeapon = _weapon_shotgun;
+
 		int hand;
-		if (weapon_is_dual) {
+		if (itemOffhand) {
+			hand = offHand;                      // the second hand's own weapon
+		} else if (weapon_is_dual) {
 			bool sprite_is_left;
 			if      (display_data.horizontal_positioning_mode == _position_low)
 				sprite_is_left = true;
@@ -1036,6 +2823,11 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 			else    // _position_center: fraction of screen; separation offsets are ±8192 from 32768
 				sprite_is_left = (display_data.horizontal_position < (FIXED_ONE / 2));
 			hand = sprite_is_left ? offHand : domHand;
+		} else if (vrPhysical && VR_GetHeldWeaponHand() >= 0) {
+			// Physical weapons: the weapon lives in whichever hand picked it up. Checked BEFORE the
+			// lone-pistol heuristic below, which would otherwise put a pistol grabbed with the
+			// non-dominant hand back in the dominant one.
+			hand = VR_GetHeldWeaponHand();
 		} else if (weap_type == _weapon_pistol) {
 			// Check which trigger slot is still loaded.
 			// Primary (trigger 0) = dominant hand; secondary (trigger 1) = off-hand.
@@ -1045,6 +2837,15 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 			hand = (!primary_valid && secondary_valid) ? offHand : domHand;
 		} else {
 			hand = domHand;
+		}
+		if (itemWeapon == _weapon_fist && (hand == 0 || hand == 1)) s_vrHandDrewFist[hand] = true;
+		// Weapon handling mode draws BOTH fists itself (render_vr_hand_visuals), by the same per-hand rule
+		// whether or not the other hand holds a gun. The engine's own empty-handed fists are routed by
+		// screen side and mirrored by configured handedness -- the stock mapping -- and came out reversed.
+		if (vrPhysical && itemWeapon == _weapon_fist) {
+			s_vrHandDrewFist[hand] = false;
+			vrWeaponIdx++;
+			continue;
 		}
 
 		float ps[3], fs[3];
@@ -1058,7 +2859,7 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 
 		// Two-handed steadying: replace orientation with inter-hand vector + dominant roll.
 		// Only for single-hand weapons (dual-wield keeps independent per-hand orientation).
-		if (!weapon_is_dual && VR_IsTwoHandedActive()) {
+		if (!weapon_is_dual && !itemOffhand && VR_IsTwoHandedActive()) {
 			float th_fwd[3];
 			if (VR_GetTwoHandedFwdStage(th_fwd)) {
 				float new_right[3], new_up[3];
@@ -1109,11 +2910,20 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 		const float hw = (world_w / 1024.0f) * spriteScaleM * W * 0.5f;
 		const float hh = (world_h / 1024.0f) * spriteScaleM * W * 0.5f;
 
+		// Physical weapons: a sprite faces whichever hand holds it. Drop the engine's own side-flip (it
+		// marks the second dual pistol as "the left one", which is only true for a right-hander holding
+		// them the stock way) and mirror purely by hand + the weapon's authored handedness. For the stock
+		// cases this reproduces the old result exactly.
+		if (vrPhysical) display_data.flip_horizontal = false;
+
 		// Apply shape mirror flags
 		if (si->flags & _X_MIRRORED_BIT) display_data.flip_horizontal = !display_data.flip_horizontal;
 		if (si->flags & _Y_MIRRORED_BIT) display_data.flip_vertical   = !display_data.flip_vertical;
 
-		if (should_flip)
+		if (vrPhysical) {
+			if ((hand == 0) != VR_IsWeaponNaturallyLeftHanded(itemWeapon))
+				display_data.flip_horizontal = !display_data.flip_horizontal;
+		} else if (should_flip)
 			display_data.flip_horizontal = !display_data.flip_horizontal;
 
 		// Reload/holster slide: vpos > idle_height → descend; vpos >= kHideV → hidden. Now that the
@@ -1157,6 +2967,13 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 				cwz += ofh * wrx[2] - ofv * wup_mdl[2];
 				s_lowerFrac[hand] = 0.0f;
 				cwz_slid = cwz;
+			} else if (VR_PhysicalWeaponsActive()) {
+				// Physical weapons: a weapon is either in your hand or on your body, never sliding
+				// between the two. Pin the slide off so no stray lowering/raising frame can show --
+				// belt and braces with the instant state transitions in lower_weapon /
+				// change_to_desired_weapon, which would otherwise flash one near-stowed frame.
+				s_lowerFrac[hand] = 0.0f;
+				cwz_slid = cwz;
 			} else {
 				if (vpos >= kHideV) { s_lowerFrac[hand] = 1.0f; vrWeaponIdx++; continue; }  // fully stowed → hide
 				// Track the engine's lowering directly: vertical_position ramps from idle_height (weapon at
@@ -1186,6 +3003,21 @@ static void render_vr_weapon_sprites_3d(view_data* view)
 			}
 			wfwd_mdl[0] = nf[0]; wfwd_mdl[1] = nf[1]; wfwd_mdl[2] = nf[2];
 			wup_mdl[0]  = nu[0]; wup_mdl[1]  = nu[1]; wup_mdl[2]  = nu[2];
+		}
+
+		// Publish this hand's final weapon pose for the attach-point gizmos / interaction tests.
+		// Uses cwz_slid (not cwz) so model-local points follow the reload/holster slide, and the
+		// post-arm-drop basis so they follow the wrist rotation too.
+		if (hand >= 0 && hand < 2) {
+			vr_weapon_pose& wp = s_vrWeaponPose[hand];
+			wp.valid       = true;
+			wp.weapon_type = itemWeapon;
+			wp.anchor[0]   = cwx; wp.anchor[1] = cwy; wp.anchor[2] = cwz_slid;
+			for (int i = 0; i < 3; ++i) {
+				wp.right[i] = wrx[i];
+				wp.up[i]    = wup_mdl[i];
+				wp.fwd[i]   = wfwd_mdl[i];
+			}
 		}
 
 		// Quad corners in world space. Use wup_mdl (cross(wfwd_eff, wrx)) so the sprite
@@ -1697,6 +3529,12 @@ void render_view(
 						render_vr_aim_gizmos(view);
 						render_net_vr_pose(view);
 						render_vr_weapon_sprites_3d(view);
+						// Tuner runs on the first eye only -- the eye loop runs twice a frame and
+						// would otherwise double every button edge and every nudge step.
+						if (eye == 0) { vr_update_torso(); vr_update_attach_tuner(); vr_update_holster_grabs(view); vr_update_magazine_seating(view); vr_update_spin_reload(); }
+						render_vr_holstered_weapons(view);
+						render_vr_hand_visuals(view);   // fists, pouch ammo, mag in hand, magwell ring
+						render_vr_attach_gizmos(view);   // physical-weapon attach-point debug overlay
 
 						RasPtr->End();
 						VR_PresentHudEye(eye);

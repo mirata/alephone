@@ -61,6 +61,7 @@ May 22, 2003 (Woody Zenfell):
 #include "SoundManager.h"
 
 #include "preferences.h"
+#include "vr_weapons.h"   // VR weapon handling: the player's holster positions
 #include "wad.h"
 #include "wad_prefs.h"
 #include "game_errors.h"
@@ -1221,7 +1222,10 @@ static const char *vr_action_labels[] = {
 	// repro, which is no use to a player. It is the last action, so ending the list here makes it
 	// unselectable without shifting any index -- the enum value and its shell.cpp handler are untouched,
 	// so re-add the label to bring it back.
-	"Prev Item", "Next Item", "Screenshot", "Console", NULL
+	"Prev Item", "Next Item", "Screenshot", "Console",
+	// VR_ACT_DIAG2D has to be NAMED rather than skipped now that a real action follows it -- a
+	// null-terminated w_select list cannot have holes, and the enum is persisted by index.
+	"(2D Offset Test)", "Eject Magazine", NULL
 };
 // The six bindable buttons, in VR_BTN_* order. The menu label per button.
 static const char *vr_button_labels[] = {
@@ -1835,6 +1839,12 @@ static void vr_controls_dialog(void *arg)
 	table->dual_add(height_adjust_w->label("Height Adjust"), d);
 	table->dual_add(height_adjust_w, d);
 
+	// ONE switch for the whole experimental mode (docs/VR_PHYSICAL_WEAPONS.md). The attach-point
+	// gizmos are a code-only authoring aid (vr_settings_t::showAttachGizmos), not a preference.
+	w_toggle *phys_weapons_w = new w_toggle(vr->experimentalWeapons != 0);
+	table->dual_add(phys_weapons_w->label("VR Weapon Handling (experimental)"), d);
+	table->dual_add(phys_weapons_w, d);
+
 	table->add_row(new w_spacer(), true);
 	table->dual_add_row(new w_static_text("Button Mapping"), d);
 
@@ -1864,6 +1874,7 @@ static void vr_controls_dialog(void *arg)
 	clear_screen();
 
 	if (d.run() == 0) {	// Accepted (button selection index IS the VR_ACT_* value)
+		vr->experimentalWeapons = phys_weapons_w->get_selection() ? 1 : 0;
 		vr->dominantHand   = hand_w->get_selection();
 		vr->switchSticks   = switch_sticks_w->get_selection() ? 1 : 0;
 		vr->snapTurn       = turn_style_w->get_selection();
@@ -4871,6 +4882,22 @@ InfoTree vr_preferences_tree()
 	root.put_attr("layer_supersample", vr->layerSupersample);
 	root.put_attr("show_fps", vr->showFPS);
 	root.put_attr("laser_sight", vr->showLaserSight);
+	root.put_attr("physical_weapons", vr->experimentalWeapons);
+	// VR weapon handling: holster / pouch positions the player set up in-headset (on top of the defaults).
+	for (int slot = 0; slot < VR_HOLSTER_COUNT; ++slot)
+	{
+		vr_holster_anchor a;
+		if (!VR_GetHolsterOverride(slot, &a)) continue;
+		InfoTree h;
+		h.put_attr("slot", std::string(VR_HolsterSlotName(slot)));
+		h.put_attr("x", a.x); h.put_attr("y", a.y); h.put_attr("z", a.z); h.put_attr("radius", a.radius);
+		if (a.oriented)
+		{
+			h.put_attr("fx", a.fwd[0]); h.put_attr("fy", a.fwd[1]); h.put_attr("fz", a.fwd[2]);
+			h.put_attr("ux", a.up[0]);  h.put_attr("uy", a.up[1]);  h.put_attr("uz", a.up[2]);
+		}
+		root.add_child("holster_anchor", h);
+	}
 	root.put_attr("punch_speed", vr->punchSpeed);
 	root.put_attr("lean_give_fraction", vr->leanGiveFraction);
 	root.put_attr("button_a", vr->buttonAction[VR_BTN_A]);
@@ -6002,6 +6029,25 @@ void parse_vr_preferences(InfoTree root, std::string version)
 	if (vr->layerSupersample < 0 || vr->layerSupersample > 2) vr->layerSupersample = 0;
 	root.read_attr("show_fps", vr->showFPS);
 	root.read_attr("laser_sight", vr->showLaserSight);
+	root.read_attr("physical_weapons", vr->experimentalWeapons);
+	VR_ClearHolsterOverrides();
+	for (const InfoTree& h : root.children_named("holster_anchor"))
+	{
+		std::string name;
+		if (!h.read_attr("slot", name)) continue;
+		const int slot = VR_HolsterSlotFromName(name.c_str());
+		if (slot == VR_HOLSTER_NONE) continue;
+		vr_holster_anchor a = *VR_GetHolsterAnchor(slot);
+		a.oriented = false;
+		h.read_attr("x", a.x); h.read_attr("y", a.y); h.read_attr("z", a.z); h.read_attr("radius", a.radius);
+		if (h.read_attr("fx", a.fwd[0]))
+		{
+			h.read_attr("fy", a.fwd[1]); h.read_attr("fz", a.fwd[2]);
+			h.read_attr("ux", a.up[0]);  h.read_attr("uy", a.up[1]);  h.read_attr("uz", a.up[2]);
+			a.oriented = true;
+		}
+		VR_SetHolsterOverride(slot, a);
+	}
 	root.read_attr("punch_speed", vr->punchSpeed);
 	root.read_attr("lean_give_fraction", vr->leanGiveFraction);
 	root.read_attr("button_a", vr->buttonAction[VR_BTN_A]);

@@ -41,6 +41,38 @@
 // shader-based GL calls into fixed-function emulation and BLACK-OUT all VR rendering. Get the console
 // line through the thin C accessor VR_GetConsoleLine() (declared in vr_openxr.h, defined in Console.cpp).
 
+// Forward declarations instead of #includes -- see the warning above. vr_weapons.h itself is
+// harmless, but every header added to this file is a chance to drag the GLES compat shim in, and
+// the blackout it causes is silent. VR_PhysicalWeaponsActive lives in vr_weapons.cpp (no GL there).
+extern "C" bool VR_PhysicalWeaponsActive(void);
+int VR_GetHeldWeaponHand(void);
+
+// Physical weapons: per-frame facts pushed by the renderer, which knows what each hand is holding.
+static bool s_pwTwoHandedGrabInRange = false;             // support hand is at the weapon's grab spot
+static bool s_pwSupportSecondaryFire = false;             // two-handed weapon with a 2nd fire mode (rifle)
+static bool s_pwHandChargeMode[2]    = { false, false };  // hand holds a hold-to-charge weapon (fusion)
+// Hold-to-charge trigger state, per physical hand: a tap fires normally, a hold charges.
+static uint32_t s_pwTriggerDownMs[2]    = { 0, 0 };
+static bool     s_pwTriggerPrev[2]      = { false, false };
+static bool     s_pwCharging[2]         = { false, false };
+static uint32_t s_pwTapPulseUntilMs[2]  = { 0, 0 };
+static const uint32_t kPwChargeHoldMs = 250;   // held longer than this = charging
+static const uint32_t kPwTapPulseMs   = 90;    // a tap is replayed as a trigger-down this long (3 ticks)
+static void pwUpdateChargeTriggers(void);
+
+// The hand the weapon is actually IN. With physical weapons the weapon lives in whichever hand
+// picked it up, so anything that used to assume the configured dominant hand -- two-handed
+// steadying above all -- has to ask this instead, or it computes the grip vector backwards the
+// moment you draw with your other hand.
+static inline int vrWeaponHand(int domHandFallback)
+{
+	if (VR_PhysicalWeaponsActive()) {
+		const int held = VR_GetHeldWeaponHand();
+		if (held >= 0) return held;
+	}
+	return domHandFallback;
+}
+
 #define A1VR_LOG(...) __android_log_print(ANDROID_LOG_INFO, "A1VR", __VA_ARGS__)
 #define XR_CHECK(call) do { XrResult _r = (call); if (XR_FAILED(_r)) A1VR_LOG("%s -> %d", #call, _r); } while (0)
 
@@ -776,6 +808,8 @@ namespace {
 		/* showFPS          */ 0,     // off by default; a diagnostic readout, not a game element
 		/* showLaserSight   */ 0,
 		/* showAimGizmos    */ 0,     // controller aim diagnostic gizmos (OFF; debug-only, flip to 1 to show)
+		/* experimentalWeapons */ 0,  // physical weapons: opt-in, off by default
+		/* showAttachGizmos */ 0,     // attach-point gizmos + tuner: CODE-ONLY, flip to 1 to author
 		/* buttonAction     */ {      // default button map (matches the old hardcoded stopgap)
 			VR_ACT_ACTION_USE,       //   A          -> Action / Use
 			VR_ACT_NONE,             //   B          -> unbound (screenshot promo feature disabled)
@@ -1339,20 +1373,24 @@ extern "C" bool VR_BeginFrame(void)
 		// are close; release only when the grip is let go. Not re-tested against the proximity threshold
 		// every frame, so a noisy/occluded distance estimate near the boundary can't flicker the aim mode.
 		{
-			const int domHand = s_settings.dominantHand ? 0 : 1;
+			const int domHand = vrWeaponHand(s_settings.dominantHand ? 0 : 1);
 			const int offHand = 1 - domHand;
 			const bool offGrip = s_grip[offHand] > 0.5f;
 			if (s_isDualWield) {
 				s_twoHandedLatched = false;
 			} else if (offGrip && !s_offGripPrev) {
 				float dm[3], of[3], dist = 1e9f;
-				if (twoHandPositions(domHand, offHand, dm, of, &dist) && dist < 0.5f)
+				// Physical weapons: only a grip AT the weapon's two-handed grab spot steadies it.
+				if (VR_PhysicalWeaponsActive() ? s_pwTwoHandedGrabInRange
+				                               : (twoHandPositions(domHand, offHand, dm, of, &dist) && dist < 0.5f))
 					s_twoHandedLatched = true;
 			} else if (!offGrip) {
 				s_twoHandedLatched = false;
 			}
 			s_offGripPrev = offGrip;
 		}
+
+		pwUpdateChargeTriggers();
 
 		// Fist-punch detection (velocity-driven melee). For each hand, measure the forward speed =
 		// component of the controller's linear velocity along where it points (the aim forward, which
@@ -1833,10 +1871,72 @@ extern "C" void VR_GetHeadOffsetInterp(float t, float* wx, float* wy)
 // Live lockout check (not just the s_fire latched in VR_BeginFrame): the keyboard-close that sets the
 // lockout happens LATER in the same tick (vbl's VR_InGameKeyboardActive, before it reads VR_GetFire),
 // so the latched s_fire is still the pre-lockout value on the transition frame -- re-test here.
-extern "C" bool VR_GetFire(void)               { return s_fire && !s_kbFireLockout; }
+// Hold-to-charge, per physical hand. A press starts a timer; released before kPwChargeHoldMs it was a
+// tap, replayed as a short trigger-down so the ordinary shot fires on release; held past it, the
+// secondary (charging) trigger goes down until release, when the engine discharges the charge.
+static void pwUpdateChargeTriggers(void)
+{
+	const uint32_t now = SDL_GetTicks();
+	for (int h = 0; h < 2; ++h) {
+		const bool down = s_trigger[h] > 0.5f;
+		if (!s_pwHandChargeMode[h]) {
+			s_pwCharging[h] = false; s_pwTapPulseUntilMs[h] = 0; s_pwTriggerPrev[h] = down;
+			continue;
+		}
+		if (down && !s_pwTriggerPrev[h]) { s_pwTriggerDownMs[h] = now; s_pwCharging[h] = false; }
+		if (down && !s_pwCharging[h] && now - s_pwTriggerDownMs[h] >= kPwChargeHoldMs) s_pwCharging[h] = true;
+		if (!down && s_pwTriggerPrev[h]) {
+			if (!s_pwCharging[h]) s_pwTapPulseUntilMs[h] = now + kPwTapPulseMs;
+			s_pwCharging[h] = false;
+		}
+		s_pwTriggerPrev[h] = down;
+	}
+}
+static bool pwHandPrimaryFire(int h)
+{
+	if (!s_pwHandChargeMode[h]) return s_trigger[h] > 0.5f;
+	return SDL_GetTicks() < s_pwTapPulseUntilMs[h];
+}
+static bool pwHandSecondaryFire(int h)
+{
+	return s_pwHandChargeMode[h] && s_pwCharging[h] && s_trigger[h] > 0.5f;
+}
+
+extern "C" void VR_SetTwoHandedGrabInRange(bool inRange)   { s_pwTwoHandedGrabInRange = inRange; }
+extern "C" void VR_SetSupportSecondaryFire(bool enabled)   { s_pwSupportSecondaryFire = enabled; }
+extern "C" void VR_SetHandChargeMode(int hand, bool on)    { if (hand == 0 || hand == 1) s_pwHandChargeMode[hand] = on; }
+
+extern "C" bool VR_GetFire(void)
+{
+	if (s_kbFireLockout) return false;
+	// VR physical weapons: the hand that TOOK the weapon off your body is the hand that fires it,
+	// regardless of which hand is configured dominant. s_fire is the dominance-routed trigger, so
+	// read the holding hand raw instead.
+	if (VR_PhysicalWeaponsActive()) {
+		const int held = VR_GetHeldWeaponHand();
+		if (held >= 0) return pwHandPrimaryFire(held);
+		return false;                      // empty-handed: nothing to fire (fists come later)
+	}
+	return s_fire;
+}
 extern "C" bool VR_GetSecondaryFire(void)
 {
 	if (s_kbFireLockout) return false;   // don't fire on the trigger that just clicked the console OK key
+	// VR physical weapons: the grips are being repurposed for grabbing weapons off the body, so a
+	// grip must not also pull the trigger. Secondary fire is disabled outright for now -- it will
+	// come back on the physical stick clicks, per hand, once the input re-homing lands.
+	if (VR_PhysicalWeaponsActive()) {
+		// Grips never fire. The secondary trigger goes down in exactly three cases:
+		const int primary = vrWeaponHand(s_settings.dominantHand ? 0 : 1);
+		// dual-wielding: the second gun's own trigger
+		if (s_isDualWield) return s_trigger[1 - primary] > 0.5f;
+		if (VR_GetHeldWeaponHand() < 0) return false;
+		// a hold-to-charge weapon (fusion pistol) held past the tap window
+		if (pwHandSecondaryFire(primary)) return true;
+		// a two-handed weapon with a second fire mode (rifle grenades): the SUPPORT hand's trigger
+		if (s_pwSupportSecondaryFire && s_twoHandedLatched && s_trigger[1 - primary] > 0.5f) return true;
+		return false;
+	}
 	const int domIdx = s_settings.dominantHand ? 0 : 1;
 	const int offIdx = 1 - domIdx;
 	// Off-hand trigger always fires secondary. In dual-wield this fires the second weapon;
@@ -1910,8 +2010,14 @@ extern "C" bool VR_ActionHeld(int action)
 		VR_GetMoveStickClick(),   // VR_BTN_MOVE_CLICK
 		VR_GetTurnStickClick(),   // VR_BTN_TURN_CLICK
 	};
-	for (int i = 0; i < VR_BTN_COUNT; ++i)
-		if (s_settings.buttonAction[i] == action && btn[i]) return true;
+	// VR weapon handling: Y and B are the magazine release, whatever they are bound to for normal play.
+	// The normal bindings come straight back when the mode is off.
+	const bool weaponMode = VR_PhysicalWeaponsActive();
+	for (int i = 0; i < VR_BTN_COUNT; ++i) {
+		int mapped = s_settings.buttonAction[i];
+		if (weaponMode && (i == VR_BTN_Y || i == VR_BTN_B)) mapped = VR_ACT_EJECT_MAG;
+		if (mapped == action && btn[i]) return true;
+	}
 	return false;
 }
 
@@ -2578,6 +2684,18 @@ extern "C" void VR_SetIsDualWield(bool dual) { s_isDualWield = dual; }
 extern "C" void VR_SetTwoHandedDisabled(bool disabled) { s_twoHandedDisabled = disabled; }
 extern "C" void VR_SetTwoHandedOffset(float pitch_deg, float yaw_deg) { s_twoHandedPitchDeg = pitch_deg; s_twoHandedYawDeg = yaw_deg; }
 extern "C" void VR_SetOffHandHasWeapon(bool has) { s_offHandHasWeapon = has; }
+extern "C" bool VR_GetRawHandInput(int hand, float* stickX, float* stickY,
+                                   float* trigger, float* grip, bool* stickClick)
+{
+	if (hand < 0 || hand > 1) return false;
+	if (stickX)     *stickX     = s_stickX[hand];
+	if (stickY)     *stickY     = s_stickY[hand];
+	if (trigger)    *trigger    = s_trigger[hand];
+	if (grip)       *grip       = s_grip[hand];
+	if (stickClick) *stickClick = s_stickClick[hand];
+	return true;
+}
+
 extern "C" void VR_SetGripAltFireEnabled(bool en) { s_gripAltFireEnabled = en; }
 
 extern "C" bool VR_IsTwoHandedActive()
@@ -2645,7 +2763,7 @@ static void applyTwoHandedOffset(float fwd[3])
 
 extern "C" bool VR_GetTwoHandedFwdStage(float fwd3[3])
 {
-	const int domHand = s_settings.dominantHand ? 0 : 1;
+	const int domHand = vrWeaponHand(s_settings.dominantHand ? 0 : 1);
 	const int offHand = 1 - domHand;
 
 	float dm[3], of[3];
@@ -2681,6 +2799,15 @@ extern "C" bool VR_GetHeadPosStage(float pos3[3])
 	pos3[0] = s_stageFromHead.position.x;
 	pos3[1] = s_stageFromHead.position.y;
 	pos3[2] = s_stageFromHead.position.z;
+	return true;
+}
+
+// Head forward (-Z of the head pose) in stage/room space. Physical weapons derives the body's facing
+// from this: the render's own yaw is the ROOM's rotation, not where the player is looking.
+extern "C" bool VR_GetHeadFwdStage(float fwd3[3])
+{
+	if (!s_headPoseValid) return false;
+	poseFwd(s_stageFromHead, fwd3);
 	return true;
 }
 
@@ -2721,7 +2848,8 @@ extern "C" bool VR_GetWeaponAim(float dir[3])
 			return true;
 		}
 	}
-	const int hand = s_settings.dominantHand ? 0 : 1;   // dominant hand holds the weapon
+	// The hand holding the weapon: the dominant hand, or under physical weapons whichever hand grabbed it.
+	const int hand = vrWeaponHand(s_settings.dominantHand ? 0 : 1);
 	return aimStageToWorld(hand, dir);
 }
 
@@ -2729,7 +2857,7 @@ extern "C" bool VR_GetWeaponAim(float dir[3])
 // controller, so the secondary weapon fires along the left gun when dual-wielding.
 extern "C" bool VR_GetSecondaryWeaponAim(float dir[3])
 {
-	const int hand = s_settings.dominantHand ? 1 : 0;   // off-hand (opposite of dominant)
+	const int hand = 1 - vrWeaponHand(s_settings.dominantHand ? 0 : 1);   // the other hand
 	return aimStageToWorld(hand, dir);
 }
 
@@ -2759,12 +2887,41 @@ extern "C" bool VR_GetWeaponOriginOffset(float* wx, float* wy, float* wz)
 {
 	// Dominant hand -- matches VR_GetWeaponAim, including while two-handed (the model and the grip
 	// still sit on the dominant controller; only the aim DIRECTION comes from the inter-hand vector).
-	return handOffsetFromHead(s_settings.dominantHand ? 0 : 1, wx, wy, wz);
+	return handOffsetFromHead(vrWeaponHand(s_settings.dominantHand ? 0 : 1), wx, wy, wz);
 }
 
 extern "C" bool VR_GetSecondaryWeaponOriginOffset(float* wx, float* wy, float* wz)
 {
-	return handOffsetFromHead(s_settings.dominantHand ? 1 : 0, wx, wy, wz);
+	return handOffsetFromHead(1 - vrWeaponHand(s_settings.dominantHand ? 0 : 1), wx, wy, wz);
+}
+
+// Physical weapons: the trigger of the hand NOT holding the primary weapon, which fires the weapon
+// in that second hand (weapons.cpp vr_update_offhand_weapon). Read raw -- the action-flag stream has no
+// third trigger, and the mode is single-player only.
+extern "C" bool VR_GetOffhandWeaponFire(void)
+{
+	if (s_kbFireLockout || !VR_PhysicalWeaponsActive()) return false;
+	const int held = VR_GetHeldWeaponHand();
+	if (held < 0) return false;
+	return pwHandPrimaryFire(1 - held);
+}
+
+// A controller's linear velocity in stage/room space, metres per second (the same velocity the punch
+// detector reads). Physical weapons throws released magazines with it and uses it for the mag flick.
+extern "C" bool VR_GetHandVelocityStage(int hand, float v3[3])
+{
+	if (hand < 0 || hand > 1) return false;
+	v3[0] = s_handVel[hand][0]; v3[1] = s_handVel[hand][1]; v3[2] = s_handVel[hand][2];
+	return true;
+}
+
+// Physical weapons: the second hand's weapon charging (hold-to-charge, e.g. a fusion pistol there).
+extern "C" bool VR_GetOffhandWeaponSecondaryFire(void)
+{
+	if (s_kbFireLockout || !VR_PhysicalWeaponsActive()) return false;
+	const int held = VR_GetHeldWeaponHand();
+	if (held < 0) return false;
+	return pwHandSecondaryFire(1 - held);
 }
 
 // Menu (hamburger) button press, consumed once. The main loop turns this into the in-game quit dialog.

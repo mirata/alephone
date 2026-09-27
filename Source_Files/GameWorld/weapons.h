@@ -115,6 +115,12 @@ struct weapon_display_information
 	// both weapon axes, instead of leaking the vertical part into the one-sided reload slide. Leaves the
 	// charged-weapon shake (which does not set this) on its original path.
 	bool fine_flutter;
+
+	// VR physical weapons: set on the items of the weapon held in the player's SECOND hand (see
+	// vr_get_offhand_weapon), with that weapon's type -- the renderer otherwise only knows the
+	// primary weapon's type, from get_player_weapon_mode_and_type.
+	bool vr_offhand;
+	short vr_weapon_type;
 };
 
 // SB: This needs to be accessed in lua_script.cpp
@@ -200,6 +206,29 @@ void check_player_weapons_for_environment_change(void);
 /* Tell me when one of my projectiles hits, and return the weapon_identifier I passed */
 /*  to new_projectile... */
 void player_hit_target(short player_index, short weapon_identifier);
+
+/* VR physical weapons (docs/VR_PHYSICAL_WEAPONS.md): resolve a weapon's idle shape, and its
+   inventory item type, WITHOUT it being the current weapon -- holstered weapons are drawn on the
+   body while a different weapon is in hand. */
+bool get_weapon_idle_shape(short weapon_type, short *collection, short *shape_index,
+	short *low_level_shape_index);
+short get_weapon_item_type(short weapon_type);
+short get_weapon_ordering_index(short weapon_type);
+bool  weapon_is_twofisted(short weapon_type);
+bool  weapon_takes_magazines(short weapon_type);
+bool  weapon_has_distinct_secondary(short weapon_type);
+bool  weapon_charges_on_secondary(short weapon_type);
+bool  vr_eject_magazine(short player_index);
+bool  vr_reseat_loose_magazine(short player_index);
+bool  vr_raise_second_weapon(short player_index);
+
+/* VR physical weapons: a DIFFERENT weapon held in the player's second hand, ticked alongside the
+   primary (current_weapon) and shown in the HUD only as the primary. See weapons.cpp. */
+short vr_get_offhand_weapon(short player_index);
+bool  vr_set_offhand_weapon(short player_index, short weapon_type);
+void  vr_clear_offhand_weapon(short player_index);
+bool  vr_promote_offhand_weapon(short player_index);
+bool  vr_lower_second_weapon(short player_index);
 
 /* for drawing the player */
 void get_player_weapon_mode_and_type(short player_index, short *shape_weapon_type,
