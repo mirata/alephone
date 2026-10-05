@@ -203,6 +203,16 @@ bool LoadModel_MD3(FileSpecifier& Spec, Model3D& Model)
 			Model.TxtrCoords.push_back(stArr[v].t);
 		}
 
+		// Remember this surface's name and its slice of the index list (the triangles stay in surface order
+		// through every later step, so the slice stays valid).
+		{
+			Model3D::MD3Surface ms;
+			ms.name.assign(surf->name, strnlen(surf->name, sizeof(surf->name)));
+			ms.firstIndex = (unsigned)Model.VertIndices.size();
+			ms.numIndices = ntri * 3;
+			Model.MD3Surfaces.push_back(ms);
+		}
+
 		// Append triangle indices (with global offset)
 		for (uint32 t = 0; t < ntri; ++t)
 		{

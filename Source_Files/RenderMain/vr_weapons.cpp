@@ -4,13 +4,18 @@
 #include "map.h"         // game_is_networked
 #include "interface.h"   // get_game_controller / _replay / _demo
 #include "vr_openxr.h"   // VR_Settings
+#include "FileHandler.h"
+#include "ReplacementSounds.h"   // ExternalSoundHeader: decode a sound file
+#include "OpenALManager.h"
 #include <set>
 #include <map>
 #include <string>
 #include <cstdio>
 #include <cstdlib>
 #include <cctype>
+#include <cstring>
 #include <array>
+#include <cmath>
 
 static const std::map<std::string, short> kWeaponNames = {
 	{"fist",             _weapon_fist},
@@ -74,17 +79,19 @@ static const char* kHolsterLabels[VR_HOLSTER_COUNT] = {
 // live tuner exists for.
 static const float kReferenceEyeHeightM = 1.65f;
 static const vr_holster_anchor kDefaultHolsters[VR_HOLSTER_COUNT] = {
-	{  0.22f, -0.56f,  0.10f, 0.16f },   // right_hip    (raised + forward 2026-09-27: -0.68 was out of reach)
-	{ -0.22f, -0.56f,  0.10f, 0.16f },   // left_hip
-	{  0.24f, -0.72f,  0.14f, 0.16f },   // right_thigh  (raised + forward: -0.88 was out of reach)
-	{ -0.24f, -0.72f,  0.14f, 0.16f },   // left_thigh
-	{  0.34f, -0.46f,  0.06f, 0.16f },   // right_chest  (shotguns: outboard of the pistols, 2026-09-27)
-	{ -0.34f, -0.46f,  0.06f, 0.16f },   // left_chest
+	// Hips, thighs, chest pair and pouches: Daniel's in-headset setup (2026-09-28), stored exactly as set
+	// (right-handed reference; mirrored for left-handed players).
+	{  0.183f, -0.776f, -0.235f, 0.16f, {  0.099f, -0.986f, -0.131f }, {  0.083f, -0.123f,  0.989f }, true },  // right_hip
+	{ -0.283f, -0.752f, -0.121f, 0.16f, { -0.166f, -0.953f, -0.253f }, {  0.416f, -0.301f,  0.858f }, true },  // left_hip
+	{  0.155f, -0.497f, -0.066f, 0.16f, { -0.108f, -0.957f, -0.269f }, { -0.828f, -0.063f,  0.557f }, true },  // right_thigh
+	{ -0.205f, -0.486f, -0.038f, 0.16f, { -0.048f, -0.998f, -0.051f }, {  0.929f, -0.063f,  0.365f }, true },  // left_thigh
+	{  0.303f, -0.420f,  0.027f, 0.16f, { -0.076f, -0.997f, -0.023f }, { -0.529f,  0.020f,  0.848f }, true },  // right_chest (shotgun)
+	{ -0.268f, -0.525f,  0.112f, 0.16f, { -0.073f, -0.995f, -0.075f }, {  0.575f, -0.103f,  0.812f }, true },  // left_chest
 	{  0.20f, -0.22f, -0.18f, 0.18f },   // right_back   (reach up and over the shoulder)
 	{ -0.20f, -0.22f, -0.18f, 0.18f },   // left_back
-	{ -0.16f, -0.44f,  0.03f, 0.11f },   // primary_pouch   -- off-hand side of the belly, close in
-	{ -0.16f, -0.57f,  0.02f, 0.11f },   // secondary_pouch -- directly below it
-	{  0.06f, -0.38f,  0.20f, 0.20f },   // front_center (slung across the chest, nudged toward the gun hand)
+	{ -0.097f, -0.420f, 0.018f, 0.11f, { -0.055f, 0.021f, 0.998f }, {  0.058f, 0.998f, -0.018f }, true },  // primary_pouch
+	{  0.082f, -0.470f, 0.003f, 0.11f, {  0.382f, -0.019f, 0.924f }, { -0.099f, 0.993f,  0.061f }, true },  // secondary_pouch
+	{  0.114f, -0.606f,  0.051f, 0.20f, { -0.493f, -0.870f,  0.031f }, { -0.856f,  0.491f,  0.161f }, true },  // front_center (rifle)
 	{  0.00f, -0.30f, -0.20f, 0.20f },   // back_center
 };
 
@@ -96,6 +103,7 @@ static std::map<short, int>              s_weaponHolsterSlot;
 static std::map<short, vr_throw_params>  s_throwParams;
 static std::map<short, short>            s_magItems;
 static std::set<short>                   s_spinReloadWeapons;
+static std::set<short>                   s_directLoadWeapons;
 static vr_holster_anchor                 s_holsters[VR_HOLSTER_COUNT];
 static bool                              s_holstersInit = false;
 
@@ -125,6 +133,13 @@ static void read_attach_attrs(const InfoTree& child, vr_attach_point& pt)
 	child.read_attr("roll",  pt.roll);
 	child.read_attr("radius", pt.radius);
 	child.read_attr("angle_tolerance", pt.angle_tolerance);
+	child.read_attr("travel", pt.travel);
+	child.read_attr("mag_width",  pt.mag_width);
+	child.read_attr("mag_length", pt.mag_length);
+	child.read_attr("mag_depth",  pt.mag_depth);
+	child.read_attr("mag_round",  pt.mag_round);
+	child.read_attr("mag_drum",   pt.mag_drum);
+	child.read_attr("drop_on_release", pt.drop_on_release);
 	pt.defined = true;
 }
 
@@ -147,8 +162,67 @@ static short resolve_weapon_index(const InfoTree& child)
 	return index;
 }
 
+// ---------------- magazine sounds (<vr_mag_sounds>) ------------------------------------------------
+// Key: weapon, well (0/1), event. The file is resolved when the MML is parsed -- a plugin's MML is read with
+// the plugin's folder on the search path, so its paths are relative to the plugin. Decoded on first use.
+struct vr_mag_sound { std::string path; bool loaded = false; Sound sound; };
+static std::map<int, vr_mag_sound> s_magSounds;
+static int vr_mag_sound_key(short weapon, int well, int event) { return (weapon * 2 + (well ? 1 : 0)) * VR_MAG_SOUND_COUNT + event; }
+
+static std::map<short, std::vector<short> > s_partialMags;     // ammo item -> rounds of each part-used mag
+static std::map<short, short>                s_droppedMags;     // map object -> rounds in it
+void VR_PushPartialMag(short ammo_item, short rounds) { s_partialMags[ammo_item].push_back(rounds); }
+bool VR_PopPartialMag(short ammo_item, short* rounds)
+{
+	auto it = s_partialMags.find(ammo_item);
+	if (it == s_partialMags.end() || it->second.empty()) return false;
+	if (rounds) *rounds = it->second.back();
+	it->second.pop_back();
+	return true;
+}
+int  VR_PartialMagCount(short ammo_item)
+{
+	auto it = s_partialMags.find(ammo_item);
+	return it == s_partialMags.end() ? 0 : (int)it->second.size();
+}
+void VR_RegisterDroppedMag(short object_index, short rounds) { s_droppedMags[object_index] = rounds; }
+bool VR_TakeDroppedMag(short object_index, short* rounds)
+{
+	auto it = s_droppedMags.find(object_index);
+	if (it == s_droppedMags.end()) return false;
+	if (rounds) *rounds = it->second;
+	s_droppedMags.erase(it);
+	return true;
+}
+
+bool VR_HasMagSound(short weapon_type, int well, int event)
+{
+	return s_magSounds.count(vr_mag_sound_key(weapon_type, well, event)) > 0;
+}
+
+bool VR_PlayMagSound(short weapon_type, int well, int event)
+{
+	if (!VR_PhysicalWeaponsActive()) return false;
+	auto it = s_magSounds.find(vr_mag_sound_key(weapon_type, well, event));
+	if (it == s_magSounds.end()) return false;
+	vr_mag_sound& ms = it->second;
+	if (!ms.loaded) {
+		ms.loaded = true;   // one try: a file that will not decode stays silent instead of retrying every time
+		FileSpecifier file(ms.path.c_str());
+		ExternalSoundHeader header;
+		ms.sound.data = header.LoadExternal(file);
+		ms.sound.header = header;
+	}
+	if (!ms.sound.data || !OpenALManager::Get()) return false;
+	SoundParameters params;          // 2D, unpanned: full volume under the master volume
+	params.pitch = 1.f;
+	OpenALManager::Get()->PlaySound(ms.sound, params);
+	return true;
+}
+
 void reset_mml_vr_weapons()
 {
+	s_magSounds.clear();
 	s_leftHandedWeapons.clear();
 	s_noTwoHandedWeapons.clear();
 	s_casingFwdOffsets.clear();
@@ -159,11 +233,32 @@ void reset_mml_vr_weapons()
 	s_throwParams.clear();
 	s_magItems.clear();
 	s_spinReloadWeapons.clear();
+	s_directLoadWeapons.clear();
 	reset_holsters();
 }
 
 void parse_mml_vr_weapons(const InfoTree& root)
 {
+	for (const InfoTree& child : root.children_named("vr_mag_sounds"))
+	{
+		const short index = resolve_weapon_index(child);
+		if (index < 0) continue;
+		int well = -1;                                   // absent: both wells
+		child.read_attr("well", well);
+		static const char* kEvents[VR_MAG_SOUND_COUNT] = { "release", "remove", "insert" };
+		for (int e = 0; e < VR_MAG_SOUND_COUNT; ++e) {
+			std::string rel;
+			if (!child.read_attr(kEvents[e], rel) || rel.empty()) continue;
+			FileSpecifier file;
+			if (!file.SetNameWithPath(rel.c_str())) continue;   // not found: leave the game's own sound
+			for (int w = 0; w < 2; ++w) {
+				if (well >= 0 && w != well) continue;
+				vr_mag_sound ms;
+				ms.path = file.GetPath();
+				s_magSounds[vr_mag_sound_key(index, w, e)] = ms;
+			}
+		}
+	}
 	for (const InfoTree& child : root.children_named("left_handed_weapon"))
 	{
 		short index = resolve_weapon_index(child);
@@ -286,6 +381,11 @@ void parse_mml_vr_weapons(const InfoTree& root)
 			a.oriented = true;
 		}
 	}
+	for (const InfoTree& child : root.children_named("vr_direct_load"))
+	{
+		short index = resolve_weapon_index(child);
+		if (index >= 0) s_directLoadWeapons.insert(index);
+	}
 	for (const InfoTree& child : root.children_named("vr_spin_reload"))
 	{
 		short index = resolve_weapon_index(child);
@@ -340,10 +440,57 @@ void VR_GetWeaponTwoHandedOffset(short weapon_type, float* pitch_deg, float* yaw
 
 static const vr_attach_point kUndefinedPoint = { 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.12f, 35.f, false };
 
+// The player's tuned points (magwell tuning mode). Survive ResetAllMMLValues; saved in the preferences.
+static std::map<std::pair<short, int>, vr_attach_point> s_attachOverrides;
+static bool s_magwellTuneMode = false;
+
+void VR_SetMagwellTuneMode(bool on) { s_magwellTuneMode = on; }
+bool VR_GetMagwellTuneMode(void)    { return s_magwellTuneMode && VR_PhysicalWeaponsActive(); }
+
+void VR_SetAttachOverride(short weapon_type, int which, const vr_attach_point& pt)
+{
+	if (which < 0 || which >= VR_ATTACH_COUNT) return;
+	vr_attach_point p = pt;
+	p.defined = true;
+	s_attachOverrides[std::make_pair(weapon_type, which)] = p;
+}
+void VR_ClearAttachOverrides(void) { s_attachOverrides.clear(); }
+std::vector<vr_attach_override> VR_GetAttachOverrides(void)
+{
+	std::vector<vr_attach_override> out;
+	for (const auto& kv : s_attachOverrides) out.push_back({ kv.first.first, kv.first.second, kv.second });
+	return out;
+}
+int VR_AttachTypeFromLabel(const char* label)
+{
+	for (int i = 0; i < VR_ATTACH_COUNT; ++i) if (label && !strcmp(label, kAttachLabels[i])) return i;
+	return -1;
+}
+const char* VR_AttachTypeLabel(int which)
+{
+	return (which >= 0 && which < VR_ATTACH_COUNT) ? kAttachLabels[which] : "?";
+}
+short VR_WeaponFromMMLName(const char* name)
+{
+	if (!name) return NONE;
+	auto it = kWeaponNames.find(name);
+	return it != kWeaponNames.end() ? it->second : (short)NONE;
+}
+
 const vr_attach_point* VR_GetAttachPoint(short weapon_type, int which)
 {
 	if (which < 0 || which >= VR_ATTACH_COUNT) return &kUndefinedPoint;
 	auto it = s_attachPoints.find(weapon_type);
+	auto ov = s_attachOverrides.find(std::make_pair(weapon_type, which));
+	if (ov != s_attachOverrides.end()) {
+		// The magazine's SHAPE is not tuned in-headset: it always comes from the scenario MML.
+		if (it != s_attachPoints.end() && it->second[which].defined) {
+			ov->second.mag_round = it->second[which].mag_round;
+			ov->second.mag_drum  = it->second[which].mag_drum;
+			ov->second.drop_on_release = it->second[which].drop_on_release;
+		}
+		return &ov->second;
+	}
 	if (it == s_attachPoints.end()) return &kUndefinedPoint;
 	return &it->second[which];
 }
@@ -445,6 +592,11 @@ void VR_SetHolsterAnchorFromPlayer(int slot, float eyeHeightM, float bx, float b
 	if (fwd && up) {
 		a->fwd[0] = lefty ? -fwd[0] : fwd[0]; a->fwd[1] = fwd[1]; a->fwd[2] = fwd[2];
 		a->up[0]  = lefty ? -up[0]  : up[0];  a->up[1]  = up[1];  a->up[2]  = up[2];
+		// Stored as unit vectors (the renderer re-squares them anyway, but the saved values should be clean).
+		for (float* v : { a->fwd, a->up }) {
+			const float l = sqrtf(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+			if (l > 1e-4f) { v[0] /= l; v[1] /= l; v[2] /= l; }
+		}
 		a->oriented = true;
 	}
 }
@@ -548,24 +700,45 @@ void  VR_SetHandMagazine(int hand, short item_type)
 void  VR_SetHandMagazineRounds(int hand, short rounds) { if (hand==0||hand==1) s_handMagRounds[hand] = rounds; }
 short VR_GetHandMagazineRounds(int hand)               { return (hand==0||hand==1) ? s_handMagRounds[hand] : (short)-1; }
 
-void  VR_SetLooseMagRounds(short weapon_type, short rounds) { s_looseMagRounds[weapon_type] = rounds; }
-short VR_GetLooseMagRounds(short weapon_type)
+// Keys: weapon, which gun of a two-fisted pair (copy: 0 = trigger 0, 1 = trigger 1; always 0 otherwise),
+// and which well.
+static short vr_mag_key(short weapon_type, int well, int copy)
 {
-	auto it = s_looseMagRounds.find(weapon_type);
+	return short(weapon_type * 4 + (copy ? 2 : 0) + (well ? 1 : 0));
+}
+void  VR_SetLooseMagRounds(short weapon_type, short rounds, int well, int copy)
+{
+	s_looseMagRounds[vr_mag_key(weapon_type, well, copy)] = rounds;
+}
+short VR_GetLooseMagRounds(short weapon_type, int well, int copy)
+{
+	auto it = s_looseMagRounds.find(vr_mag_key(weapon_type, well, copy));
 	return it != s_looseMagRounds.end() ? it->second : (short)0;
 }
 
-int VR_GetMagState(short weapon_type)
+int VR_GetMagState(short weapon_type, int well, int copy)
 {
-	auto it = s_magStates.find(weapon_type);
+	auto it = s_magStates.find(vr_mag_key(weapon_type, well, copy));
 	return it != s_magStates.end() ? it->second : VR_MAG_IN;
 }
-void VR_SetMagState(short weapon_type, int state)
+void VR_SetMagState(short weapon_type, int state, int well, int copy)
 {
-	if (state == VR_MAG_IN) s_magStates.erase(weapon_type);
-	else s_magStates[weapon_type] = state;
+	const short key = vr_mag_key(weapon_type, well, copy);
+	if (state == VR_MAG_IN) s_magStates.erase(key);
+	else s_magStates[key] = state;
 }
-void VR_ResetMagStates(void) { s_magStates.clear(); s_looseMagRounds.clear(); }
+// A two-fisted pair's guns trade trigger slots (see vr_swap_pair_triggers): their magazines go with them.
+void VR_SwapMagCopies(short weapon_type)
+{
+	for (int well = 0; well < 2; ++well) {
+		const int s0 = VR_GetMagState(weapon_type, well, 0), s1 = VR_GetMagState(weapon_type, well, 1);
+		const short r0 = VR_GetLooseMagRounds(weapon_type, well, 0), r1 = VR_GetLooseMagRounds(weapon_type, well, 1);
+		VR_SetMagState(weapon_type, s1, well, 0); VR_SetMagState(weapon_type, s0, well, 1);
+		VR_SetLooseMagRounds(weapon_type, r1, well, 0); VR_SetLooseMagRounds(weapon_type, r0, well, 1);
+	}
+}
+bool VR_WeaponDirectLoad(short weapon_type) { return s_directLoadWeapons.count(weapon_type) > 0; }
+void VR_ResetMagStates(void) { s_magStates.clear(); s_looseMagRounds.clear(); s_droppedMags.clear(); }
 
 const vr_attach_point* VR_GetForegripOrDefault(short weapon_type)
 {
@@ -693,15 +866,20 @@ std::string VR_DumpAttachPointsMML()
 		out += line;
 	}
 
-	for (const auto& kv : s_attachPoints)
+	// Effective points: the MML ones with the player's tuned overrides laid over them.
+	std::map<short, std::array<vr_attach_point, VR_ATTACH_COUNT> > merged = s_attachPoints;
+	for (const auto& ov : s_attachOverrides) {
+		if (!merged.count(ov.first.first)) merged[ov.first.first] = attach_entry(ov.first.first);
+		merged[ov.first.first][ov.first.second] = ov.second;
+	}
+	for (const auto& kv : merged)
 	{
 		const char* wname = VR_WeaponMMLName(kv.first);
 		if (!wname) continue;
 		for (int i = 0; i < VR_ATTACH_COUNT; ++i)
 		{
 			const vr_attach_point& pt = kv.second[i];
-			if (!pt.defined) continue;
-			if (i == VR_ATTACH_MAG_GRIP)
+			if (!pt.defined) continue;			if (i == VR_ATTACH_MAG_GRIP)
 			{
 				snprintf(line, sizeof(line),
 					"  <vr_mag_model name=\"%s\" grip_x=\"%.3f\" grip_y=\"%.3f\" grip_z=\"%.3f\" radius=\"%.3f\"/>\n",
@@ -711,8 +889,11 @@ std::string VR_DumpAttachPointsMML()
 			{
 				snprintf(line, sizeof(line),
 					"  <%s name=\"%s\" x=\"%.3f\" y=\"%.3f\" z=\"%.3f\" "
-					"pitch=\"%.1f\" yaw=\"%.1f\" roll=\"%.1f\" radius=\"%.3f\" angle_tolerance=\"%.1f\"/>\n",
-					kAttachLabels[i], wname, pt.x, pt.y, pt.z, pt.pitch, pt.yaw, pt.roll, pt.radius, pt.angle_tolerance);
+					"pitch=\"%.1f\" yaw=\"%.1f\" roll=\"%.1f\" radius=\"%.3f\" angle_tolerance=\"%.1f\" travel='%.3f' "
+					"mag_width='%.3f' mag_length='%.3f' mag_depth='%.3f' mag_round='%d' mag_drum='%d' drop_on_release='%d'/>\n",
+					kAttachLabels[i], wname, pt.x, pt.y, pt.z, pt.pitch, pt.yaw, pt.roll, pt.radius, pt.angle_tolerance, pt.travel,
+					pt.mag_width, pt.mag_length, pt.mag_depth, pt.mag_round ? 1 : 0, pt.mag_drum ? 1 : 0,
+					pt.drop_on_release ? 1 : 0);
 			}
 			else
 			{

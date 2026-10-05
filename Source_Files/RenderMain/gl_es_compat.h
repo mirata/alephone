@@ -469,6 +469,13 @@ void a1ffDrawMorphMesh(GLuint posVBO, GLuint texVBO, GLuint ibo,
                        int numVerts, int numIndices,
                        int frameA, int frameB, float mix, const float* color4,
                        int mode, float staticTime);
+// The same, drawing only some slices of the index buffer (rangeFirst[i], rangeCount[i] in indices) --
+// one part of a model made of several MD3 surfaces (a magazine, a bullet). nRanges <= 0 draws it all.
+void a1ffDrawMorphMeshRanges(GLuint posVBO, GLuint texVBO, GLuint ibo,
+                             int numVerts, int numIndices,
+                             int frameA, int frameB, float mix, const float* color4,
+                             int mode, float staticTime,
+                             const int* rangeFirst, const int* rangeCount, int nRanges);
 #ifdef __cplusplus
 }
 #endif

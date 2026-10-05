@@ -101,6 +101,24 @@ bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3], bool wo
 // wrx/wup/wfwd are the controller's right/up/forward unit vectors in Marathon world space.
 // Returns false if the model or skin could not be rendered (caller should fall back to quad).
 struct OGL_ModelData;
+// Tint for the NEXT OGL_RenderVRWeaponModel calls (holster ghosting / highlight): colour = shade * mul + add,
+// alpha multiplies the model's opacity (below 1 it also stops writing depth). Reset with (1,1,1,1,0,0,0).
+// A holstered weapon drawn as an outline only (stencil; needs a stencil buffer -- returns false without one,
+// so the caller can fall back). growM = rim width in metres; ref must differ between models drawn together.
+bool OGL_RenderVRWeaponModelOutline(rectangle_definition& RR, short Collection, short CLUT,
+    OGL_ModelData* ModelPtr, float cwx, float cwy, float cwz,
+    const float wrx[3], const float wup[3], const float wfwd[3],
+    int ref, float r, float g, float b, float a, float growM);
+// Parts / placement for the NEXT OGL_RenderVRWeaponModel calls (VR weapon handling): draw only these index
+// slices of the model (an MD3 surface each; n = 0 with a list = nothing), and/or place it with this
+// column-major model->world matrix instead of the gun's own. Clear both after the draw.
+void OGL_SetVRWeaponModelParts(const int* first, const int* count, int n);
+void OGL_ClearVRWeaponModelParts(void);
+void OGL_SetVRWeaponModelMatrix(const float* m16);   // nullptr = the gun's own placement
+// The gun's own model->world matrix as OGL_RenderVRWeaponModel builds it (mirroring + world scale included).
+void OGL_VRWeaponModelMatrix(const rectangle_definition& RR, float cwx, float cwy, float cwz,
+    const float wrx[3], const float wup[3], const float wfwd[3], float out[16]);
+void OGL_SetVRWeaponModelTint(float mulR, float mulG, float mulB, float alpha, float addR, float addG, float addB);
 bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short CLUT,
     OGL_ModelData* ModelPtr,
     float cwx, float cwy, float cwz,

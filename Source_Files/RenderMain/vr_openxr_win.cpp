@@ -64,6 +64,7 @@ extern "C" bool VR_GetHeadFwdStage(float*) { return false; }
 extern "C" bool VR_GetMoveStickClick(void)     { return false; }
 extern "C" bool VR_GetTurnStickClick(void)     { return false; }
 extern "C" bool VR_ActionHeld(int)             { return false; }
+extern "C" bool VR_ActionHeldOnHand(int, int)  { return false; }
 extern "C" void VR_SetMapActive(bool, bool)    {}
 extern "C" unsigned VR_MapLayerFramebuffer(void) { return 0; }
 extern "C" int  VR_MapLayerWidth(void)         { return 0; }
@@ -79,6 +80,7 @@ extern "C" bool VR_EyeResolutionForScale(float, int*, int*) { return false; }
 extern "C" int  VR_EyeWidth(void)       { return 0; }
 extern "C" int  VR_EyeHeight(void)      { return 0; }
 extern "C" unsigned VR_CurrentEyeFramebuffer(void) { return 0; }
+extern "C" bool VR_EyeHasStencil(void) { return false; }
 extern "C" int  VR_CurrentEye(void)     { return 0; }
 extern "C" void VR_MarkWorldFramePresented(void) {}
 extern "C" bool VR_TakeWorldFramePresented(void) { return false; }

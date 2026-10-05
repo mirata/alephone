@@ -218,8 +218,11 @@ bool  weapon_is_twofisted(short weapon_type);
 bool  weapon_takes_magazines(short weapon_type);
 bool  weapon_has_distinct_secondary(short weapon_type);
 bool  weapon_charges_on_secondary(short weapon_type);
-bool  vr_eject_magazine(short player_index);
-bool  vr_reseat_loose_magazine(short player_index);
+bool  vr_eject_magazine(short player_index, int hand);          // the gun in THAT hand only
+bool  vr_reseat_loose_magazine(short player_index, int hand);
+bool  vr_hand_gun(short player_index, int hand, short *weapon_out, short *copy_out);   // copy = which of a pair
+void  vr_swap_pair_triggers(short player_index);                // a pair's two guns trade trigger slots
+short vr_ammo_magazine_size(short ammo_item);                   // rounds in a full magazine of this ammo
 bool  vr_raise_second_weapon(short player_index);
 
 /* VR physical weapons: a DIFFERENT weapon held in the player's second hand, ticked alongside the

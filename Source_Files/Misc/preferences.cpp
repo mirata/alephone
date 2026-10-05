@@ -4898,6 +4898,25 @@ InfoTree vr_preferences_tree()
 		}
 		root.add_child("holster_anchor", h);
 	}
+	// VR weapon handling: magwells / grab spots the player tuned in-headset, and whether tuning mode is on.
+	root.put_attr("magwell_tune_mode", VR_GetMagwellTuneMode());
+	for (const vr_attach_override& ov : VR_GetAttachOverrides())
+	{
+		const char* wname = VR_WeaponMMLName(ov.weapon_type);
+		if (!wname) continue;
+		const vr_attach_point& p = ov.pt;
+		InfoTree t;
+		t.put_attr("weapon", std::string(wname));
+		t.put_attr("point", std::string(VR_AttachTypeLabel(ov.which)));
+		t.put_attr("x", p.x); t.put_attr("y", p.y); t.put_attr("z", p.z);
+		t.put_attr("pitch", p.pitch); t.put_attr("yaw", p.yaw); t.put_attr("roll", p.roll);
+		t.put_attr("radius", p.radius); t.put_attr("angle_tolerance", p.angle_tolerance);
+		t.put_attr("travel", p.travel);
+		t.put_attr("mag_width", p.mag_width); t.put_attr("mag_length", p.mag_length);
+		t.put_attr("mag_depth", p.mag_depth); t.put_attr("mag_round", p.mag_round);
+		t.put_attr("mag_drum", p.mag_drum);
+		root.add_child("attach_override", t);
+	}
 	root.put_attr("punch_speed", vr->punchSpeed);
 	root.put_attr("lean_give_fraction", vr->leanGiveFraction);
 	root.put_attr("button_a", vr->buttonAction[VR_BTN_A]);
@@ -6047,6 +6066,29 @@ void parse_vr_preferences(InfoTree root, std::string version)
 			a.oriented = true;
 		}
 		VR_SetHolsterOverride(slot, a);
+	}
+	{
+		bool tune = false;
+		root.read_attr("magwell_tune_mode", tune);
+		VR_SetMagwellTuneMode(tune);
+	}
+	VR_ClearAttachOverrides();
+	for (const InfoTree& t : root.children_named("attach_override"))
+	{
+		std::string wname, point;
+		if (!t.read_attr("weapon", wname) || !t.read_attr("point", point)) continue;
+		const short weapon = VR_WeaponFromMMLName(wname.c_str());
+		const int which = VR_AttachTypeFromLabel(point.c_str());
+		if (weapon == NONE || which < 0) continue;
+		vr_attach_point p = {};
+		t.read_attr("x", p.x); t.read_attr("y", p.y); t.read_attr("z", p.z);
+		t.read_attr("pitch", p.pitch); t.read_attr("yaw", p.yaw); t.read_attr("roll", p.roll);
+		t.read_attr("radius", p.radius); t.read_attr("angle_tolerance", p.angle_tolerance);
+		t.read_attr("travel", p.travel);
+		t.read_attr("mag_width", p.mag_width); t.read_attr("mag_length", p.mag_length);
+		t.read_attr("mag_depth", p.mag_depth); t.read_attr("mag_round", p.mag_round);
+		t.read_attr("mag_drum", p.mag_drum);
+		VR_SetAttachOverride(weapon, which, p);
 	}
 	root.read_attr("punch_speed", vr->punchSpeed);
 	root.read_attr("lean_give_fraction", vr->leanGiveFraction);

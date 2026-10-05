@@ -98,6 +98,7 @@ void Model3D::Clear()
 	MD3NumFrames = 0;
 	MD3Positions.clear();
 	MD3Normals.clear();
+	MD3Surfaces.clear();
 	FindBoundingBox();
 }
 

@@ -345,6 +345,10 @@ static bool s_hasLayerSettingsExt = false;
 
 // MSAA sample count actually in use (clamped to GL capability; 1 = off).
 static int s_msaaSamples = 1;
+// Eye depth buffers carry a stencil (see the eye FBO build) -- for the holster outlines. Tested OFF on
+// 2026-10-04 while chasing a GPU-bound ~35-40 fps: not the cause (the player had Resolution Scale 2.0 with
+// 4x MSAA), so back on.
+static bool s_eyeStencil = true;
 
 // GL_EXT_multisampled_render_to_texture entry points. GLES3's <gl3.h> declares only the core
 // multisample calls, and core has no way to attach a multisampled render target to a plain
@@ -509,12 +513,17 @@ void buildEyeFramebuffers(int e) {
 		if (s_eye[e].depth) { glDeleteRenderbuffers(1, &s_eye[e].depth); s_eye[e].depth = 0; }
 		
 		const int wantSamples = s_msaaSamples;
+		// Depth + an 8-bit stencil (packed D24S8 -- the same 32 bits per sample as D24 on Adreno). The
+		// stencil is for the holstered-weapon outlines (render.cpp); if the driver refuses it, the FBO
+		// check below falls back to depth only and VR_EyeHasStencil() says so.
+		const GLenum depthFmt = s_eyeStencil ? GL_DEPTH24_STENCIL8 : GL_DEPTH_COMPONENT24;
+		const GLenum depthAtt = s_eyeStencil ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT;
 		glGenRenderbuffers(1, &s_eye[e].depth);
 		glBindRenderbuffer(GL_RENDERBUFFER, s_eye[e].depth);
 		if (wantSamples > 1)
-			s_glRenderbufferStorageMultisampleEXT(GL_RENDERBUFFER, wantSamples, GL_DEPTH_COMPONENT24, s_eyeW, s_eyeH);
+			s_glRenderbufferStorageMultisampleEXT(GL_RENDERBUFFER, wantSamples, depthFmt, s_eyeW, s_eyeH);
 		else
-			glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, s_eyeW, s_eyeH);
+			glRenderbufferStorage(GL_RENDERBUFFER, depthFmt, s_eyeW, s_eyeH);
 		glBindRenderbuffer(GL_RENDERBUFFER, 0);
 
 		s_eye[e].fbos = new GLuint[s_eye[e].imageCount];
@@ -526,18 +535,18 @@ void buildEyeFramebuffers(int e) {
 					GL_TEXTURE_2D, s_eye[e].images[i].image, 0, wantSamples);
 			else
 				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_eye[e].images[i].image, 0);
-			glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, s_eye[e].depth);
+			glFramebufferRenderbuffer(GL_FRAMEBUFFER, depthAtt, GL_RENDERBUFFER, s_eye[e].depth);
 			if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-				A1VR_LOG("eye %d fbo %u incomplete (msaa %d)", e, i, wantSamples);
-				// Fall back to no MSAA rather than render nothing.
-				if (wantSamples > 1) {
-					s_msaaSamples = 1;
-					glBindRenderbuffer(GL_RENDERBUFFER, s_eye[e].depth);
-					glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, s_eyeW, s_eyeH);
-					glBindRenderbuffer(GL_RENDERBUFFER, 0);
-					glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_eye[e].images[i].image, 0);
-					glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, s_eye[e].depth);
-				}
+				A1VR_LOG("eye %d fbo %u incomplete (msaa %d, stencil %d)", e, i, wantSamples, s_eyeStencil ? 1 : 0);
+				// Fall back to plain depth, no MSAA, rather than render nothing.
+				s_eyeStencil = false;
+				s_msaaSamples = 1;
+				glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
+				glBindRenderbuffer(GL_RENDERBUFFER, s_eye[e].depth);
+				glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, s_eyeW, s_eyeH);
+				glBindRenderbuffer(GL_RENDERBUFFER, 0);
+				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_eye[e].images[i].image, 0);
+				glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, s_eye[e].depth);
 			}
 		}
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -1446,8 +1455,13 @@ extern "C" void VR_BeginEye(int eye)
 
 	glViewport(0, 0, s_eyeW, s_eyeH);
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	// The stencil is cleared with the rest: on a tiled GPU an uncleared attachment is reloaded from
+	// memory at the start of every frame.
+	glClearStencil(0);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | (s_eyeStencil ? GL_STENCIL_BUFFER_BIT : 0));
 }
+
+extern "C" bool VR_EyeHasStencil(void) { return s_eyeStencil; }
 
 extern "C" unsigned VR_CurrentEyeFramebuffer(void) { return s_eye[s_curEye].fbos[s_curEyeImageIdx]; }
 
@@ -2017,6 +2031,23 @@ extern "C" bool VR_ActionHeld(int action)
 		int mapped = s_settings.buttonAction[i];
 		if (weaponMode && (i == VR_BTN_Y || i == VR_BTN_B)) mapped = VR_ACT_EJECT_MAG;
 		if (mapped == action && btn[i]) return true;
+	}
+	return false;
+}
+
+// VR_ActionHeld, but only the face buttons on one controller: hand 0 = left (X, Y), 1 = right (A, B).
+// Lets the magazine release act on the gun in the hand whose button was pressed.
+extern "C" bool VR_ActionHeldOnHand(int action, int hand)
+{
+	if (action <= VR_ACT_NONE || action >= VR_ACT_COUNT || hand < 0 || hand > 1) return false;
+	const bool weaponMode = VR_PhysicalWeaponsActive();
+	const int  buttons[2][2] = { { VR_BTN_X, VR_BTN_Y }, { VR_BTN_A, VR_BTN_B } };
+	for (int j = 0; j < 2; ++j) {
+		const int i = buttons[hand][j];
+		const bool down = (i == VR_BTN_A) ? s_action : (i == VR_BTN_B) ? s_bBtn : (i == VR_BTN_X) ? s_xBtn : s_yBtn;
+		int mapped = s_settings.buttonAction[i];
+		if (weaponMode && (i == VR_BTN_Y || i == VR_BTN_B)) mapped = VR_ACT_EJECT_MAG;
+		if (mapped == action && down) return true;
 	}
 	return false;
 }

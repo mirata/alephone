@@ -1382,7 +1382,9 @@ uint32 parse_keymap(void)
 			// While the in-game console keyboard is up, freeze locomotion/turn/fire so the trigger clicks
 			// keys (not fires) and the world-locked keyboard doesn't swing out of view. The console button
 			// (VR_ACT_CONSOLE, shell.cpp) still toggles it closed.
-			const bool kbActive = VR_InGameKeyboardActive();
+			// Magwell tuning mode takes the sticks (and their clicks) for itself the same way: the player
+			// stands still while the held gun's magwells are moved and resized (render.cpp).
+			const bool kbActive = VR_InGameKeyboardActive() || VR_GetMagwellTuneMode();
 			if (!kbActive && game_is_networked)
 			{
 				float analogStrafe = 0;
@@ -1474,6 +1476,21 @@ uint32 parse_keymap(void)
 			// button (or how many) is bound to it. In-game only: build_terminal_action_flags overwrites
 			// `flags` when in a terminal, and recenter is a view op, not a flag.
 			// Suppressed while the console keyboard is up (would cycle weapons / recenter the keyboard).
+			// Magazine release is a HOLD: pressing loosens the mag, and while held it can be pulled or
+			// flicked out; letting go with the mag still there clicks it back home. It stays live in magwell
+			// tuning mode (only the console keyboard stops it), so a tuned well can be tried on the spot.
+			if (!VR_InGameKeyboardActive())
+			{
+				// Per controller: each release acts on the gun in its own hand (a pair of magnums, or two
+				// different weapons, each have their own magazine).
+				static bool prevEject[2] = { false, false };
+				for (int hand = 0; hand < 2; ++hand) {
+					const bool aEject = VR_ActionHeldOnHand(VR_ACT_EJECT_MAG, hand);
+					if (aEject && !prevEject[hand]) vr_eject_magazine(current_player_index, hand);
+					if (!aEject && prevEject[hand]) vr_reseat_loose_magazine(current_player_index, hand);
+					prevEject[hand] = aEject;
+				}
+			}
 			if (!kbActive)
 			{
 				static bool prevNext = false, prevPrev = false, prevMap = false, prevRc = false;
@@ -1482,18 +1499,9 @@ uint32 parse_keymap(void)
 				const bool aPrev = VR_ActionHeld(VR_ACT_PREV_WEAPON);
 				const bool aMap  = VR_ActionHeld(VR_ACT_TOGGLE_MAP);
 				const bool aRc   = VR_ActionHeld(VR_ACT_RECENTER);
-				const bool aEject = VR_ActionHeld(VR_ACT_EJECT_MAG);
 				const bool aInvP = VR_ActionHeld(VR_ACT_INVENTORY_PREV);
 				const bool aInvN = VR_ActionHeld(VR_ACT_INVENTORY_NEXT);
 				// const bool aShot = VR_ActionHeld(VR_ACT_SCREENSHOT); // screenshot promo feature DISABLED
-				{
-					static bool prevEject = false;
-					// Magazine release is a HOLD: pressing loosens the mag, and while held it can be pulled or
-					// flicked out; letting go with the mag still there clicks it back home.
-					if (aEject && !prevEject) vr_eject_magazine(current_player_index);
-					if (!aEject && prevEject) vr_reseat_loose_magazine(current_player_index);
-					prevEject = aEject;
-				}
 				if (aNext && !prevNext) flags |= _cycle_weapons_forward;
 				if (aPrev && !prevPrev) flags |= _cycle_weapons_backward;
 				if (aMap  && !prevMap)  flags |= _toggle_map;

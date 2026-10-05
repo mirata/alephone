@@ -77,6 +77,7 @@ Feb 11, 2001 (Loren Petrich):
 #include "weapons.h" /* needed for process_new_item_for_reloading */
 #include "network_games.h"
 #include "InfoTree.h"
+#include "vr_weapons.h"   // VR weapon handling: part-used magazines dropped and picked up again
 
 // LP addition: for the XML stuff
 #include <string.h>
@@ -563,9 +564,36 @@ short get_item_shape(
 	return definition->base_shape;
 }
 
+/* VR weapon handling: a magazine put back in a pouch -- into the inventory like a pickup (same per-player
+   maximum), but with no pickup sound or flash. */
+bool vr_add_magazine_to_inventory(short player_index, short type)
+{
+	struct item_definition *definition= get_item_definition(type);
+	if (!definition || type < 0 || type >= NUMBER_OF_ITEMS) return false;
+	struct player_data *player= get_player_data(player_index);
+	if (player->items[type] == NONE) player->items[type] = 1;
+	else if (player->items[type] + 1 <= definition->get_maximum_count_per_player(
+	             static_world->environment_flags & _environment_m1_weapons, dynamic_world->game_information.difficulty_level))
+		player->items[type]++;
+	else return false;
+	mark_player_inventory_as_dirty(player_index, type);
+	return true;
+}
+
+/* VR weapon handling: a magazine taken out of the inventory (a part-used one handed out by a pouch). */
+bool vr_take_magazine_from_inventory(short player_index, short type)
+{
+	if (type < 0 || type >= NUMBER_OF_ITEMS) return false;
+	struct player_data *player= get_player_data(player_index);
+	if (player->items[type] == NONE || player->items[type] <= 0) return false;
+	player->items[type]--;
+	mark_player_inventory_as_dirty(player_index, type);
+	return true;
+}
+
 bool try_and_add_player_item(
 	short player_index,
-	short type) 
+	short type)
 {
 	struct item_definition *definition= get_item_definition(type);
 	// LP change: added idiot-proofing
@@ -747,9 +775,13 @@ static bool get_item(
 
 	assert(GET_OBJECT_OWNER(object)==_object_is_item);
 	
-	success= try_and_add_player_item(player_index, object->permutation);
+	const short item_type = object->permutation;
+	success= try_and_add_player_item(player_index, item_type);
 	if (success)
 	{
+		/* VR weapon handling: a part-used magazine somebody dropped goes back into the inventory part-used */
+		short vr_rounds = 0;
+		if (VR_TakeDroppedMag(object_index, &vr_rounds) && vr_rounds >= 0) VR_PushPartialMag(item_type, vr_rounds);
 		/* remove it */
 		remove_map_object(object_index);
 	}

@@ -98,6 +98,8 @@ enum /* item types */
 /* ---------- prototypes/ITEMS.C */
 
 short new_item(struct object_location *location, short item_type);
+bool vr_add_magazine_to_inventory(short player_index, short type);     /* VR weapon handling: pouch put-back */
+bool vr_take_magazine_from_inventory(short player_index, short type);
 
 void calculate_player_item_array(short player_index, short type, short *items, short *counts, short *array_count);
 void get_header_name(char *buffer, short type);

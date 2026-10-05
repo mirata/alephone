@@ -3414,6 +3414,54 @@ static void SetBlend(short _BlendType)
 // VR: render a 3D model attached to the VR controller in Marathon world space.
 // wrx/wup/wfwd are the controller's right/up/forward unit vectors in Marathon world space.
 // Uses the same model-render path as world-sprite replacement (StandardShaders / NormalShader).
+static GLfloat s_vrModelMul[4] = { 1.f, 1.f, 1.f, 1.f };
+static GLfloat s_vrModelAdd[3] = { 0.f, 0.f, 0.f };
+// Outline passes (OGL_RenderVRWeaponModelOutline): grow the model by this much (model units) on every axis
+// about its bounding-box centre, draw it as flat colour, and whether the draw writes depth.
+static GLfloat s_vrModelGrowMU = 0.f;
+// Parts and placement for the NEXT OGL_RenderVRWeaponModel calls (VR weapon handling: a gun drawn without its
+// magazine, a magazine drawn on its own wherever it is). Ranges are slices of the model's index buffer
+// (Model3D::MD3Surfaces); none = the whole model. A placement matrix replaces the gun's own.
+static std::vector<int> s_vrPartFirst, s_vrPartCount;
+static bool    s_vrUseMatrix = false;
+static GLfloat s_vrMatrix[16];
+static bool    s_vrModelFlat = false;
+static bool    s_vrModelDepthWrite = true;
+void OGL_SetVRWeaponModelTint(float mulR, float mulG, float mulB, float alpha, float addR, float addG, float addB)
+{
+    s_vrModelMul[0] = mulR; s_vrModelMul[1] = mulG; s_vrModelMul[2] = mulB; s_vrModelMul[3] = alpha;
+    s_vrModelAdd[0] = addR; s_vrModelAdd[1] = addG; s_vrModelAdd[2] = addB;
+}
+
+void OGL_SetVRWeaponModelParts(const int* first, const int* count, int n)
+{
+    s_vrPartFirst.assign(first, first + (n > 0 ? n : 0));
+    s_vrPartCount.assign(count, count + (n > 0 ? n : 0));
+    // n == 0 with a non-null list means "draw nothing": keep one empty range so the draw is skipped
+    if (n == 0 && first) { s_vrPartFirst.assign(1, 0); s_vrPartCount.assign(1, 0); }
+}
+void OGL_ClearVRWeaponModelParts(void) { s_vrPartFirst.clear(); s_vrPartCount.clear(); }
+void OGL_SetVRWeaponModelMatrix(const float* m16)
+{
+    s_vrUseMatrix = (m16 != nullptr);
+    if (m16) for (int k = 0; k < 16; ++k) s_vrMatrix[k] = m16[k];
+}
+// The gun's own model->world matrix, exactly as OGL_RenderVRWeaponModel builds it.
+void OGL_VRWeaponModelMatrix(const rectangle_definition& RR, float cwx, float cwy, float cwz,
+    const float wrx[3], const float wup[3], const float wfwd[3], float out[16])
+{
+    const float sx = !RR.flip_horizontal ? -1.0f : 1.0f;
+    const float kWpnScaleRefW = 512.0f;
+    const float ws = (VR_IsActive() ? VR_Settings()->worldScaleWUM : kWpnScaleRefW) / kWpnScaleRefW;
+    const float m[16] = {
+        sx*wrx[0]*ws,  sx*wrx[1]*ws,  sx*wrx[2]*ws,  0.0f,
+        wup[0]*ws,     wup[1]*ws,     wup[2]*ws,      0.0f,
+        wfwd[0]*ws,    wfwd[1]*ws,    wfwd[2]*ws,     0.0f,
+        cwx,           cwy,           cwz,            1.0f
+    };
+    for (int k = 0; k < 16; ++k) out[k] = m[k];
+}
+
 bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short CLUT,
     OGL_ModelData* ModelPtr,
     float cwx, float cwy, float cwz,
@@ -3435,6 +3483,10 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
     ShaderData.Color[3]   = 1.0f;
     if (isInfravision)
         FindInfravisionVersionRGBA(Collection, ShaderData.Color);
+    for (int k = 0; k < 3; ++k)
+        ShaderData.Color[k] = std::min(1.0f, ShaderData.Color[k] * s_vrModelMul[k] + s_vrModelAdd[k]);
+    ShaderData.Color[3] *= s_vrModelMul[3];
+    const bool vrGhost = s_vrModelMul[3] < 0.99f || !s_vrModelDepthWrite;
     ShaderData.ModelPtr   = ModelPtr;
     ShaderData.SkinPtr    = SkinPtr;
     ShaderData.Collection = Collection;
@@ -3483,6 +3535,7 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
         wfwd[0]*ws,    wfwd[1]*ws,    wfwd[2]*ws,     0.0f,
         cwx,           cwy,           cwz,            1.0f
     };
+    if (s_vrUseMatrix) for (int k = 0; k < 16; ++k) m[k] = s_vrMatrix[k];
 
     if (ModelPtr->Model.MD3NumFrames > 0)
         ModelPtr->Model.FindPositions_MD3Frame(md3Frame, md3Mix, md3NextFrame);
@@ -3491,10 +3544,27 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_DEPTH_TEST);
-    glDepthMask(GL_TRUE);
+    glDepthMask(vrGhost ? GL_FALSE : GL_TRUE);   // a see-through ghost must not hide what is behind it
 
     glPushMatrix();
     glMultMatrixf(m);
+    if (s_vrModelGrowMU > 0.f) {
+        // Grow about the bounding-box centre by the same amount along each axis (a per-axis scale), so a
+        // long thin gun gets an even rim rather than a fat one at the ends and none along the sides.
+        const GLfloat* lo = ModelPtr->Model.BoundingBox[0];
+        const GLfloat* hi = ModelPtr->Model.BoundingBox[1];
+        GLfloat sc[3], c[3];
+        for (int k = 0; k < 3; ++k) {
+            c[k] = 0.5f * (lo[k] + hi[k]);
+            const GLfloat half = std::max(0.5f * (hi[k] - lo[k]), 1.0f);
+            sc[k] = 1.0f + s_vrModelGrowMU / half;
+        }
+        const GLfloat g[16] = {
+            sc[0], 0, 0, 0,   0, sc[1], 0, 0,   0, 0, sc[2], 0,
+            c[0] * (1 - sc[0]), c[1] * (1 - sc[1]), c[2] * (1 - sc[2]), 1
+        };
+        glMultMatrixf(g);
+    }
 
 #if defined(__ANDROID__)
     if (ModelPtr->VR_PosVBO && ModelPtr->Model.MD3NumFrames > 0) {
@@ -3505,13 +3575,19 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
         int fA = md3Frame < 0 ? 0 : (md3Frame >= nF ? nF - 1 : md3Frame);
         int fB = md3NextFrame < 0 ? fA : (md3NextFrame >= nF ? nF - 1 : md3NextFrame);
         float mixv = (fB != fA) ? md3Mix : 0.0f;
-        int mode = isStatic ? 2 : (isInfravision ? 1 : 0);
+        int mode = s_vrModelFlat ? 3 : (isStatic ? 2 : (isInfravision ? 1 : 0));
         float staticTime = 0.0f;
         if (isStatic) { g_vrStaticTime += 16.7f; staticTime = g_vrStaticTime; }
         NormalShader(nullptr);   // bind skin to unit 0 + set blend, exactly like the CPU path
-        a1ffDrawMorphMesh(ModelPtr->VR_PosVBO, ModelPtr->VR_TexVBO, ModelPtr->VR_IBO,
+        if (vrGhost) {           // an opaque skin turns blending off; a ghost needs it
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
+        a1ffDrawMorphMeshRanges(ModelPtr->VR_PosVBO, ModelPtr->VR_TexVBO, ModelPtr->VR_IBO,
             ModelPtr->VR_NumVerts, ModelPtr->VR_NumIndices, fA, fB, mixv, ShaderData.Color,
-            mode, staticTime);
+            mode, staticTime,
+            s_vrPartFirst.empty() ? nullptr : s_vrPartFirst.data(),
+            s_vrPartCount.empty() ? nullptr : s_vrPartCount.data(), (int)s_vrPartFirst.size());
         glUseProgram(0);
     } else
 #endif
@@ -3527,6 +3603,7 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
     }
 
     glPopMatrix();
+    if (vrGhost) glDepthMask(GL_TRUE);
 
     SetBlend(OGL_BlendType_Crossfade);
 
@@ -3537,6 +3614,52 @@ bool OGL_RenderVRWeaponModel(rectangle_definition& RR, short Collection, short C
         glFrontFace(GL_CW);  // restore from the CCW we set above
     }
 
+    return true;
+}
+
+// VR: a holstered weapon as an OUTLINE only -- see header. Two draws with the stencil: the model marks its
+// visible pixels (no colour, no depth), then the model grown by growM metres is drawn in flat colour
+// everywhere EXCEPT those pixels, leaving just the rim. `ref` must differ between models drawn together.
+bool OGL_RenderVRWeaponModelOutline(rectangle_definition& RR, short Collection, short CLUT,
+    OGL_ModelData* ModelPtr, float cwx, float cwy, float cwz,
+    const float wrx[3], const float wup[3], const float wfwd[3],
+    int ref, float r, float g, float b, float a, float growM)
+{
+    if (!OGL_IsActive() || !ModelPtr) return false;
+    // Only where the target really has a stencil: without one the stencil test passes everywhere and the
+    // second draw would be a solid blob.
+    GLint stencilBits = 0;
+    glGetIntegerv(GL_STENCIL_BITS, &stencilBits);
+    if (stencilBits <= 0) return false;
+
+    glEnable(GL_STENCIL_TEST);
+    glStencilMask(0xFF);
+
+    // 1. mark the model's visible pixels
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    glStencilFunc(GL_ALWAYS, ref, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+    s_vrModelDepthWrite = false;
+    OGL_RenderVRWeaponModel(RR, Collection, CLUT, ModelPtr, cwx, cwy, cwz, wrx, wup, wfwd, false, 0, 0.f, -1);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+    // 2. the grown model in flat colour, outside them
+    glStencilFunc(GL_NOTEQUAL, ref, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+    const float kModelUnitsPerMetre = 512.0f;   // see kWpnScaleRefW in OGL_RenderVRWeaponModel
+    s_vrModelGrowMU = growM * kModelUnitsPerMetre;
+    s_vrModelFlat = true;
+    const GLfloat saveMul[4] = { s_vrModelMul[0], s_vrModelMul[1], s_vrModelMul[2], s_vrModelMul[3] };
+    const GLfloat saveAdd[3] = { s_vrModelAdd[0], s_vrModelAdd[1], s_vrModelAdd[2] };
+    OGL_SetVRWeaponModelTint(0.f, 0.f, 0.f, a, r, g, b);
+    OGL_RenderVRWeaponModel(RR, Collection, CLUT, ModelPtr, cwx, cwy, cwz, wrx, wup, wfwd, false, 0, 0.f, -1);
+    OGL_SetVRWeaponModelTint(saveMul[0], saveMul[1], saveMul[2], saveMul[3], saveAdd[0], saveAdd[1], saveAdd[2]);
+    s_vrModelGrowMU = 0.f;
+    s_vrModelFlat = false;
+    s_vrModelDepthWrite = true;
+
+    glStencilFunc(GL_ALWAYS, 0, 0xFF);
+    glDisable(GL_STENCIL_TEST);
     return true;
 }
 

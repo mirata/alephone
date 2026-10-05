@@ -691,6 +691,8 @@ static int s_vrWeaponMenuChoice = 0;
 static void vr_weapon_menu_setup(void* arg) { s_vrWeaponMenuChoice = 1; dialog_ok(arg); }
 static void vr_weapon_menu_quit(void* arg)  { s_vrWeaponMenuChoice = 2; dialog_ok(arg); }
 static void vr_weapon_menu_reset(void* arg) { s_vrWeaponMenuChoice = 3; dialog_ok(arg); }
+static void vr_weapon_menu_tune(void* arg)  { s_vrWeaponMenuChoice = 4; dialog_ok(arg); }
+static void vr_weapon_menu_tune_reset(void* arg) { s_vrWeaponMenuChoice = 5; dialog_ok(arg); }
 static int vr_weapon_mode_menu(bool setupOn)
 {
 	s_vrWeaponMenuChoice = 0;
@@ -701,6 +703,9 @@ static int vr_weapon_mode_menu(bool setupOn)
 	w_button *setup = new w_button(setupOn ? "EXIT HOLSTER SETUP" : "HOLSTER & POUCH SETUP", vr_weapon_menu_setup, &d);
 	placer->dual_add(setup, d);
 	placer->dual_add(new w_button("RESET HOLSTERS TO DEFAULT", vr_weapon_menu_reset, &d), d);
+	placer->dual_add(new w_button(VR_GetMagwellTuneMode() ? "EXIT MAGWELL TUNING" : "MAGWELL TUNING",
+	                              vr_weapon_menu_tune, &d), d);
+	placer->dual_add(new w_button("RESET MAGWELLS TO DEFAULT", vr_weapon_menu_tune_reset, &d), d);
 	placer->dual_add(new w_button("QUIT GAME", vr_weapon_menu_quit, &d), d);
 	placer->dual_add(new w_button("CANCEL", dialog_cancel, &d), d);
 	d.activate_widget(setup);
@@ -894,7 +899,14 @@ void main_event_loop(void)
 					} else if (choice == 3) {
 						VR_ClearHolsterOverrides();             // back to the built-in defaults
 						write_preferences();
+					} else if (choice == 4) {
+						VR_SetMagwellTuneMode(!VR_GetMagwellTuneMode());   // the mode itself persists
+						write_preferences();
+					} else if (choice == 5) {
+						VR_ClearAttachOverrides();              // back to the scenario's MML
+						write_preferences();
 					} else if (choice == 2) {
+						if (VR_GetMagwellTuneMode()) write_preferences();   // keep what was tuned
 						do_menu_item_command(mGame, iQuitGame, false);
 					}
 				} else {

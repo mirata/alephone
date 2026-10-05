@@ -301,6 +301,7 @@ bool VR_GetTurnStickClick(void);       // press of the turn thumbstick -- the OP
 // buttons bound to the same action. The in-game input builder uses this; edge detection for one-shot
 // actions (weapon cycle / map / recenter) is done tick-side by the caller.
 bool VR_ActionHeld(int action);
+bool VR_ActionHeldOnHand(int action, int hand);   // only that controller's face buttons (0 = left X/Y, 1 = right A/B)
 
 // Raw PHYSICAL per-hand controller state (hand: 0 = left, 1 = right), bypassing the handedness /
 // switchSticks routing that VR_GetMove/VR_GetTurn/VR_GetFire apply. Physical weapons needs this
@@ -378,6 +379,7 @@ void VR_SubmitFrame(void);
 bool VR_EyeResolutionForScale(float scale, int* w, int* h);
 int  VR_EyeWidth(void);
 int  VR_EyeHeight(void);
+bool VR_EyeHasStencil(void);   // the eye buffers carry an 8-bit stencil (holster outlines)
 unsigned VR_CurrentEyeFramebuffer(void);   // GL FBO id bound for the current eye (for the blit target)
 int  VR_CurrentEye(void);                  // eye index of the most recent VR_BeginEye (for SetView)
 

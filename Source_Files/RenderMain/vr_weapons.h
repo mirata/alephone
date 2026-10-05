@@ -2,6 +2,7 @@
 
 #include "InfoTree.h"
 #include <string>
+#include <vector>
 
 // MML tag: <vr_weapons> — VR-only weapon customizations.
 // Contains <left_handed_weapon>, <vr_casing>, and <vr_spread> entries.
@@ -131,6 +132,21 @@ struct vr_attach_point
 	float radius;               // grab/seat proximity radius, metres
 	float angle_tolerance;      // degrees of misalignment tolerated when seating (magwell)
 	bool  defined;              // false = not authored in MML; callers must fall back
+	float travel;               // magwells: metres from the ENTRY point to the seated point. A magazine
+	                            // slides along that line going in or out, free only beyond the entry.
+	                            // 0 = it seats the moment it reaches the well.
+	// Magwells: the magazine that goes in here, full size in metres (0 = the default 0.035 x 0.13 x 0.06).
+	// width = across the gun, length = along the insertion line, depth = fore-aft. mag_round = a cylinder
+	// (grenade, canister) of diameter `width`. Pitch/yaw above tilt the insertion line (a raked pistol grip);
+	// roll turns the magazine about it.
+	// mag_drum = a drum: a cylinder whose round faces look down the barrel (axis = the gun's forward),
+	// `depth` thick fore-aft, `length` tall along the insertion line and `width` across (equal = circular).
+	float mag_width, mag_length, mag_depth;
+	bool  mag_round;
+	bool  mag_drum;
+	// Magwells: pressing the magazine release makes the magazine DROP a few centimetres out of the well
+	// (pistol-style). Off = it stays seated until pulled or flicked out.
+	bool  drop_on_release;
 };
 
 // Body-relative holster anchor. Offsets are METRES FROM THE HEAD in body space
@@ -253,8 +269,10 @@ bool VR_WeaponUsesSpinReload(short weapon_type);
 // partial magazines) and it hangs in the magwell until pulled out by the free hand or shaken free with a
 // hard flick. A new magazine only seats once the old one is OUT. Weapons start with their mag IN.
 enum { VR_MAG_IN, VR_MAG_LOOSE, VR_MAG_OUT };
-int  VR_GetMagState(short weapon_type);
-void VR_SetMagState(short weapon_type, int state);
+// well: 0 = the main magwell, 1 = the second one (the rifle's grenade launcher).
+int  VR_GetMagState(short weapon_type, int well = 0, int copy = 0);   // copy: which gun of a two-fisted pair
+void VR_SetMagState(short weapon_type, int state, int well = 0, int copy = 0);
+void VR_SwapMagCopies(short weapon_type);    // a pair's two guns traded trigger slots
 void VR_ResetMagStates(void);
 
 // Rounds in the magazine a hand is holding: -1 = a fresh one from a pouch (full), otherwise the count
@@ -263,8 +281,12 @@ void  VR_SetHandMagazineRounds(int hand, short rounds);
 short VR_GetHandMagazineRounds(int hand);
 
 // Rounds held by a weapon's LOOSENED magazine -- stored on eject, so pulling the mag keeps them.
-void  VR_SetLooseMagRounds(short weapon_type, short rounds);
-short VR_GetLooseMagRounds(short weapon_type);
+void  VR_SetLooseMagRounds(short weapon_type, short rounds, int well = 0, int copy = 0);
+short VR_GetLooseMagRounds(short weapon_type, int well = 0, int copy = 0);
+
+// Direct-load weapons (<vr_direct_load name=.../>, the rocket launcher): nothing comes out -- a new load
+// goes straight in once it is empty, and the magazine release does nothing.
+bool VR_WeaponDirectLoad(short weapon_type);
 
 // The two-handed grab spot: the authored <vr_foregrip>, or a default just forward of and below the
 // grip (a support hand cupping it) until one is placed. Two-handing only engages with the support
@@ -287,6 +309,37 @@ bool VR_GetHolsterOverride(int slot, vr_holster_anchor* out);
 void VR_SetHolsterOverride(int slot, const vr_holster_anchor& a);
 void VR_ClearHolsterOverrides(void);          // "reset holsters to default"
 int  VR_HolsterSlotFromName(const char* name);  // MML/prefs slot name -> slot, VR_HOLSTER_NONE if unknown
+
+// Magazine sounds, per weapon and well (<vr_mag_sounds name=... [well=0|1] release= remove= insert=> in a
+// plugin's MML; file paths relative to that plugin). Weapon handling mode only. The insert sound REPLACES
+// the weapon's own reload sound when one is configured.
+enum { VR_MAG_SOUND_RELEASE, VR_MAG_SOUND_REMOVE, VR_MAG_SOUND_INSERT, VR_MAG_SOUND_COUNT };
+bool VR_HasMagSound(short weapon_type, int well, int event);
+
+// Part-used magazines. The engine counts ammo in whole magazines (items[ammo]); these remember how many
+// rounds the part-used ones among them hold. A magazine dropped in the world (an ammo pickup we spawned)
+// carries its rounds until picked up again.
+void  VR_PushPartialMag(short ammo_item, short rounds);
+bool  VR_PopPartialMag(short ammo_item, short* rounds);        // false: none
+int   VR_PartialMagCount(short ammo_item);
+void  VR_RegisterDroppedMag(short object_index, short rounds);
+bool  VR_TakeDroppedMag(short object_index, short* rounds);    // false: not one of ours
+bool VR_PlayMagSound(short weapon_type, int well, int event);   // false if none configured / no audio
+
+// MAGWELL TUNING mode (entered from the in-game menu, persisted): the sticks move and resize the held
+// gun's magwells and two-handed grab spot instead of moving the player.
+void VR_SetMagwellTuneMode(bool on);
+bool VR_GetMagwellTuneMode(void);          // false unless physical weapons are active
+
+// The player's own tuned attach points (magwells, grab spots), kept apart from the MML defaults exactly
+// like the holster overrides: they win over MML in VR_GetAttachPoint and are saved in the preferences.
+void VR_SetAttachOverride(short weapon_type, int which, const vr_attach_point& pt);
+void VR_ClearAttachOverrides(void);        // "reset magwells to default"
+struct vr_attach_override { short weapon_type; int which; vr_attach_point pt; };
+std::vector<vr_attach_override> VR_GetAttachOverrides(void);
+int  VR_AttachTypeFromLabel(const char* label);   // "vr_magwell" etc -> VR_ATTACH_*, -1 if unknown
+const char* VR_AttachTypeLabel(int which);
+short VR_WeaponFromMMLName(const char* name);     // NONE if unknown
 
 // Serialise the CURRENT in-memory attach-point / holster-anchor state back out as a <vr_weapons>
 // MML block, so the live tuner can dump tuned values straight into vr_weapons.mml.

@@ -90,6 +90,285 @@ cycling had never been disabled in this mode.
 - Give-all-weapons cheat RE-ENABLED for setup (player.cpp) -- re-comment before release.
 - Grenade pouch was unreachable (clashed with the pistols, too far): moved closer/central 2026-09-27,
   final placement via setup mode.
+- 2026-09-27 batch -- all built and deployed (Infinity data), none yet felt in-headset:
+  - [x] Shotgun flick straight after a shot: one pull empties it, the flick was landing during the
+        firing/recovery state and being dropped. Now held until the gun is ready (up to ~0.6 s).
+  - [x] Daniel's setup baked in as defaults (thighs, chest pair, front centre), pairs averaged as mirror
+        images, hang vectors squared up. HE MUST PRESS 'RESET HOLSTERS TO DEFAULT' to see them -- his saved
+        overrides (the pre-symmetry versions) still take precedence until cleared.
+  - [x] AR grenades: holding mag release loosens BOTH wells; grenades are pulled out of the second well
+        (orange ring + dangling grenade), never flicked. A new grenade mag needs the old one out.
+  - [x] AR steadying grab spot moved forward and enlarged (z 0.32, radius 0.18).
+  - [x] Explicit editable entries in every scenario's vr_weapons.mml: magwells for all magazine weapons,
+        the rifle's grenade well, foregrips for the two-handed guns.
+  - [x] Rocket launcher: <vr_direct_load> -- no removal, reloads straight in once empty.
+  - [x] Magazine SLIDE PATH: <vr_magwell ... travel=> -- a magazine engages at the entry point and slides
+        on the line to the seat as you push (pulled back / yanked off the line it comes away); a loose one
+        is slid OUT along the same line and is free only past the entry. Seeded on pistols, SMG, rifle.
+  - [x] TEMPORARY: magazines drawn as an oriented wireframe box (3.5 x 13 x 6 cm) instead of the sprite,
+        to make positioning readable -- cyan in hand, green on a well's path, orange loose, grey dropped;
+        drawn through the gun. Switch: s_vrMagAsBox in render.cpp. Pouches keep their sprites. Box size is
+        one global default for now (per-weapon size would go on <vr_mag_model>).
+  - [ ] 2026-09-28 "slide ammo does not work" -> reworked, awaiting device test:
+        - the mag is held by its base, sticking UP out of the fist (top 10 cm above the grip; kMagInFistM).
+        - contact is measured from the mag's TOP to the mouth (path entry, else seat), not the hand; the mag
+          axis must be within max(angle_tolerance, 55) deg of the insertion line, then it snaps into line.
+          (Old bug: the hand position drove capture and t, so the drawn mag and the logic disagreed.)
+        - on the path the slide follows the hand's motion ALONG the line relative to where it engaged
+          (no jump); comes away if pulled 40% of travel back past the mouth or dragged 10 cm off the line.
+        - releasing grip while green (touching) or while on the path: the well takes it and the mag runs
+          home in 0.10 s (kAutoSeatSeconds), then loads. Releasing anywhere else still throws it.
+        - Daniel: "much better".
+  - [ ] 2026-09-28 per-well magazine size/shape/angle -> done, awaiting device test:
+        - <vr_magwell>/<vr_magwell2> take mag_width / mag_length / mag_depth (m) and mag_round="1" (cylinder,
+          diameter = width). The box is drawn squared to the (tilted) insertion line and turned by roll.
+          Hand/dropped mags look their size up from the held gun's well for that ammo, else the first weapon
+          that uses it. Contact (mag top) uses the well's length.
+        - Seeded: pistol 2.5x12x3.5 pitch -15 (raked grip; NEGATIVE pitch = leans forward going in), fusion
+          3x8x5 pitch -15, AR 4x20x9, AR grenades round 5.5 dia x 7, SMG 3x16x5, flamethrower round 7x14,
+          rocket round 8x25. All guesses.
+        - Loose mags are grabbed at the middle of their body (reach >= 0.6 x length).
+  - [ ] 2026-09-28 bug: pulling a mag out, moving the hand away before it cleared the slide made it "snap
+        away" -> fixed, awaiting test. A mag can no longer skip the slide: coming out it runs along the
+        path no faster than kSlideOutSeconds (0.12 s full travel) whatever the hand does, then swings into
+        the hand over kHandoffSeconds (0.15 s, stored hand-relative) instead of jumping. Going in, once
+        any of it is inside (t > 0.02) pulling back turns into a removal (slides out); only at the mouth
+        can it be pulled away / dragged off the line (also with the swing).
+  - [ ] 2026-09-28 MAGWELL TUNING mode -> built, awaiting device test. Menu: MAGWELL TUNING / EXIT MAGWELL
+        TUNING and RESET MAGWELLS TO DEFAULT. The mode persists (pref magwell_tune_mode). While on:
+        locomotion/turn/fire/mapped actions frozen (vbl.cpp kbActive); mag release still works so a tuned
+        well can be tried at once. Held gun (primary hand) only.
+        - left stick X = forward/back along the gun (right = toward muzzle), Y = up/down; left click = next
+          spot (main magwell -> second well if the weapon has distinct secondary ammo -> two-handed grab
+          spot unless no_two_handed). Spin-reload weapons have no wells.
+        - right stick pages (right click cycles): SIZE (X width, Y length), DEPTH+ANGLE (Y depth, X pitch),
+          PATH+REACH (Y slide travel, X capture radius). Grab spot: Y reach radius, X sideways.
+        - rates 6 cm/s, 30 deg/s at full stick, squared with a 0.15 deadzone. HUD line via screen_printf.
+        - drawn: seated mag box + path + capture ring per well, sphere for the grab spot; selected =
+          pulsing magenta, others dim.
+        - edits = player overrides (s_attachOverrides, win in VR_GetAttachPoint, survive level loads),
+          saved as <attach_override> in prefs 1.5 s after the last change, dumped as MML to the log
+          (VRATTACH) on leaving the mode -> bake into vr_weapons.mml like the holsters.
+  - [ ] 2026-09-28 drum magazines -> built, awaiting test: new mag_drum="1" = a cylinder lying ACROSS the
+        gun (axis = gun right), mag_width thick, mag_length tall x mag_depth fore-aft. Rifle grenades
+        5 x 9 x 9 cm drum, SMG 4.5 x 13 x 13 cm drum. mag_round (upright) stays for flamethrower/rocket.
+        Shape always comes from the MML (a tuning override never changes it).
+  - [ ] 2026-09-28 round (awaiting test):
+        - drum turned to FACE FRONT: axis = gun forward; mag_depth = thickness, mag_length tall, mag_width
+          across. Grenades 9 x 9 x 5 cm, SMG 13 x 13 x 4.5 cm.
+        - frame-rate: tuner no longer prints while a stick moves (prints once on release / selection) and
+          no longer autosaves mid-tune (saves on leaving the mode or quitting from the menu). VRRELOAD
+          diagnostic logs gated off (kVRReloadDiag = false in weapons.cpp + render.cpp).
+        - mag release: the loosened mag slides from the seat down to its loose position over 90 ms
+          (not if it was left loose by a hand letting go mid-pull: s_vrLooseNoDrop).
+        - holster <-> hand swing (render only, kWeaponSwingMs 110 ms smoothstep): each end snapshots where it
+          last drew each weapon per frame (s_holsterSnap[slot], s_handSnap[hand][weapon]); a weapon newly
+          appearing at one end blends in from the other end's snapshot if that end dropped it within 3
+          frames. Live pose (magwells/aim) is untouched. Known: a left-hand model is drawn mirrored, the
+          holstered one is not, so the mirror still pops at the swap.
+  - [ ] 2026-09-28 holstered weapons mirrored like the hand that holds them (hand 0 = left mirrored
+        unless <left_handed_weapon>, XOR the shape's X-mirror bit). Hand = the one that last put it back
+        (s_holsterLastHand), else the body side it hangs on. Cross-draw with the other hand still pops.
+  - [ ] 2026-09-28 holster visual overload -> ghosts + reveal + highlight, awaiting device test
+        (Daniel picked options 1+2+3 + ghost style):
+        - every holstered weapon is a see-through cool-tinted GHOST (alpha kHolsterGhostAlpha 0.22, no
+          depth write) until revealed; solid when revealed. Setup mode: all solid.
+        - reveal by reach: any hand fades a slot in from 15 cm outside its grab radius to solid at it
+          (same distance rule as grabbing, incl. over-the-shoulder back slots).
+        - reveal by looking down: head pitch 25 -> 35 deg down fades everything in.
+        - highlight: the slot a FREE hand's grip would draw (shared vr_nearest_holster_slot, minus nearer
+          steadying grip / pouch, as the grab) glows cyan and is solid; entering it = 12 ms tick on that hand.
+        - swinging weapons draw solid. Fade smoothing ~70 ms. Tint via new OGL_SetVRWeaponModelTint
+          (colour = shade*mul + add, alpha); ghost forces GL blend on in the morph path.
+        - Sprite fallback (weapons without a model) is not ghosted.
+  - [x] 2026-09-28 Daniel's tuned magwells / grab spots / mag sizes baked into Marathon 2 + Infinity
+        vr_weapons.mml (from the VRATTACH dump): pistol, fusion, AR main + grenade drum, rocket (magwell
+        pitch 80 + foregrip), SMG drum. Pouch positions (+ orientation) baked into kDefaultHolsters (shared,
+        so M1 gets them too). M1's weapons still to tune (Daniel will do it).
+  - [ ] 2026-09-28 magazine approach assist, awaiting test (render only): approaching a well that will take
+        it, the in-hand mag eases toward the insertion line + the well's orientation from 2.2x the capture
+        radius, up to 85% at 0.6x (vr_mag_assist); on engaging it settles from its last drawn pose onto
+        the path over kEngageSettleMs 80 ms. Back-to-front holds aim for the nearer half-turn.
+  - [ ] 2026-09-28 DUAL-WIELD RELOAD fixed, awaiting test. Root causes: (a) a magnum pair is one engine
+        weapon, trigger 0 = primary hand, trigger 1 = other; letting go ALWAYS lowers trigger 1, so when the
+        primary hand let go the gun left in hand took the other gun's rounds, and one gun of the pair could
+        never be reloaded; (b) magazine state was keyed per weapon TYPE (one state for both magnums);
+        (c) eject emptied every trigger of that ammo (both magnums, incl. the holstered one); (d) wells,
+        pouches, flick-out and loose mags only ever looked at the PRIMARY hand's gun.
+        Fix: vr_swap_pair_triggers (trigger data + mag copies trade places when the primary hand lets go of
+        a pair); mag state/loose rounds keyed (weapon, copy, well), copy = the pair gun's trigger;
+        vr_hand_gun(hand) = the gun in a hand; eject/reseat per CONTROLLER (VR_ActionHeldOnHand: X/Y left,
+        A/B right; empty hand's button falls back to the other hand's gun) and only that gun's trigger;
+        wells/pouches/assist/ring = the gun in the OTHER hand, whichever it is; magazine reload honours the
+        trigger mask (a pair's mag loads only its own gun); flick-out + loose mags per gun hand.
+  - [ ] 2026-09-28 holster OUTLINES (Daniel: ghosts were always opaque; asked for outline-until-hover).
+        Ghost failures: the reach reveal used the over-the-shoulder rule (back weapons lit whenever a hand
+        was raised) and resting hands sit at the hips; non-MD3 models may ignore alpha. Now: eye depth
+        buffers are D24S8 (fallback to D24 if the FBO is incomplete; VR_EyeHasStencil), stencil cleared
+        with the eye. Holstered weapon = outline only (OGL_RenderVRWeaponModelOutline: stencil-mark the
+        model, then the model grown kOutlineWidthM 4 mm per axis about its bbox centre in flat colour
+        (morph shader mode 3) where not marked). Outline brightness by plain distance (full at radius,
+        zero at radius + 20 cm). SOLID only on hover (+ glow + tick), look-down, swing, setup. No stencil =>
+        faint ghost fallback. Cost: 2 extra draws per holstered weapon.
+  - [ ] 2026-09-28 round, awaiting test:
+        - outlines also when looking down (look-down now only brightens outlines); the hovered weapon is
+          fully opaque (no tint) with a wider brighter rim (kHoverOutlineWidthM 7 mm).
+        - release "flashing": after letting go the engine keeps the gun as current weapon until the fist
+          switch lands, so it drew in the hand AND on the holster and the swing never started. The hand
+          now only draws a gun vr_hand_gun says it holds.
+        - rifle mag (2 cm slide): mouth pull-off is now absolute (max(40% travel, 4 cm), was 8 mm); a
+          removal pushed back in now seats at t >= 0.97 (jitter used to turn an insertion into a removal
+          capped part-way, stuck); must-clear after pulling out is 1.1x radius (was 1.6x); approach angle
+          floor 70 deg (was 55).
+  - [ ] 2026-09-28: holstered weapons are now INVISIBLE unless hovered (solid + thin 3 mm bright rim) or
+        looked down at (outlines only, 4 mm). Proximity no longer shows anything. Hips (pistols) moved in
+        3 cm and back 2 cm (x 0.19, z 0.08); chest pair (shotguns) in 3 cm and back 2 cm (x 0.335, z -0.001).
+        Needs RESET HOLSTERS TO DEFAULT if those slots were ever moved in setup.
+  - [ ] 2026-09-28: hover snaps to full opacity (no fading anywhere); look-down outlines fainter + thinner
+        (alpha 0.4, 2.5 mm). HOLSTER SETUP now shows each weapon as its outline (white + wider while being
+        moved) instead of a debug box, and each pouch as a magazine-shaped box turned the way the pouch is
+        set (white while moved; amber primary, red secondary). Slots with no weapon still get the old box.
+        Pistol hips further in/back: x 0.175, z 0.06.
+  - [x] 2026-09-28 Daniel's new holster setup baked into kDefaultHolsters EXACTLY as set (from the
+        VRATTACH "holster setup" dump): hips, thighs, chest pair, both pouches, all oriented. Pairs are no
+        longer mirror-symmetric (his choice this time). Backs + front centre unchanged.
+  - [ ] 2026-09-28 dropped / flicked / thrown mags now tumble (render only): each has an orientation and a
+        spin -- flick-out = the wrist roll about the barrel + end-over-end tumble; throw/drop from the hand
+        = end-over-end about the horizontal axis across the throw (2 + 7 rad/s per m/s) + a little random
+        wobble. Integrated per frame (handedness kept, room->world is a reflection); on touching the floor
+        it lands flat on its broad side, long axis level. vr_spawn_falling_mag now takes top + sides + spin.
+  - NOTE: deploy.ps1 installs the old APK even when the native build FAILS -- always check the build line.
+  - [ ] 2026-09-28 round, awaiting test:
+        - flick-out harder: out-of-well speed 2.4 m/s, wrist roll 900 deg/s (was 1.1 / 450; then 1.35 / 540, 1.7 / 680 -- both still too easy).
+        - SHAKE: any forceful shake now ejects a loose main mag -- the gun hand's acceleration (velocity
+          sampled ~30 ms apart): |a . ins| > 35 m/s^2 (jolt along the magazine, e.g. raise then snap down and
+          stop) or |a| > 55 m/s^2 (any violent jolt). Speed and roll checks kept alongside.
+        - new <vr_magwell drop_on_release="1">: only those magazines drop 4 cm out when the release is
+          pressed; all others stay seated (loose, but where they are) until pulled or flicked out. Set for
+          pistol + plasma_pistol in all three scenarios, and the M1 assault_rifle main well. Taken from the
+          MML even over a tuning override (like the shape flags).
+        - a removal only re-seats on a push-in after it has come at least 15% out (s_slideMinT), since a
+          non-dropping mag starts its pull-out fully seated.
+        - mag tumble toned down: toss spin 1 + 3 rad/s per m/s (was 2 + 7), wobble ~40%, only 40% of the
+          wrist roll carries into a flicked mag, and air drag on the spin (-150%/s).
+  - [x] 2026-09-28 Daniel's Marathon 1 magwell tuning baked into Marathon/Scripts/vr_weapons.mml (pistol,
+        fusion, rifle main pitch -20.9 travel 11 cm drop_on_release, rifle grenade drum 20 cm x 17.6 cm).
+        Shotgun + SMG entries removed from M1 (it has neither); SMG entries removed from M2.
+  - [ ] 2026-09-28 drums/canisters, awaiting test: drum = mag_drum on the well (M1 + M2 rifle grenades,
+        Infinity SMG + grenades). Round faces are always round: vr_mag_dims_of forces drum width = length
+        (their average) and canister depth = width. Tuner SIZE page: drum -> Y = diameter (both), X =
+        thickness; canister -> X = diameter, Y = length. Drum in the hand: first tried a quarter turn about
+        the insertion axis (WRONG axis, Daniel); then a quarter turn about the hand's RIGHT with its top
+        along +forward (right axis, but upside down); now the other way -- top along the hand's BACKWARD
+        (-forward), face toward the hand's up -- still wrong. FINAL: MEASURED. VRMAGPOSE diagnostic logged the
+        drum's axes in the hand frame while Daniel pulled the M1 grenade drum out with his natural grip
+        (right hand, 2 pulls, consistent). Averaged + squared up: top (-0.884,0.121,0.462), right
+        (-0.362,0.478,-0.800), face (0.320,0.870,0.375), top offset (-5.9,0.9,12.3) cm for a 20 cm drum
+        (scaled by drum size). Left hand = x mirrored. kDrumTop/Right/Face/TopOffM in render.cpp; the
+        insertion axis in the hand (contact test, angle check) uses the same hold. VRMAGPOSE logging still
+        ON (kVRMagPoseDiag) -- turn off once confirmed.
+  - [x] 2026-09-28 M1 fists were mirrored wrong: the fist flip honoured M1's <left_handed_weapon
+        name="fist">, which describes the stock 2D sprite. Same fist.md3 everywhere, so the flip is now
+        simply (hand == 1) in all scenarios.
+  - [x] 2026-09-28 holster defaults are now PER SCENARIO where they differ: Daniel's Infinity setup (hips +
+        thighs changed) written as <vr_holster_anchor> in the Infinity and M2 vr_weapons.mml (M2 without
+        left_thigh, the SMG slot). kDefaultHolsters (C++) = the M1 layout; unlisted slots fall back to it.
+        NOTE: in-headset setup overrides are saved GLOBALLY in the prefs and win over every scenario's
+        defaults -- RESET HOLSTERS TO DEFAULT to see each scenario's own layout.
+  - [ ] 2026-09-28 weapon-mode reload sound: a seated magazine whose trigger has no reloading_sound
+        (fusion pistol, rifle grenades, rocket launcher) plays the magnum's reload sound instead
+        (vr_fallback_reload_sound, both the fresh-mag and same-mag paths). Weapon-handling mode only.
+  - [ ] 2026-10-04 MAGAZINE MESHES (first model: Daniel's new M2/Infinity assault rifle), awaiting test.
+        Blender export: SomaZ id Tech 3 exporter, Surfaces = "From Objects" (one MD3 surface per object),
+        local space OFF. Surfaces: assaultrifle (gun), assaultrifle_mag, assaultrifle_grenade,
+        assaultrifle_bullet1..3. ("From Materials" merged everything into one surface; the legacy exporter
+        merged then split at 999 verts with misleading names -- both unusable.)
+        Engine: MD3_Loader keeps each surface's name + index slice (Model3D::MD3Surfaces);
+        a1ffDrawMorphMeshRanges draws index slices; OGL_SetVRWeaponModelParts / OGL_SetVRWeaponModelMatrix /
+        OGL_VRWeaponModelMatrix in OGL_Render. render.cpp: surfaces classified by suffix (_mag = well 0,
+        _grenade/_mag2 = well 1, _bulletN = top rounds, else gun). The held / cached / holstered gun draws
+        only parts that are IN (bullets by loaded rounds: >=3 all, then 2, 1, 0). Magazines on the path,
+        in the hand, loose and falling are drawn from the gun model (frame 0) via vr_mag_part_matrix: gun
+        model -> gun space -> SEATED magazine frame (vr_fill_well_geometry on a unit pose) -> the
+        magazine's actual pose; falls back to the debug box when the model has no such part. Normal mode
+        untouched (whole model, reload animation). Falling mags remember weapon/well/rounds/hand.
+  - [x] 2026-10-04 magazine meshes: Daniel "works great". Approach assist turned OFF (kVRMagApproachAssist):
+        with a real mesh the gradual alignment read as the mag sliding around in the hand. Now it stays as
+        held until it engages the well, then snaps into line over kEngageSettleMs (80 ms).
+  - [ ] 2026-10-04 "grenades grabbed out of the hand from far away": engage distance is now min(well radius,
+        kEngageReachM 4 cm) from the mag top to the mouth (radius stays the ring's guide size), and the
+        approach angle must be within max(tol, 70) capped at 100 deg -- wells set to "any angle" (180, e.g.
+        rifle grenades) no longer accept a mag swung round from upside down. Awaiting test.
+  - [ ] 2026-10-04 MAGAZINE SOUNDS, awaiting test. <vr_mag_sounds name=.. [well=0|1] release= remove= insert=>
+        inside a <vr_weapons> block in a plugin MML (paths resolve relative to the plugin -- plugin MML is
+        parsed with the plugin folder on the search path). First use: M2 "VR Models" plugin vr_models.mml,
+        assault_rifle, sounds/mag-release|mag-remove|mag-insert.wav (16-bit mono 22 kHz). Decoded on first
+        play (ExternalSoundHeader::LoadExternal), played 2D via OpenALManager. Weapon handling mode only.
+        release = vr_eject_magazine (main well's sound, else the second's); remove = slid off the path end,
+        pulled straight out (no path), shaken out; insert = seated (REPLACES the weapon's reloading_sound:
+        put_rounds_into_weapon muted via s_vr_mute_reload_sound) and a loose mag clicking back home -- the
+        latter ONLY for drop_on_release wells (a mag that never moved makes no sound when the button is let
+        go; Daniel heard "insert" on every button release with the M2 rifle).
+        Infinity's plugin does not have these yet (copy sounds/ + the block when its rifle model is updated).
+        2026-10-04: M2 plugin also has plasma_pistol (all three) and pistol + smg (release + remove only --
+        their seating keeps the weapon's own reload sound). M2 has no SMG; the line is there for Infinity.
+  - [ ] 2026-10-04 GRIP-RELATIVE HOLD, awaiting test: rifle grenades are grabbed palm-up and the drum slid
+        through the hand into the fixed (palm-down, top-anchored) drum hold. Now a magazine taken OUT OF A
+        GUN keeps its exact pose relative to the hand at that moment (s_holdValid/Top/R/U/F, hand-local):
+        captured where it leaves the path (pose at t = 0), or next frame after a straight pull from a
+        no-path well (vr_capture_hold_later). The top position, insertion axis (contact test) and drawn pose
+        all use it; the handoff swing becomes zero. Cleared when the hand lets go; pouch magazines use the
+        default holds. Debug guides (target ring + line, orange loose ring) hidden for any magazine drawn as
+        a real mesh (vr_mag_has_mesh) -- Daniel wants to see the rifle without them.
+  - [ ] 2026-10-04: pouches show the gun's magazine MESH (standing in the pouch, pouch rotation, dark when
+        empty) when the model has one; sprite otherwise. Thrown mags now spin with the hand's measured rotation
+        rate (s_handOmega: frame-to-frame axis change, smoothed) + half the toss tumble -- the earlier
+        toning-down had left throws with only a weak speed-based spin. Flick-outs unchanged.
+  - [ ] 2026-10-04 "jerky when examining a gun up close": checked -- NOT the int16 bug (render camera =
+        float interpolated body + live head offset; weapon = camera + hand offset, all float). Diagnostic ON:
+        kVRJitterDiag, logcat tag A1VRJIT, one line per frame per hand (us clock, raw hand + head stage pos,
+        render camera, weapon anchor + forward). Read after Daniel rotates a gun slowly up close.
+  - [ ] 2026-10-04 JITTER = FRAME RATE. A1VRJIT trace: weapon placement tracks the controller exactly
+        (relative motion ratio 1.000, p95 1.006) -- not precision, not our transform. But frames were 27.9 ms
+        median (~36 fps). VrApi during play: FPS 35/120, GPU% 0.98-0.99, App(GPU) ~20 ms, CPU% ~0.18 =>
+        GPU-BOUND (pause menu: 120 fps, App 4.5 ms). Prime suspect: the eye D24S8 stencil added for the
+        outlines (packed depth+stencil under MSAA render-to-texture may not stay in Adreno tile memory).
+        TEST BUILD: s_eyeStencil = false -> still GPU-bound (40 fps, App 17.5 ms): NOT the cause, stencil back
+        ON. REAL CAUSE: Daniel's M2 prefs had VR Resolution Scale 2.0 (4x pixels) + 4x MSAA. Daniel's "jitters
+        back and forth between 2 points" = hand-held object at 1/3 refresh: each frame shown 3x, head is
+        reprojected but the gun's pose is a ~30 ms prediction, off by hand tremor alternately (~0.5 deg
+        zig-zag, continuous steps -- no quantisation). Advice: Resolution Scale 1.0-1.3, MSAA 2x.
+        CONFIRMED by Daniel after lowering the settings ("that seemed to improve it"). kVRJitterDiag and
+        kVRMagPoseDiag both turned OFF.
+  - [ ] 2026-10-04 drum hold anchored by its BOTTOM: Daniel's palm-up grenade pulls (VRMAGPOSE, 5 consistent)
+        kept the measured drum angle but put the top a drum length + ~3.5 cm from the hand along its axis;
+        the default hold had it ~7 cm (top-anchored). Now top = hand + kDrumTop * (length + kDrumPalmGapM).
+  - [ ] 2026-10-04 round, awaiting test:
+        - BUG pistol/fusion still fired with the mag out: vr_eject_magazine only zeroed rounds if the trigger
+          was IDLE (eject mid-shot left them). Now always zeroed, AND vr_enforce_empty_wells (every tick, in
+          the reload service, both passes): a trigger whose well (per pair copy) is not IN has 0 rounds.
+        - PART-USED MAGAZINES: items[] counts whole mags; vr_weapons keeps per-ammo lists of part-used
+          rounds (VR_Push/PopPartialMag). Pouches hand out FULL mags first, then a part-used one (which
+          leaves the inventory at grab time and is carried like any mag with rounds).
+        - DROPPED MAGS -> PICKUPS: a landed mag that would vanish (3 s) becomes its ammo item via new_item at
+          its spot (find_new_object_polygon from the player); part-used ones registered by object index
+          (VR_RegisterDroppedMag) and picked up part-used again (items.cpp get_item hook). Empty mags just
+          vanish. A fresh pouch mag is taken from the inventory as it becomes the pickup (net zero).
+        - PUT BACK IN A POUCH: letting go within 1.25x a pouch's radius when that pouch takes this ammo ->
+          back into the inventory (vr_add_magazine_to_inventory, same max as pickups; a part-used one keeps
+          its rounds; fresh never left; empty is gone). Inventory full -> it drops instead.
+        - Daniel: the pickup "was there for a split second then vanished" -- the engine auto-takes any item
+          within MAXIMUM_ARM_REACH (3/4 WU ~1.5 m), so a mag at your feet was picked straight back up. Now a
+          landed mag WITH rounds waits as the magazine while the player is within 1.15x that reach and
+          becomes the pickup once you move away; evicting the oldest of the 8 kept also converts it first.
+        - Not saved: the part-used lists and dropped-mag rounds are not in save games (a part-used mag in
+          inventory becomes a full one after a load). Ammo pickups stay sprites for now (Daniel's call).
+  - [ ] MD3 PLAN (proposed 2026-09-28, not started) -- see "Models: split magazines and posed hands" below.
+  - [ ] 2026-09-28 bug: holding mag release and gripping the grenades two-handed the rifle instead ->
+        fixed, awaiting test: the steadying grip is suppressed while that hand holds a magazine or is
+        within 1.25x reach of a loosened magazine (the grenade well sits by the AR grab spot).
+  - Found + fixed on the way: setup-drag hand frame was not square (aim fwd includes the aim-pitch
+    offset) -> saved hang vectors were 1.29/0.75 long; XML comments contained illegal double hyphens.
 - *(Daniel has more items queued -- log them here as they come.)*
 
 ### Open -- known gaps and follow-ups
@@ -547,6 +826,44 @@ Throwing a charging fusion pistol carries the remaining overload ticks onto the 
 object; on expiry it detonates where it lands and the weapon is destroyed. Then haptics
 on grab/seat/catch/throw, sounds, preferences UI, and the additive netplay fold — holster
 and mag state is derivable, so only discrete events (draw, throw, catch, seat-mag) travel.
+
+---
+
+## 8b. Models: split magazines and posed hands (proposed 2026-09-28)
+
+What the engine has: MD3 vertex-animated models (keyframes), several models per weapon shape (drawn
+together with one transform), a GPU morph between any two keyframes (`a1ffDrawMorphMesh`, frame / next
+frame / mix), and a mirrored draw for the left hand. What it lacks: the MD3 loader reads the header but
+ignores TAGS (named attachment frames), and there is no skeleton support.
+
+**Magazines: one separate MD3 per magazine, drawn by the magazine code.**
+- In Blender, separate the magazine from each gun and export two files; the gun keeps its origin.
+- Put the magazine's origin at the CENTRE OF ITS TOP FACE (the end that goes in), +Y along the insertion
+  line into the gun, +Z toward the muzzle -- exactly the box's frame, so it drops in where the box is.
+- Before moving the origin, note where that point sits in the gun's space: that is the seated `x/y/z` of the
+  `<vr_magwell>` (or, later, a tag).
+- New MML: `<vr_mag_model ammo=... file=... skin=...>` (per ammo type, so the same mag draws in the pouch,
+  the hand, the gun and on the floor). The gun no longer carries the magazine, so an empty well looks empty.
+- Gun reload animations that move a magazine stop applying -- fine, reloading is physical now.
+
+**Attach points: MD3 tags (small loader addition).**
+- Add tags in Blender (`tag_magwell`, `tag_magwell2`, `tag_foregrip`, `tag_muzzle`, `tag_grip`): each is a
+  position + orientation, so the magwell's seat, insertion angle (pitch) and roll come straight from the
+  model. The MML/tuner values become overrides. Parsing tags is ~50 lines in MD3_Loader.cpp.
+
+**Hands: one hand MD3 whose keyframes are POSES; blend between them on the GPU.**
+- Frames: open, relaxed, fist, pistol grip, rifle grip, trigger-pulled grip, support (foregrip) grip,
+  magazine hold, pouch reach. Right hand only; the left is the mirrored draw we already use.
+- Each weapon names its grip pose in MML (`<vr_hand_pose weapon=... hold=... support=...>`), so a pistol
+  and a rifle hold differently without new code.
+- Transitions: morph from the current pose to the new one over ~80-120 ms (the existing two-frame mix).
+- Analog: the grip axis blends open -> fist when empty-handed; the trigger axis blends grip -> trigger-pulled.
+  Two axes at once needs a 3-4 frame blend; start with one at a time and extend the shader only if needed.
+- Why not skeletal: no skeleton support in the engine, and vertex poses on the Quest are cheap and already
+  proven (weapon morph work, docs/memory vr-model-gpu-lerp).
+
+Suggested order: (1) the hand MD3 with 4 poses (open, fist, rifle grip, support), (2) one gun split
+(pistol) + its mag model, (3) tags, (4) the rest of the guns.
 
 ---
 

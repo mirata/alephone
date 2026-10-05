@@ -847,6 +847,7 @@ void ensureMorph() {
         "  gl_Position = uMVP * vec4(p, 1.0);\n"
         "  vTex = aTex0;\n"
         "}\n";
+    // uMode: 3 = flat colour (holster outlines; the texture only masks cut-out texels),
     // uMode: 0 = normal (texture * tint), 1 = infravision (greyscale * tint),
     //        2 = static/invincibility (screen-space block noise keyed to texture alpha).
     // Effects mirror sprite_infravision.frag / invincible.frag (fog omitted -- irrelevant on a
@@ -878,6 +879,8 @@ void ensureMorph() {
         "    highp float sg = rnd(e * sr);\n"
         "    highp float sb = rnd(e * sg);\n"
         "    fragColor = vec4(sr, sg, sb, uColor.a * c.a);\n"
+        "  } else if (uMode == 3) {\n"
+        "    fragColor = vec4(uColor.rgb, uColor.a * step(0.5, c.a));\n"
         "  } else if (uMode == 1) {\n"
         "    float avg = (c.r + c.g + c.b) / 3.0;\n"
         "    fragColor = vec4(uColor.rgb * avg, uColor.a * c.a);\n"
@@ -1036,10 +1039,25 @@ void a1ffDrawStaticMesh(GLuint vbo, GLuint ibo, int numIndices) {
 
 
 
+void a1ffDrawMorphMeshRanges(GLuint posVBO, GLuint texVBO, GLuint ibo,
+                             int numVerts, int numIndices,
+                             int frameA, int frameB, float mixv, const float* color4,
+                             int mode, float staticTime,
+                             const int* rangeFirst, const int* rangeCount, int nRanges);
+
 void a1ffDrawMorphMesh(GLuint posVBO, GLuint texVBO, GLuint ibo,
                        int numVerts, int numIndices,
                        int frameA, int frameB, float mixv, const float* color4,
                        int mode, float staticTime) {
+    a1ffDrawMorphMeshRanges(posVBO, texVBO, ibo, numVerts, numIndices, frameA, frameB, mixv, color4,
+                            mode, staticTime, nullptr, nullptr, 0);
+}
+
+void a1ffDrawMorphMeshRanges(GLuint posVBO, GLuint texVBO, GLuint ibo,
+                             int numVerts, int numIndices,
+                             int frameA, int frameB, float mixv, const float* color4,
+                             int mode, float staticTime,
+                             const int* rangeFirst, const int* rangeCount, int nRanges) {
     if (!posVBO || !texVBO || !ibo || numVerts <= 0 || numIndices <= 0) return;
     ensureMorph();
 
@@ -1079,7 +1097,16 @@ void a1ffDrawMorphMesh(GLuint posVBO, GLuint texVBO, GLuint ibo,
     glDisableVertexAttribArray(4);
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
-    glDrawElements(GL_TRIANGLES, numIndices, GL_UNSIGNED_SHORT, (const void*)0);
+    if (nRanges > 0 && rangeFirst && rangeCount) {
+        for (int r = 0; r < nRanges; ++r) {
+            const int first = rangeFirst[r], count = rangeCount[r];
+            if (first < 0 || count <= 0 || first + count > numIndices) continue;
+            glDrawElements(GL_TRIANGLES, count, GL_UNSIGNED_SHORT,
+                           (const void*)((size_t)first * sizeof(GLushort)));
+        }
+    } else {
+        glDrawElements(GL_TRIANGLES, numIndices, GL_UNSIGNED_SHORT, (const void*)0);
+    }
 
     // Leave shared VAO state as the shim's own flushes (locations 0-4 + glDrawArrays) expect:
     // disable our extra location-5 array and unbind the element buffer we set on the VAO.

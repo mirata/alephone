@@ -107,6 +107,9 @@ Apr 10, 2003 (Woody Zenfell):
 #include "vr_openxr.h"
 #include "vr_net.h"   // vr_net_is_active / vr_net_get_sim_block (Phase 2: synced per-hand aim)
 #include "vr_weapons.h"
+
+// VRRELOAD diagnostic logging (2026-09-27 shotgun second-hand bug). Off: file logging costs frames.
+static const bool kVRReloadDiag = false;
 #include "Logging.h"      // VR physical weapons: reload diagnostics
 
 #include "Packing.h"
@@ -287,7 +290,8 @@ static short get_active_weapon_type_for_vr(short player_index);
 // and reset on new game / load / respawn.
 static short s_vr_offhand_weapon[MAXIMUM_NUMBER_OF_PLAYERS];
 static bool  s_vr_offhand_pass       = false;   // true while ticking/drawing the second hand's weapon
-static short s_vr_loosened_weapon    = NONE;    // weapon whose magazine the release button is holding loose
+static short s_vr_loosened_weapon[2] = { NONE, NONE };   // per hand: the weapon whose magazine that hand's release holds loose
+static short s_vr_loosened_copy[2]   = { 0, 0 };          // ...and which gun of a two-fisted pair
 static bool  s_vr_reload_authorised  = false;   // a flick-reload asked for the engine's own reload sequence
 static void  vr_update_offhand_weapon(short player_index);
 
@@ -317,6 +321,13 @@ static void add_random_flutter(_fixed flutter_base, _fixed *height, _fixed *widt
 static void calculate_weapon_origin_and_vector(short player_index, short which_trigger,
 	world_point3d *origin, world_point3d *_vector, short *origin_polygon, angle delta_theta);
 static void play_weapon_sound(short player_index, short sound, _fixed pitch);
+static bool s_vr_mute_reload_sound = false;   /* a configured VR magazine-insert sound is playing instead */
+/* VR weapon handling: the magnum's reload sound, for magazines seated into weapons that reload silently. */
+static short vr_fallback_reload_sound(void)
+{
+	struct weapon_definition *d = get_weapon_definition(_weapon_pistol);
+	return d ? d->weapons_by_trigger[_primary_weapon].reloading_sound : (short)NONE;
+}
 static bool player_weapon_has_ammo(short player_index, short weapon_index);
 static void lower_weapon(short player_index, short weapon_index);
 static void raise_weapon(short player_index, short weapon_index);
@@ -1349,59 +1360,135 @@ bool vr_raise_second_weapon(short player_index)
 	return true;
 }
 
-/* VR physical weapons: drop the magazine out of the weapon in hand. The engine cannot represent a
-   partially filled magazine (reload_weapon insists on rounds_loaded==0), so ejecting discards
-   whatever was still in it -- which is also the honest physical reading. Returns false when there
-   was nothing to eject. */
-bool vr_eject_magazine(short player_index)
+/* VR physical weapons: the gun a hand is holding -- weapon type, and for a two-fisted pair which of the
+   two (copy = its trigger: the primary hand holds trigger 0, the other hand trigger 1). False for an empty
+   hand, fists, or a hand only steadying the primary. */
+bool vr_hand_gun(short player_index, int hand, short *weapon_out, short *copy_out)
 {
+	const int held = VR_GetHeldWeaponHand();
+	if (held < 0 || hand < 0 || hand > 1) return false;
 	struct player_weapon_data *player_weapons = get_player_weapon_data(player_index);
-	if (!player_weapons || player_weapons->current_weapon == NONE) return false;
-	const short w = player_weapons->current_weapon;
-	if (!VR_WeaponNeedsManualReload(w) || VR_WeaponUsesSpinReload(w)) return false;
-	if (VR_GetMagState(w) != VR_MAG_IN) return false;              // already loose, or out
+	const short cur = player_weapons->current_weapon;
+	if (cur == NONE || cur == _weapon_fist) return false;
+	struct weapon_data *weapon = get_player_current_weapon(player_index);
+	const bool pair = weapon_is_twofisted(cur) && PRIMARY_WEAPON_IS_VALID(weapon) && SECONDARY_WEAPON_IS_VALID(weapon);
+	const short off = vr_get_offhand_weapon(player_index);
+	short w = NONE, copy = 0;
+	if (hand == held)        { w = cur; copy = 0; }
+	else if (off != NONE)    { w = off; copy = 0; }
+	else if (pair)           { w = cur; copy = 1; }
+	else return false;
+	if (weapon_out) *weapon_out = w;
+	if (copy_out)   *copy_out = copy;
+	return true;
+}
 
-	// The magazine LOOSENS: its rounds go with it, so the gun dry-fires from here. It stays hanging in the magwell until your free hand pulls it out or a
-	// hard flick shakes it free (render.cpp). Only the main magazine -- the rifle's grenades have no eject.
-	const short ammo = get_weapon_definition(w)->weapons_by_trigger[_primary_weapon].ammunition_type;
-	// The rounds leave WITH the magazine: remember them on it, so pulling it and putting it back in
-	// restores exactly this many.
-	VR_SetLooseMagRounds(w, get_trigger_data(player_index, w, _primary_weapon)->rounds_loaded);
-	for (short which_trigger = 0; which_trigger < NUMBER_OF_TRIGGERS; ++which_trigger)
+/* VR physical weapons: the magazine release on the controller of `hand` LOOSENS the magazine of the gun in
+   that hand -- only that gun: one of a pair of magnums, or the second hand's own weapon. The rounds go with
+   the magazine (the gun dry-fires from here) and it hangs in the well until pulled out or, the main one,
+   shaken free with a flick. Well 0 is the main magazine; well 1 is the second trigger's own ammo when it
+   differs (the rifle's grenades). Returns false when there was nothing to loosen. */
+bool vr_eject_magazine(short player_index, int hand)
+{
+	short w = NONE, copy = 0;
+	if (hand < 0 || hand > 1) return false;
+	// A button on an empty hand releases the magazine of the gun in the other hand.
+	if (!vr_hand_gun(player_index, hand, &w, &copy) && !vr_hand_gun(player_index, 1 - hand, &w, &copy))
+		return false;
+	if (!VR_WeaponNeedsManualReload(w) || VR_WeaponUsesSpinReload(w) || VR_WeaponDirectLoad(w)) return false;
+	const bool twofisted = weapon_is_twofisted(w);
+
+	struct weapon_definition *definition = get_weapon_definition(w);
+	const short ammo0 = definition->weapons_by_trigger[_primary_weapon].ammunition_type;
+	const short ammo1 = definition->weapons_by_trigger[_secondary_weapon].ammunition_type;
+	bool loosened = false;
+	for (int well = 0; well < 2; ++well)
 	{
-		struct trigger_definition *td = get_trigger_definition(player_index, w, which_trigger);
-		struct trigger_data *trigger = get_trigger_data(player_index, w, which_trigger);
-		if (!td || !trigger || td->ammunition_type != ammo) continue;
-		if (trigger->state == _weapon_idle) trigger->rounds_loaded = 0;
+		const short ammo = well ? ammo1 : ammo0;
+		if (ammo == NONE || (well && (ammo1 == ammo0 || twofisted))) continue;
+		if (VR_GetMagState(w, well, copy) != VR_MAG_IN) continue;
+		// A pair: exactly this gun's trigger. Otherwise the trigger(s) this well feeds.
+		const short feed = twofisted ? copy : (well ? _secondary_weapon : _primary_weapon);
+		VR_SetLooseMagRounds(w, get_trigger_data(player_index, w, feed)->rounds_loaded, well, copy);
+		for (short which_trigger = 0; which_trigger < NUMBER_OF_TRIGGERS; ++which_trigger)
+		{
+			if (twofisted && which_trigger != copy) continue;
+			struct trigger_definition *td = get_trigger_definition(player_index, w, which_trigger);
+			struct trigger_data *trigger = get_trigger_data(player_index, w, which_trigger);
+			if (!td || !trigger || td->ammunition_type != ammo) continue;
+			trigger->rounds_loaded = 0;   // whatever it is doing -- mid-shot included -- the rounds left with the mag
+		}
+		VR_SetMagState(w, VR_MAG_LOOSE, well, copy);
+		loosened = true;
 	}
-	VR_SetMagState(w, VR_MAG_LOOSE);
-	s_vr_loosened_weapon = w;
+	if (!loosened) return false;
+	// The release click: the main well's sound if it has one, else the second well's.
+	if (!VR_PlayMagSound(w, 0, VR_MAG_SOUND_RELEASE)) VR_PlayMagSound(w, 1, VR_MAG_SOUND_RELEASE);
+	s_vr_loosened_weapon[hand] = w;
+	s_vr_loosened_copy[hand] = copy;
 	mark_player_inventory_as_dirty(player_index, NONE);
 	return true;
 }
 
-/* VR physical weapons: the magazine release is HOLD. Letting go of the button with the loosened magazine
-   still in the gun (not pulled, not flicked out) clicks it back home, rounds and all. */
-bool vr_reseat_loose_magazine(short player_index)
+/* VR physical weapons: the magazine release is HOLD. Letting go of that hand's button with the loosened
+   magazine still in its gun (not pulled, not flicked out) clicks it back home, rounds and all. */
+bool vr_reseat_loose_magazine(short player_index, int hand)
 {
-	const short w = s_vr_loosened_weapon;
-	s_vr_loosened_weapon = NONE;
-	if (w == NONE || VR_GetMagState(w) != VR_MAG_LOOSE) return false;
+	if (hand < 0 || hand > 1) return false;
+	const short w = s_vr_loosened_weapon[hand], copy = s_vr_loosened_copy[hand];
+	s_vr_loosened_weapon[hand] = NONE;
+	if (w == NONE) return false;
+	const bool twofisted = weapon_is_twofisted(w);
 
-	const short rounds = VR_GetLooseMagRounds(w);
 	struct weapon_definition *definition = get_weapon_definition(w);
-	const short ammo = definition->weapons_by_trigger[_primary_weapon].ammunition_type;
-	for (short which_trigger = 0; which_trigger < NUMBER_OF_TRIGGERS; ++which_trigger)
+	bool reseated = false;
+	for (int well = 0; well < 2; ++well)
 	{
-		struct trigger_definition *td = get_trigger_definition(player_index, w, which_trigger);
-		struct trigger_data *trigger = get_trigger_data(player_index, w, which_trigger);
-		if (!td || !trigger || td->ammunition_type != ammo) continue;
-		trigger->rounds_loaded = MIN(rounds, td->rounds_per_magazine);
+		if (VR_GetMagState(w, well, copy) != VR_MAG_LOOSE) continue;      // pulled or flicked out: nothing to seat
+		const short rounds = VR_GetLooseMagRounds(w, well, copy);
+		const short ammo = definition->weapons_by_trigger[well ? _secondary_weapon : _primary_weapon].ammunition_type;
+		for (short which_trigger = 0; which_trigger < NUMBER_OF_TRIGGERS; ++which_trigger)
+		{
+			if (twofisted && which_trigger != copy) continue;
+			struct trigger_definition *td = get_trigger_definition(player_index, w, which_trigger);
+			struct trigger_data *trigger = get_trigger_data(player_index, w, which_trigger);
+			if (!td || !trigger || td->ammunition_type != ammo) continue;
+			trigger->rounds_loaded = MIN(rounds, td->rounds_per_magazine);
+		}
+		VR_SetMagState(w, VR_MAG_IN, well, copy);
+		// Only a magazine that DROPPED on release snaps back up when the button is let go; one that never
+		// moved (no drop_on_release) makes no sound here.
+		const vr_attach_point* mwell = well ? VR_GetMagwell2OrDefault(w) : VR_GetMagwellOrDefault(w);
+		if (!reseated && mwell->drop_on_release) VR_PlayMagSound(w, well, VR_MAG_SOUND_INSERT);
+		reseated = true;
 	}
-	VR_SetMagState(w, VR_MAG_IN);
+	if (reseated)
+	{
+		update_player_ammo_count(player_index);
+		mark_player_inventory_as_dirty(player_index, NONE);
+	}
+	return reseated;
+}
+
+/* VR physical weapons: a pair of magnums is ONE engine weapon with a trigger per gun, and when a hand lets go
+   the engine always puts away trigger 1. When it is the PRIMARY hand (trigger 0) that lets go, the gun that
+   stays up is physically the other one -- so the two trade trigger slots first, rounds, state and magazine
+   with them. Each gun then keeps its own ammunition however you put them down and pick them up. */
+void vr_swap_pair_triggers(short player_index)
+{
+	struct player_weapon_data *player_weapons = get_player_weapon_data(player_index);
+	if (!player_weapons || player_weapons->current_weapon == NONE) return;
+	const short w = player_weapons->current_weapon;
+	if (!weapon_is_twofisted(w)) return;
+	struct weapon_data *weapon = get_player_current_weapon(player_index);
+	struct trigger_data t = weapon->triggers[_primary_weapon];
+	weapon->triggers[_primary_weapon] = weapon->triggers[_secondary_weapon];
+	weapon->triggers[_secondary_weapon] = t;
+	VR_SwapMagCopies(w);
+	for (int h = 0; h < 2; ++h)
+		if (s_vr_loosened_weapon[h] == w) s_vr_loosened_copy[h] = short(1 - s_vr_loosened_copy[h]);
 	update_player_ammo_count(player_index);
 	mark_player_inventory_as_dirty(player_index, NONE);
-	return true;
 }
 
 /* VR physical weapons: weapons that take magazines, and so are reloaded by hand in that mode. Not the
@@ -1600,10 +1687,46 @@ static void vr_update_offhand_weapon(short player_index)
    engine only calls reload_weapon on a state transition (end of a shot / raise), not every idle tick:
    a gun that clicked empty would otherwise never notice the new mag. Only triggers fed by the seated
    magazine's ammunition reload, so the assault rifle's grenade launcher is not refilled by a bullet mag. */
+/* VR weapon handling: a gun whose magazine is loose or out has NO rounds -- the rounds are in the magazine.
+   Enforced every tick for the weapon being serviced (both passes), so nothing can leave a round in a gun
+   whose magazine has gone: an eject mid-shot used to leave the pistol and fusion pistol firing. */
+static void vr_enforce_empty_wells(short player_index, short w)
+{
+	if (!VR_PhysicalWeaponsActive() || w == NONE || !VR_WeaponNeedsManualReload(w) ||
+	    VR_WeaponUsesSpinReload(w) || VR_WeaponDirectLoad(w)) return;
+	struct weapon_definition *definition = get_weapon_definition(w);
+	const bool twofisted = weapon_is_twofisted(w);
+	const short ammo0 = definition->weapons_by_trigger[_primary_weapon].ammunition_type;
+	for (short t = 0; t < NUMBER_OF_TRIGGERS; ++t)
+	{
+		struct trigger_definition *td = get_trigger_definition(player_index, w, t);
+		struct trigger_data *trigger = get_trigger_data(player_index, w, t);
+		if (!td || !trigger || td->ammunition_type == NONE) continue;
+		const int well = twofisted ? 0 : (td->ammunition_type == ammo0 ? 0 : 1);
+		const int copy = twofisted ? t : 0;
+		if (VR_GetMagState(w, well, copy) != VR_MAG_IN && trigger->rounds_loaded > 0) trigger->rounds_loaded = 0;
+	}
+}
+
+/* VR weapon handling: how many rounds a full magazine of this ammunition holds (0 if no weapon uses it). */
+short vr_ammo_magazine_size(short ammo_item)
+{
+	for (short w = 0; w < short(NUMBER_OF_WEAPONS); ++w)
+	{
+		struct weapon_definition *definition = get_weapon_definition(w);
+		if (!definition) continue;
+		for (int t = 0; t < 2; ++t)
+			if (definition->weapons_by_trigger[t].ammunition_type == ammo_item)
+				return definition->weapons_by_trigger[t].rounds_per_magazine;
+	}
+	return 0;
+}
+
 static void vr_service_manual_reload(short player_index)
 {
 	struct player_weapon_data *player_weapons = get_player_weapon_data(player_index);
 	const short w = player_weapons->current_weapon;
+	vr_enforce_empty_wells(player_index, w);
 	if (w == NONE || !VR_WeaponNeedsManualReload(w)) return;
 
 	short ammo = NONE, rounds = -1, triggerMask = 0x7fff;
@@ -1621,10 +1744,15 @@ static void vr_service_manual_reload(short player_index)
 		// the whole picture -- which pass, which triggers are live, their state and rounds -- so one repro
 		// says whether the reload hit a different trigger than the one that fires.
 		struct weapon_data *wd = get_player_current_weapon(player_index);
-		logWarning("VRRELOAD service weapon=%d pass=%s live=[%d,%d) mask=%x t0(valid=%d state=%d rounds=%d) t1(valid=%d state=%d rounds=%d)",
+		if (kVRReloadDiag) logWarning("VRRELOAD service weapon=%d pass=%s live=[%d,%d) mask=%x t0(valid=%d state=%d rounds=%d) t1(valid=%d state=%d rounds=%d)",
 			(int)w, s_vr_offhand_pass ? "second-hand" : "primary", (int)first, (int)count, (int)triggerMask,
 			PRIMARY_WEAPON_IS_VALID(wd) ? 1 : 0, (int)wd->triggers[0].state, (int)wd->triggers[0].rounds_loaded,
 			SECONDARY_WEAPON_IS_VALID(wd) ? 1 : 0, (int)wd->triggers[1].state, (int)wd->triggers[1].rounds_loaded);
+		// A flick that lands while the shot is still firing / recovering -- flicking straight after the
+		// trigger -- is HELD and carried out the moment the gun is ready, for up to ~0.6 s, instead of
+		// being dropped. (One pull empties the shotgun; the reload just has to wait for the shot.)
+		static int32 s_flickDeadline[NUMBER_OF_WEAPONS];
+		bool reloaded = false, waiting = false;
 		s_vr_reload_authorised = true;
 		for (short which_trigger = first; which_trigger < count; ++which_trigger)
 		{
@@ -1632,11 +1760,27 @@ static void vr_service_manual_reload(short player_index)
 			struct trigger_data *trigger = get_player_trigger_data(player_index, which_trigger);
 			if (trigger->state == _weapon_idle && trigger->rounds_loaded == 0) {
 				const bool started = reload_weapon(player_index, which_trigger);
-				logWarning("VRRELOAD   trigger %d reload_weapon -> %d (state now %d)", (int)which_trigger,
+				if (kVRReloadDiag) logWarning("VRRELOAD   trigger %d reload_weapon -> %d (state now %d)", (int)which_trigger,
 				           started ? 1 : 0, (int)trigger->state);
+				reloaded = reloaded || started;
+			} else if (trigger->state != _weapon_idle) {
+				waiting = true;
 			}
 		}
 		s_vr_reload_authorised = false;
+		if (!reloaded && waiting)
+		{
+			if (s_flickDeadline[w] == 0) s_flickDeadline[w] = dynamic_world->tick_count + TICKS_PER_SECOND * 3 / 5;
+			if (dynamic_world->tick_count <= s_flickDeadline[w])
+			{
+				short oneTrigger = -1;
+				if (triggerMask != 0x7fff)
+					for (short t = 0; t < NUMBER_OF_TRIGGERS; ++t) if (triggerMask & (1 << t)) { oneTrigger = t; break; }
+				VR_RequestManualReload(w, ammo, rounds, oneTrigger);
+				return;
+			}
+		}
+		s_flickDeadline[w] = 0;
 		return;
 	}
 
@@ -1654,14 +1798,26 @@ static void vr_service_manual_reload(short player_index)
 	for (short which_trigger = first_trigger; which_trigger < trigger_count; ++which_trigger)
 	{
 		struct trigger_definition *td = get_trigger_definition(player_index, w, which_trigger);
+		if (!(triggerMask & (1 << which_trigger))) continue;     // one gun of a pair: only its trigger
 		if (ammo != NONE && td->ammunition_type != ammo) continue;
 		if (td->ammunition_type == NONE) continue;
 		const bool fresh = (rounds < 0);
 		if (fresh && player->items[td->ammunition_type] <= 0) continue;
 		struct trigger_data *trigger = get_player_trigger_data(player_index, which_trigger);
 		if (trigger->state != _weapon_idle) { busy = true; continue; }
+		// Which well this trigger feeds (the second only when it has its own ammunition), and whether a
+		// configured magazine-insert sound takes the place of the weapon's own reload sound.
+		const short ammo0 = definition->weapons_by_trigger[_primary_weapon].ammunition_type;
+		const int   feedWell = (td->ammunition_type != ammo0) ? 1 : 0;
+		const bool  customInsert = VR_HasMagSound(w, feedWell, VR_MAG_SOUND_INSERT);
 		if (fresh) {
+			s_vr_mute_reload_sound = customInsert;
 			put_rounds_into_weapon(player_index, w, which_trigger);   // full mag, uses one up, plays the sound
+			s_vr_mute_reload_sound = false;
+			if (customInsert) VR_PlayMagSound(w, feedWell, VR_MAG_SOUND_INSERT);
+			// Weapons whose reload is silent in the original (fusion pistol, rifle grenades, rocket launcher)
+			// get the magnum's click: with no reload animation to watch, the sound is the only confirmation.
+			else if (td->reloading_sound == NONE) play_weapon_sound(player_index, vr_fallback_reload_sound(), FIXED_ONE);
 		} else {
 			// A magazine that came out of this gun going back in: exactly the rounds it held, and nothing
 			// taken from the ammo count -- it is the same magazine.
@@ -1671,13 +1827,20 @@ static void vr_service_manual_reload(short player_index)
 				get_player_trigger_data(player_index, !which_trigger)->rounds_loaded = n;
 			update_player_ammo_count(player_index);
 			mark_player_inventory_as_dirty(player_index, NONE);
-			play_weapon_sound(player_index, td->reloading_sound, FIXED_ONE);
+			if (!customInsert || !VR_PlayMagSound(w, feedWell, VR_MAG_SOUND_INSERT))
+				play_weapon_sound(player_index, td->reloading_sound != NONE ? td->reloading_sound
+				                                                            : vr_fallback_reload_sound(), FIXED_ONE);
 		}
 		loaded = true;
 		if (definition->flags & _weapon_triggers_share_ammo) break;   // one magazine feeds both triggers
 	}
 	// Seated mid-shot: keep the request and load on the first idle tick.
-	if (!loaded && busy) VR_RequestManualReload(w, ammo, rounds);   // magazines: whole weapon
+	if (!loaded && busy) {
+		short oneTrigger = -1;
+		if (triggerMask != 0x7fff)
+			for (short t = 0; t < NUMBER_OF_TRIGGERS; ++t) if (triggerMask & (1 << t)) { oneTrigger = t; break; }
+		VR_RequestManualReload(w, ammo, rounds, oneTrigger);
+	}
 }
 
 /* Display items, both hands. The second hand's weapon items come FIRST, then the primary's own items
@@ -2670,7 +2833,7 @@ static void fire_weapon(
 				const bool held = (dynamic_world->tick_count - last) <= 1;
 				last = dynamic_world->tick_count;
 				if (held) return;
-				logWarning("VRRELOAD dry-fire weapon=%d trigger=%d pass=%s", (int)wt, (int)which_trigger,
+				if (kVRReloadDiag) logWarning("VRRELOAD dry-fire weapon=%d trigger=%d pass=%s", (int)wt, (int)which_trigger,
 				           s_vr_offhand_pass ? "second-hand" : "primary");   // DIAGNOSTIC 2026-09-27
 			}
 		}
@@ -3209,7 +3372,7 @@ static void put_rounds_into_weapon(
 	update_player_ammo_count(player_index);
 
 	/* Play the sound. */
-	play_weapon_sound(player_index, trigger_definition->reloading_sound, FIXED_ONE);
+	if (!s_vr_mute_reload_sound) play_weapon_sound(player_index, trigger_definition->reloading_sound, FIXED_ONE);
 }
 
 /* This, my friend, is the trickiest of the functions */

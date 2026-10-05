@@ -32,6 +32,7 @@
 #include "OGL_Headers.h"
 
 #include <vector>
+#include <string>
 #include "vec3.h"
 
 using std::vector;
@@ -188,6 +189,12 @@ struct Model3D
 	int MD3NumFrames;
 	vector<GLfloat> MD3Positions;
 	vector<GLfloat> MD3Normals;
+
+	// MD3 surfaces as authored (one per Blender object with "Surfaces: From Objects"): each one's name and
+	// its contiguous slice of VertIndices. Lets a part of the model (a magazine, a bullet) be drawn on its
+	// own. Empty for other formats.
+	struct MD3Surface { std::string name; unsigned firstIndex, numIndices; };
+	vector<MD3Surface> MD3Surfaces;
 
 	// Bake frame frameIdx (with optional linear blend toward nextFrameIdx)
 	// into Positions/Normals so ModelRenderer can draw it.
