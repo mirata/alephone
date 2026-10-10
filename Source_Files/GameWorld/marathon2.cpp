@@ -522,6 +522,10 @@ update_world()
 
 		// Transition from predictive -> real update mode, if necessary.
 		exit_predictive_mode();
+
+#if defined(__ANDROID__)
+		VR_ConvertDroppedMags();   // VR: dropped magazines becoming pickups, made in the real (non-interpolated) world
+#endif
 		
 		// Capture the flags for each player for use in prediction
 		for(short i = 0; i < dynamic_world->player_count; i++)

@@ -1090,6 +1090,8 @@ static void vr_visible_holsters(short out[VR_HOLSTER_COUNT])
 // the player's OVERRIDE: saved in the preferences on leaving setup, and written to the log as MML --
 // converted back to right-handed reference values -- so it can become the built-in defaults.
 static bool  s_vrMagMustClear[2] = { false, false };   // a mag just pulled from a well must leave it first
+static bool  s_clearInit[2]      = { false, false };   // ...and the furthest out along the well's line it has been since
+static float s_clearMinAlong[2]  = { 0.f, 0.f };       //    (world units, + = into the well)
 static int   s_setupDragSlot[2]  = { -1, -1 };
 static float s_setupGrabPos[2][3];    // the anchor's position in the grabbing hand's local frame, metres
 static float s_setupGrabFwd[2][3];    // its barrel direction in that frame
@@ -1279,9 +1281,12 @@ static bool vr_hand_is_free(int hand)
 	return true;
 }
 
+static void vr_check_hands_reset(void);
+
 // Once per frame: grip near an occupied holster draws that weapon.
 static void vr_update_holster_grabs(const view_data* view)
 {
+	vr_check_hands_reset();
 	if (!VR_PhysicalWeaponsActive()) {
 		s_holsterGripPrev[0] = s_holsterGripPrev[1] = false;
 		return;
@@ -1822,6 +1827,7 @@ struct vr_mag_dims
 	float width, length, depth;   // metres: across the gun, along the insertion line, fore-aft
 	bool  round;                  // a cylinder of diameter `width` along the insertion line (canisters)
 	bool  drum;                   // a drum facing down the barrel: `depth` thick, `length` x `width` across
+	bool  palmUp;                 // held palm-up by its bottom (the measured hold), else stood up in the grip
 };
 
 // ---- magazines falling away (visual only) ----------------------------------------------------
@@ -1834,12 +1840,15 @@ struct vr_falling_mag {
 	float r[3], u[3], f[3];   // orientation; pos is the CENTRE of the magazine
 	float om[3];              // angular velocity, world axes, radians per second
 	short weapon; int which; int rounds; int gunHand;   // what it came out of, for drawing it from that model
+	bool  loggedLand, loggedWait;                       // VRDROP diagnostic, once each
 };
 static std::vector<vr_falling_mag> s_fallingMags;
 static uint64_t s_fallingLastMs = 0;
 
 static vr_mag_dims vr_mag_dims_for_ammo(short ammo);
 static void vr_mag_to_pickup(const vr_falling_mag& m);
+struct vr_pending_pickup;
+static void vr_make_mag_pickup(const vr_pending_pickup& m);
 
 // top = where the magazine's top is now; r/u/f = its sides (u pointing to the top); om = its spin.
 static bool vr_weapon_for_ammo(short ammo, int preferHand, short* weapon, int* which);
@@ -1859,6 +1868,9 @@ static void vr_spawn_falling_mag(const float top[3], const float vel[3], short i
 	vr_falling_mag m;
 	m.item = item; m.age = 0.f; m.landed = false;
 	m.rounds = rounds; m.gunHand = gunHand; m.weapon = NONE; m.which = 0;
+	m.loggedLand = m.loggedWait = false;
+	logWarning("VRDROP spawn item=%d rounds=%d at (%.0f,%.0f,%.0f) floorZ=%.0f", (int)item, rounds,
+	           top[0], top[1], top[2], (float)get_player_data(current_player_index)->location.z);
 	vr_weapon_for_ammo(item, gunHand, &m.weapon, &m.which);
 	// Lands at the player's feet: close enough for a magazine dropped or tossed nearby.
 	m.floorZ = (float)get_player_data(current_player_index)->location.z;
@@ -1891,19 +1903,48 @@ static float s_handOmega[2][3];   // each hand's rotation rate while it holds a 
 // it is, part-used ones remembering their rounds (picked up again, they go back into the inventory
 // part-used). Empty ones are gone. A fresh one from a pouch never left the inventory until now -- it does
 // as it becomes the pickup, so nothing is gained or lost.
+//
+// The pickup is only QUEUED here: this runs in the renderer, while the world is in its interpolated state, and
+// exit_interpolated_world() puts every object's flags and every polygon's object list back as the last tick
+// left them -- an item created now was wiped a frame later (the "ammo shows for a frame or two" bug, VRDROP
+// log 2026-10-10: each conversion got the same object slot back). VR_ConvertDroppedMags() makes them in the
+// game tick.
+struct vr_pending_pickup { short item; int rounds; float x, y; short level; };
+static std::vector<vr_pending_pickup> s_pendingPickups;
+
 static void vr_mag_to_pickup(const vr_falling_mag& m)
 {
-	if (m.item == NONE || m.rounds == 0 || !VR_PhysicalWeaponsActive()) return;
+	if (m.item == NONE || m.rounds == 0 || !VR_PhysicalWeaponsActive()) {
+		logWarning("VRDROP convert skipped item=%d rounds=%d", (int)m.item, m.rounds);
+		return;
+	}
+	s_pendingPickups.push_back({ m.item, m.rounds, m.pos[0], m.pos[1], dynamic_world->current_level_number });
+}
+
+void VR_ConvertDroppedMags(void)
+{
+	if (s_pendingPickups.empty()) return;
+	std::vector<vr_pending_pickup> pending;
+	pending.swap(s_pendingPickups);
+	for (const auto& m : pending)
+		if (m.level == dynamic_world->current_level_number && VR_PhysicalWeaponsActive()) vr_make_mag_pickup(m);
+}
+
+static void vr_make_mag_pickup(const vr_pending_pickup& m)
+{
 	const short full = vr_ammo_magazine_size(m.item);
 	short rounds = m.rounds;
 	if (rounds < 0) {
-		if (!vr_take_magazine_from_inventory(current_player_index, m.item)) return;
+		if (!vr_take_magazine_from_inventory(current_player_index, m.item)) {
+			logWarning("VRDROP convert: fresh mag but none left in inventory (item=%d)", (int)m.item);
+			return;
+		}
 		rounds = full;
 	}
 	player_data* player = get_player_data(current_player_index);
 	object_data* pobj = get_object_data(get_monster_data(player->monster_index)->object_index);
 	world_point2d from = { pobj->location.x, pobj->location.y };
-	world_point2d to   = { (world_distance)m.pos[0], (world_distance)m.pos[1] };
+	world_point2d to   = { (world_distance)m.x, (world_distance)m.y };
 	short poly = find_new_object_polygon(&from, &to, pobj->polygon);
 	if (poly == NONE) { poly = pobj->polygon; to = from; }
 	object_location loc;
@@ -1912,6 +1953,8 @@ static void vr_mag_to_pickup(const vr_falling_mag& m)
 	loc.yaw = 0; loc.pitch = 0; loc.flags = 0;
 	const short obj = new_item(&loc, m.item);
 	if (obj != NONE && full > 0 && rounds < full) VR_RegisterDroppedMag(obj, rounds);
+	logWarning("VRDROP convert item=%d rounds=%d/%d at (%d,%d) poly=%d (player poly %d at %d,%d) -> object %d",
+	           (int)m.item, rounds, full, to.x, to.y, poly, pobj->polygon, from.x, from.y, obj);
 }
 
 static void vr_update_falling_mags(float W)
@@ -1982,8 +2025,22 @@ static void vr_update_falling_mags(float W)
 		const float dx = m.pos[0] - me->location.x, dy = m.pos[1] - me->location.y;
 		return dx*dx + dy*dy <= reach * reach;
 	};
-	for (const auto& m : s_fallingMags)
+	for (auto& m : s_fallingMags) {
+		if (m.landed && !m.loggedLand) {
+			m.loggedLand = true;
+			logWarning("VRDROP landed item=%d rounds=%d at (%.0f,%.0f,%.0f) age=%.2f player at (%d,%d,%d)", (int)m.item,
+			           m.rounds, m.pos[0], m.pos[1], m.pos[2], m.age, me->location.x, me->location.y, me->location.z);
+		}
+		if (m.age > 3.0f && m.landed && hasRounds(m) && playerNear(m) && !m.loggedWait) {
+			m.loggedWait = true;
+			logWarning("VRDROP waiting: player within reach (item=%d)", (int)m.item);
+		}
+	}
+	for (const auto& m : s_fallingMags) {
 		if (m.age > 3.0f && m.landed && hasRounds(m) && !playerNear(m)) vr_mag_to_pickup(m);
+		else if (m.age > 3.0f && !(m.landed && hasRounds(m) && playerNear(m)))
+			logWarning("VRDROP removed without converting item=%d rounds=%d landed=%d", (int)m.item, m.rounds, m.landed ? 1 : 0);
+	}
 	s_fallingMags.erase(std::remove_if(s_fallingMags.begin(), s_fallingMags.end(),
 		[&](const vr_falling_mag& m) {
 			if (m.age <= 3.0f) return false;
@@ -2005,6 +2062,7 @@ static vr_mag_dims vr_mag_dims_of(const vr_attach_point* mw)
 	d.depth  = mw->mag_depth  > 0.f ? mw->mag_depth  : 0.06f;
 	d.round  = mw->mag_round;
 	d.drum   = mw->mag_drum;
+	d.palmUp = (mw->mag_hold == 2) || (mw->mag_hold == 0 && d.drum);   // <vr_magwell mag_hold=>, else by shape
 	// Round faces are round: a drum's face (length x width) and a canister's cross-section (width x
 	// depth) are always one diameter, whatever the numbers say.
 	if (d.drum)       d.width = d.length = 0.5f * (d.width + d.length);
@@ -2032,7 +2090,7 @@ static vr_mag_dims vr_mag_dims_for_ammo(short ammo)
 		for (int which = 0; which < 2; ++which)
 			if (get_player_weapon_ammo_type(current_player_index, wt, which ? _secondary_weapon : _primary_weapon) == ammo)
 				return vr_mag_dims_for_well(wt, which);
-	return vr_mag_dims{ 0.035f, 0.13f, 0.06f, false, false };
+	return vr_mag_dims{ 0.035f, 0.13f, 0.06f, false, false, false };
 }
 
 // The top of a magazine in a hand at pos, pointing along the hand's up.
@@ -2103,7 +2161,7 @@ static void vr_hand_mag_axis(const vr_mag_dims& md, int hand, const float wr[3],
                              const float wf[3], float out[3])
 {
 	if (hand >= 0 && hand < 2 && s_holdValid[hand]) { vr_hand_local_to_world(s_holdU[hand], wr, wu, wf, out); return; }
-	if (!md.drum) { for (int k = 0; k < 3; ++k) out[k] = wu[k]; return; }
+	if (!md.palmUp) { for (int k = 0; k < 3; ++k) out[k] = wu[k]; return; }
 	float l[3];
 	vr_drum_local(kDrumTop, hand, l);
 	vr_hand_local_to_world(l, wr, wu, wf, out);
@@ -2119,7 +2177,7 @@ static void vr_hand_mag_top(float W, const vr_mag_dims& md, int hand, const floa
 		for (int k = 0; k < 3; ++k) out[k] = pos[k] + w[k] * W;
 		return;
 	}
-	if (md.drum) {
+	if (md.palmUp) {
 		// Held by its BOTTOM, palm under it (Daniel's palm-up grenade pulls, 2026-10-04: the top sat a drum
 		// length + ~3.5 cm from the hand along the drum's axis). Was anchored near its top (kDrumTopOffM),
 		// which felt like the drum hanging from the hand.
@@ -2362,9 +2420,9 @@ static void vr_hand_mag_pose(float W, int hand, const vr_mag_dims& md, const flo
 	vr_drum_local(kDrumFace, hand, drumF);
 	vr_drum_local(kDrumTop, hand, drumT);
 	for (int k = 0; k < 3; ++k) drumD[k] = -drumT[k];
-	const float* idR = md.drum ? drumR : boxR;
-	const float* idD = md.drum ? drumD : boxD;
-	const float* idF = md.drum ? drumF : boxF;
+	const float* idR = md.palmUp ? drumR : boxR;
+	const float* idD = md.palmUp ? drumD : boxD;
+	const float* idF = md.palmUp ? drumF : boxF;
 	float holdD[3];
 	if (s_holdValid[hand]) {                             // taken out of a gun: exactly as it was gripped
 		for (int k = 0; k < 3; ++k) holdD[k] = -s_holdU[hand][k];
@@ -2428,6 +2486,26 @@ static void vr_slide_engage(int hand, const vr_well& wl, const float pos[3], flo
 	for (int k = 0; k < 3; ++k) s_slideLat0[hand][k] = rel[k] - wl.ins[k] * along;
 }
 
+// How close a magazine's top has to come to a well's mouth to engage it (world units).
+static const float kEngageReachM = 0.04f;
+static float vr_engage_reach(const vr_well& wl, float W)
+{
+	return (wl.radius < kEngageReachM * W) ? wl.radius : kEngageReachM * W;
+}
+
+// Where a magazine whose top is at magTop engages a well's path: its own position ALONG the line, so lining
+// it up never moves it toward the well or back toward the hand -- only across onto the line and round to
+// the well's angle (Daniel, 2026-10-10). Negative = still short of the mouth. Kept short of seating, so
+// engaging never loads it on the spot.
+static float vr_engage_t(const vr_well& wl, const float magTop[3])
+{
+	if (wl.travel <= 1e-3f) return 0.f;
+	const float along = (magTop[0]-wl.entry[0])*wl.ins[0] + (magTop[1]-wl.entry[1])*wl.ins[1] +
+	                    (magTop[2]-wl.entry[2])*wl.ins[2];
+	const float t = along / wl.travel;
+	return t > 0.9f ? 0.9f : t;
+}
+
 // Whether the magazine in a hand is touching this well's mouth -- its TOP at the capture point (the entry of
 // the path, else the seat), roughly pointing the right way. On contact it is snapped into line, so the
 // angle only has to be in the ballpark. The ring turns green exactly when this is true.
@@ -2444,8 +2522,7 @@ static bool vr_mag_touches_well(const vr_well& wl, float W, int hand, const floa
 	// radius was the engage distance too, and a generous one (the rifle grenades' 10 cm) read as the
 	// magazine being snatched out of the hand from afar (2026-10-04). The ring still shows the radius as
 	// the "bring it here" guide; it turns green only on contact.
-	const float kEngageReachM = 0.04f;
-	const float reach = (wl.radius < kEngageReachM * W) ? wl.radius : kEngageReachM * W;
+	const float reach = vr_engage_reach(wl, W);
 	if (d2 > reach * reach) return false;
 	// Roughly the right way round (it snaps into line from there): at least 70 deg of give, and never more
 	// than 100 even on a well that takes "any angle" -- a magazine swung round from upside down also read
@@ -2459,9 +2536,16 @@ static bool vr_mag_touches_well(const vr_well& wl, float W, int hand, const floa
 }
 
 // The hand's magazine is home in the well: load it.
+// A magazine seated during this frame's update. The first eye drew the gun BEFORE the update (magazine part
+// hidden, still out) and draws the hands after it (magazine gone from the hand), so for that one eye it was
+// nowhere -- a one-frame flash (Daniel, 2026-10-10). render_vr_hand_visuals draws it at the seat for that eye.
+struct vr_seat_ghost { bool on; int well; short rounds; };
+static vr_seat_ghost s_seatGhost[2] = { { false, -1, 0 }, { false, -1, 0 } };
+
 static void vr_seat_hand_mag(int hand, const vr_well& wl, short mag)
 {
 	const short magRounds = VR_GetHandMagazineRounds(hand);
+	s_seatGhost[hand].on = true; s_seatGhost[hand].well = wl.which; s_seatGhost[hand].rounds = magRounds;
 	VR_SetHandMagazine(hand, NONE);
 	s_slideWell[hand] = -1;
 	s_slideAuto[hand] = false;
@@ -2525,7 +2609,7 @@ static bool vr_try_pull_loose_mag(float W, int hand, float hx, float hy, float h
 		const float hp[3] = { hx, hy, hz };
 		vr_slide_engage(hand, best, hp, t, true);
 	} else {
-		s_vrMagMustClear[hand] = true;   // your hand is in the well: don't re-seat it on the spot
+		s_vrMagMustClear[hand] = true; s_clearInit[hand] = false;   // your hand is in the well: don't re-seat it on the spot
 		VR_PlayMagSound(best.weapon, bestWell, VR_MAG_SOUND_REMOVE);
 		{   // it stays where it was, relative to the grip that took it
 			float mp[3];
@@ -2755,7 +2839,7 @@ static void vr_update_magazine_seating(view_data* view)
 					vr_begin_mag_handoff(W, hand, wl, pos, wr, wu, wf, mag);
 					VR_PlayMagSound(wl.weapon, wl.which, VR_MAG_SOUND_REMOVE);
 					s_slideWell[hand] = -1;
-					s_vrMagMustClear[hand] = true;       // just left the entry: don't grab it straight back
+					s_vrMagMustClear[hand] = true; s_clearInit[hand] = false;       // just left the entry: don't grab it straight back
 					VR_Vibrate(hand, 30, 0.5f);
 				}
 			} else {
@@ -2775,14 +2859,16 @@ static void vr_update_magazine_seating(view_data* view)
 				const float latMax = 0.10f * W;
 				// Pulled back out of the mouth: an absolute distance, not a share of the slide -- on a short
 				// slide (the rifle's 2 cm) 40% was 8 mm, and ordinary hand jitter knocked it off the path.
+				// It engages up to the engage reach short of the mouth (where it was), so the give is that plus 2 cm.
 				const float backOut = t * wl.travel;                       // world units, negative = outside
-				const float backMax = (0.4f * wl.travel > 0.04f * W) ? 0.4f * wl.travel : 0.04f * W;
+				const float approach = vr_engage_reach(wl, W) + 0.02f * W;
+				const float backMax = (0.4f * wl.travel > approach) ? 0.4f * wl.travel : approach;
 				if (backOut < -backMax || latD2 > latMax * latMax) {
 					vr_begin_mag_handoff(W, hand, wl, pos, wr, wu, wf, mag);
 					s_slideWell[hand] = -1;
 					continue;
 				}
-				s_slideT[hand] = t < 0.f ? 0.f : (t > 1.f ? 1.f : t);
+				s_slideT[hand] = t > 1.f ? 1.f : t;   // short of the mouth it rides the line outside it
 				if (t >= 0.97f) vr_seat_hand_mag(hand, wl, mag);
 			}
 			continue;
@@ -2800,16 +2886,24 @@ static void vr_update_magazine_seating(view_data* view)
 			touching = vr_mag_touches_well(wl, W, hand, pos, wr, wu, wf, magTop, &d2);
 			// A magazine just taken out of this well starts next to it; take it clear first, or it would go
 			// straight back in on the next frame.
+			// Taking it clear of the mouth, OR pushing it back toward the well (changed your mind after a slow
+			// pull), frees it -- it used to have to leave the whole capture radius (8.8 cm on the rifle) first.
 			if (s_vrMagMustClear[hand]) {
-				if (d2 > (wl.radius * 1.1f) * (wl.radius * 1.1f)) s_vrMagMustClear[hand] = false;   // just out of reach
-				touching = false;
+				const float* cap = (wl.travel > 1e-3f) ? wl.entry : wl.seat;
+				const float along = (magTop[0]-cap[0])*wl.ins[0] + (magTop[1]-cap[1])*wl.ins[1] +
+				                    (magTop[2]-cap[2])*wl.ins[2];
+				if (!s_clearInit[hand] || along < s_clearMinAlong[hand]) s_clearMinAlong[hand] = along;
+				s_clearInit[hand] = true;
+				const float clearR = vr_engage_reach(wl, W) + 0.01f * W;
+				if (along - s_clearMinAlong[hand] > 0.006f * W || d2 > clearR * clearR) s_vrMagMustClear[hand] = false;
+				else touching = false;
 			}
 		}
 
 		if (grip <= 0.5f) {
 			if (touching) {
 				// Let go right at the well: it takes it, running the path home quickly.
-				if (wl.travel > 1e-3f) { vr_slide_engage(hand, wl, pos, 0.f, false); s_slideAuto[hand] = true; }
+				if (wl.travel > 1e-3f) { vr_slide_engage(hand, wl, pos, vr_engage_t(wl, magTop), false); s_slideAuto[hand] = true; }
 				else                     vr_seat_hand_mag(hand, wl, mag);
 				continue;
 			}
@@ -2866,8 +2960,8 @@ static void vr_update_magazine_seating(view_data* view)
 		if (!touching) continue;
 
 		if (wl.travel > 1e-3f) {
-			// Onto the path, snapped into line: from here it slides in as you push.
-			vr_slide_engage(hand, wl, pos, 0.f, false);
+			// Onto the path, snapped into line where it is along it: from here it slides in as you push.
+			vr_slide_engage(hand, wl, pos, vr_engage_t(wl, magTop), false);
 			VR_Vibrate(hand, 25, 0.5f);
 			continue;
 		}
@@ -2888,6 +2982,36 @@ static float    s_flickPrevFwd[2][3];
 static bool     s_flickPrevValid[2]  = { false, false };
 static uint64_t s_flickPrevMs[2]     = { 0, 0 };
 static uint64_t s_flickCooldownMs[2] = { 0, 0 };
+
+// New game / load / respawn (VR_ResetHandsState): the renderer's own per-hand memory goes too, so nothing
+// from the last game -- a weapon's pose in a hand, a magazine mid-slide, a swing, the side a holstered
+// weapon was last put back from, magazines on the floor -- carries into the next one.
+static void vr_check_hands_reset(void)
+{
+	static unsigned s_seen = 0;
+	const unsigned serial = VR_GetHandsResetSerial();
+	if (serial == s_seen) return;
+	s_seen = serial;
+	for (int h = 0; h < 2; ++h) {
+		s_vrWeaponPose[h].valid = false;
+		s_handSwing[h].on = false;
+		for (int w = 0; w < MAXIMUM_NUMBER_OF_WEAPONS; ++w) s_handSnap[h][w].wt = NONE;
+		s_holdValid[h] = s_holdPending[h] = false;
+		s_slideWell[h] = -1; s_slideAuto[h] = false; s_handoffT[h] = 1.f;
+		s_engageSettle[h] = false;
+		s_vrMagMustClear[h] = false; s_clearInit[h] = false;
+		s_flickAccum[h] = 0.f; s_flickPrevValid[h] = false;
+		s_hoverSlot[h] = -1;
+	}
+	for (int i = 0; i < 4; ++i) s_vrLooseNoDrop[i] = false;
+	for (int slot = 0; slot < VR_HOLSTER_COUNT; ++slot) {
+		s_holsterLastHand[slot] = -1;
+		s_holsterSwing[slot].on = false;
+		s_holsterSnap[slot].wt = NONE;
+	}
+	s_fallingMags.clear();
+	s_pendingPickups.clear();
+}
 
 static void vr_update_spin_reload(void)
 {
@@ -3404,6 +3528,19 @@ static void render_vr_hand_visuals(view_data* view)
 			// Confirmed on device for M2 (right hand mirrored, 2026-09-27).
 			const bool flip = (hand == 1);
 			vr_draw_shape_at(view, fColl, fSeq, fLow, pos, wr, wu, wf, flip, true, 1.0f);
+		}
+
+		// Just seated this frame (first eye only -- the second eye's gun already has it in).
+		if (s_seatGhost[hand].on) {
+			s_seatGhost[hand].on = false;
+			vr_well gw;
+			if (VR_GetHandMagazine(hand) == NONE && vr_get_well(bf.W, hand, s_seatGhost[hand].well, gw) &&
+			    vr_mag_has_mesh(gw.weapon, gw.which)) {
+				float mp[3];
+				vr_well_point(gw, 1.f, mp);
+				const float down[3] = { -gw.ins[0], -gw.ins[1], -gw.ins[2] };
+				vr_draw_mag_mesh(view, gw.weapon, gw.which, gw.hand, s_seatGhost[hand].rounds, mp, gw.magRight, down, gw.magFwd);
+			}
 		}
 
 		// ---- a magazine in this hand -----------------------------------------------------------

@@ -221,4 +221,10 @@ void instantiate_polygon_transfer_mode(view_data *view,
 
 void ResetOverheadMap();
 
+#if defined(__ANDROID__)
+// VR weapon handling: dropped magazines that turned back into ammo pickups this frame are created here, in
+// the game tick -- objects made by the renderer are undone by exit_interpolated_world().
+void VR_ConvertDroppedMags(void);
+#endif
+
 #endif

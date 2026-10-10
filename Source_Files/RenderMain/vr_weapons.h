@@ -147,6 +147,10 @@ struct vr_attach_point
 	// Magwells: pressing the magazine release makes the magazine DROP a few centimetres out of the well
 	// (pistol-style). Off = it stays seated until pulled or flicked out.
 	bool  drop_on_release;
+	// Magwells: how a magazine for this well sits in the hand. 0 = by shape (drums palm-up, box magazines
+	// in the grip), 1 = "grip" (stands up out of the fist), 2 = "palm_up" (lies on the palm, held by its
+	// bottom -- the measured grenade-drum hold). <vr_magwell mag_hold="grip|palm_up">.
+	int   mag_hold;
 };
 
 // Body-relative holster anchor. Offsets are METRES FROM THE HEAD in body space
@@ -274,6 +278,11 @@ int  VR_GetMagState(short weapon_type, int well = 0, int copy = 0);   // copy: w
 void VR_SetMagState(short weapon_type, int state, int well = 0, int copy = 0);
 void VR_SwapMagCopies(short weapon_type);    // a pair's two guns traded trigger slots
 void VR_ResetMagStates(void);
+// New game / load / respawn: forget everything the hands had -- held weapon, pending grab, magazines in hand
+// and in guns, queued reloads, part-used magazines. Bumps a serial the renderer watches to drop its own
+// per-hand memory (poses, slides, swings, magazines on the floor).
+void     VR_ResetHandsState(void);
+unsigned VR_GetHandsResetSerial(void);
 
 // Rounds in the magazine a hand is holding: -1 = a fresh one from a pouch (full), otherwise the count
 // it had when it came out of a gun. VR_SetHandMagazine resets it to -1; set it after.

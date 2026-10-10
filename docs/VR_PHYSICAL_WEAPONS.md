@@ -361,6 +361,27 @@ cycling had never been disabled in this mode.
           within MAXIMUM_ARM_REACH (3/4 WU ~1.5 m), so a mag at your feet was picked straight back up. Now a
           landed mag WITH rounds waits as the magazine while the player is within 1.15x that reach and
           becomes the pickup once you move away; evicting the oldest of the 8 kept also converts it first.
+        - Daniel: "still vanishes". Not guessing again: VRDROP diagnostic (log FILE, one line per event):
+          spawn / landed / waiting / convert (poly, object index or skip reason) / removed without
+          converting / picked up. Read after one drop + walk away.
+        - ROOT CAUSE (2026-10-10, from the VRDROP log: every conversion got the SAME object slot back): the
+          pickup was made from the renderer while the world is interpolated, and exit_interpolated_world()
+          restores every object's flags + polygon object lists from the tick snapshot -> item wiped a frame
+          later. Now queued (s_pendingPickups) and made in the game tick: VR_ConvertDroppedMags() in
+          marathon2.cpp after exit_predictive_mode(). Stale-level entries skipped. VRDROP logs still in.
+        - Magwell feel (2026-10-10, Daniel): (a) slow pull-out then reinsert didn't take -- must-clear needed
+          the mag top > 1.1x the well radius away (8.8 cm rifle). Now hysteresis: freed by pushing it back
+          6 mm toward the well from its furthest-out point, or by taking it 1 cm past the engage reach.
+          (b) engaging pulled the mag toward the well (or back toward the hand): it always started the slide
+          at t=0 (the mouth) from anywhere within 4 cm. Now vr_engage_t(): engages at its OWN position along
+          the line (t may be negative = short of the mouth, capped at 0.9), only lateral + angle snap.
+          Pull-off give on the way in widened to engage reach + 2 cm to match.
+        - New game kept per-hand state: VR_ResetHandsState() (held hand, pending grab, hand mags, mag states,
+          queued reloads, partial mags) + a serial the renderer watches (vr_check_hands_reset: poses, slides,
+          swings, holster last-hand, falling mags, pending pickups) + weapons.cpp loosened-mag per hand.
+        - MAG HOLD is now CONFIG: <vr_magwell mag_hold="palm_up|grip">; default by shape (drums palm_up,
+          box mags grip). pistol + plasma_pistol set to palm_up in all three scenarios; the rifle's main mag
+          stays grip. (vr_attach_point.mag_hold, taken from MML even over a tuning override.)
         - Not saved: the part-used lists and dropped-mag rounds are not in save games (a part-used mag in
           inventory becomes a full one after a load). Ammo pickups stay sprites for now (Daniel's call).
   - [ ] MD3 PLAN (proposed 2026-09-28, not started) -- see "Models: split magazines and posed hands" below.

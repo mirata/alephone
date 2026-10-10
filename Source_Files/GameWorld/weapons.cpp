@@ -300,10 +300,9 @@ static void  vr_update_offhand_weapon(short player_index);
 // you did not pick up. The fist is then selected by the VR layer (render.cpp) on the next frame.
 static void vr_reset_hands_for_new_weapons(void)
 {
-	VR_SetHeldWeaponHand(-1);
-	VR_SetHandMagazine(0, NONE);
-	VR_SetHandMagazine(1, NONE);
-	VR_ResetMagStates();          // every weapon starts with its magazine in
+	VR_ResetHandsState();
+	s_vr_loosened_weapon[0] = s_vr_loosened_weapon[1] = NONE;
+	s_vr_loosened_copy[0] = s_vr_loosened_copy[1] = 0;
 }
 static void  update_player_weapons_pass(short player_index, uint32 action_flags, bool vr_offhand_pass);
 static void  vr_service_manual_reload(short player_index);

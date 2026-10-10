@@ -140,6 +140,11 @@ static void read_attach_attrs(const InfoTree& child, vr_attach_point& pt)
 	child.read_attr("mag_round",  pt.mag_round);
 	child.read_attr("mag_drum",   pt.mag_drum);
 	child.read_attr("drop_on_release", pt.drop_on_release);
+	{
+		std::string hold;
+		if (child.read_attr("mag_hold", hold))
+			pt.mag_hold = (hold == "palm_up") ? 2 : (hold == "grip") ? 1 : 0;
+	}
 	pt.defined = true;
 }
 
@@ -488,6 +493,7 @@ const vr_attach_point* VR_GetAttachPoint(short weapon_type, int which)
 			ov->second.mag_round = it->second[which].mag_round;
 			ov->second.mag_drum  = it->second[which].mag_drum;
 			ov->second.drop_on_release = it->second[which].drop_on_release;
+			ov->second.mag_hold = it->second[which].mag_hold;
 		}
 		return &ov->second;
 	}
@@ -739,6 +745,19 @@ void VR_SwapMagCopies(short weapon_type)
 }
 bool VR_WeaponDirectLoad(short weapon_type) { return s_directLoadWeapons.count(weapon_type) > 0; }
 void VR_ResetMagStates(void) { s_magStates.clear(); s_looseMagRounds.clear(); s_droppedMags.clear(); }
+
+static unsigned s_handsResetSerial = 0;
+void VR_ResetHandsState(void)
+{
+	s_heldWeaponHand = -1;
+	s_holsterGrabPending = NONE;
+	for (int h = 0; h < 2; ++h) { s_handMag[h] = NONE; s_handMagRounds[h] = -1; }
+	VR_ResetMagStates();          // every weapon starts with its magazine in
+	s_manualReloads.clear();
+	s_partialMags.clear();
+	++s_handsResetSerial;
+}
+unsigned VR_GetHandsResetSerial(void) { return s_handsResetSerial; }
 
 const vr_attach_point* VR_GetForegripOrDefault(short weapon_type)
 {

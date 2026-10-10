@@ -78,6 +78,7 @@ Feb 11, 2001 (Loren Petrich):
 #include "network_games.h"
 #include "InfoTree.h"
 #include "vr_weapons.h"   // VR weapon handling: part-used magazines dropped and picked up again
+#include "Logging.h"
 
 // LP addition: for the XML stuff
 #include <string.h>
@@ -782,6 +783,8 @@ static bool get_item(
 		/* VR weapon handling: a part-used magazine somebody dropped goes back into the inventory part-used */
 		short vr_rounds = 0;
 		if (VR_TakeDroppedMag(object_index, &vr_rounds) && vr_rounds >= 0) VR_PushPartialMag(item_type, vr_rounds);
+		if (vr_rounds != 0)
+			logWarning("VRDROP picked up object %d item=%d (part-used rounds %d)", object_index, item_type, (int)vr_rounds);
 		/* remove it */
 		remove_map_object(object_index);
 	}
