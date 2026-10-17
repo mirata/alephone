@@ -81,6 +81,12 @@ cycling had never been disabled in this mode.
 
 ### Open -- Daniel's list (add new items here)
 
+- 2026-10-16 (deployed, awaiting confirm): fusion pistol charged with no magazine -> an empty
+  manual-reload gun's charging trigger now dry-clicks instead of charging (`handle_trigger_down`), and
+  ejecting mid-charge kills the charge + charging sound (`vr_enforce_empty_wells`). Weapon select:
+  empty-handed grips near the pouches were a dead zone -> pouches only block the forgiving pick when they
+  have a job for the gun in the other hand (`vr_ws_forgiving_pick`).
+
 - Verify M1 fists (needs `deploy.ps1 -Scenario "Marathon"`; the device currently has M2 data).
 - NEXT: Daniel positions holsters/pouches in setup mode -> I read them and make them the defaults.
   Source: his preferences (`adb shell run-as org.alephone cat "files/Marathon 2 Preferences"`, the
@@ -379,6 +385,45 @@ cycling had never been disabled in this mode.
         - New game kept per-hand state: VR_ResetHandsState() (held hand, pending grab, hand mags, mag states,
           queued reloads, partial mags) + a serial the renderer watches (vr_check_hands_reset: poses, slides,
           swings, holster last-hand, falling mags, pending pickups) + weapons.cpp loosened-mag per hand.
+        - Seat flash (2026-10-10): eye 0 drew the gun (mag part hidden) BEFORE the per-frame update seated the
+          mag, then the hands AFTER (hand empty) -> no mag for one eye-frame. s_seatGhost draws it at the seat
+          for that eye.
+  - [ ] WEAPON SELECT MODE (2026-10-10, Daniel's design, awaiting device test). Pref "Weapon Select" in the new
+        VR-only PREFERENCES -> EXPERIMENTAL screen (with "VR Weapon Handling", moved out of VR CONTROLS);
+        XML weapon_select_mode. Current holsters unchanged when off. Hold X or A (>250 ms; a quicker press
+        is replayed to its binding on release, so A tap = Use) -> selecting: turn-stick up/down flicks step
+        through carried weapons (weapon order, fist excluded), name via screen_printf, the candidate's
+        holsters drawn as outlines, the stick doesn't turn. Release commits: holsters show ONLY that type
+        (both hips for a pair); anything else in the hands goes back to its holster (swing) and hides.
+        A free hand's grip anywhere pulls the chosen weapon (its own side's holster first) -- unless near a
+        pouch (1.5x radius), a loose mag, or within 2x the other weapon's foregrip radius. Off in terminals.
+        Code: vr_openxr.cpp updateWeaponSelectInput; render.cpp vr_update_weapon_select /
+        vr_ws_forgiving_pick / filter at the end of vr_visible_holsters.
+        - Round 2 (2026-10-10): both grips at once drew one magnum -- the 2nd hand's grab ran while the 1st
+          hand's draw was still in flight (engine on the fist), so nothing to pair with. Now deferred
+          (s_vrGrabDefer, <= 0.6 s, grip must stay closed) and completed once the primary is up; applies to
+          ordinary holsters too. Pouch defaults 6 cm lower. Candidate shown as the HUD weapon-panel picture
+          (weapon_interface_definitions, the pair picture when carrying two) 8 cm above the turn-stick hand,
+          full bright; the text message only as fallback when a weapon has no panel picture.
+        - Round 3-4 (2026-10-10): picture drawn the HUD's way (OGL_RenderVRHudShapeQuad: OGL_Txtr_HUD, U across),
+          over the DOMINANT hand, billboarded to the eyes, one px->m scale (M2 rocket launcher = 18 cm), and
+          drawn AFTER the HUD composite (world matrices saved before RasPtr->End(), push/pop around it).
+          Select button is now X or A -- whichever is NOT bound to Use (X if neither) -- instant on press,
+          its own binding suppressed; tap/hold split removed. HUD shows the chosen weapon (art + ammo) while
+          the hands are empty: vr_hud_display_weapon() at the classic HUD + Lua current/desired (display only).
+  - [ ] HAND PIN (2026-10-14, awaiting device test): the hand MODEL is drawn on what it holds, not the
+        controller -- on a magazine riding a well's path (default hold worked backwards from the path pose,
+        vr_hand_pose_on_mag) and on the gun while steadying (pose captured in gun axes when two-handing
+        latches, vr_hand_pose_on_gun). Eases on 0.08 s / off 0.15 s (vr_hand_draw_pose). On the path, the
+        controller wandering > 12 cm from where it took hold breaks the grip (out: mag stays loose in the gun;
+        in: back to the hand); running ahead along the pull doesn't count. Leaving the path no longer captures
+        the controller's offset as the hold (that was the floating mag): it swings into the default hold.
+        - 2026-10-14 follow-ups: the hand keeps WHATEVER pose it had relative to the magazine when the slide began
+          (s_magGrab*, both directions -- no snap to a set grip; the magazine never moves in the hand, the hand
+          follows the snap onto the path). A released mag that clears the gun keeps that grip (hold captured
+          from the pinned pose); the in-hand mag is drawn on the hand MODEL so both ease back together.
+          Left-hand palm-up hold was a reflection (inverted normals in the left hand): drumR now negated for
+          hand 0 so it's a proper rotation.
         - MAG HOLD is now CONFIG: <vr_magwell mag_hold="palm_up|grip">; default by shape (drums palm_up,
           box mags grip). pistol + plasma_pistol set to palm_up in all three scenarios; the rifle's main mag
           stays grip. (vr_attach_point.mag_hold, taken from MML even over a tuning override.)

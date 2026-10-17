@@ -226,7 +226,7 @@ void HUD_Class::update_weapon_panel(bool force_redraw)
 		struct weapon_interface_data *definition;
 		screen_rectangle *destination= get_interface_rectangle(_weapon_display_rect);
 		screen_rectangle source;
-		short desired_weapon= get_player_desired_weapon(current_player_index);
+		short desired_weapon= vr_hud_display_weapon(current_player_index, get_player_desired_weapon(current_player_index));
 
 		/* Now we have to erase, because the panel won't do it for us.. */
 		FillRect(destination, _inventory_background_color);
@@ -599,7 +599,7 @@ void HUD_Class::draw_ammo_display_in_panel(short trigger_id)
 	struct weapon_interface_data *current_weapon_data;
 	struct weapon_interface_ammo_data *current_ammo_data;
 	short ammunition_count;
-	short desired_weapon= get_player_desired_weapon(current_player_index);
+	short desired_weapon= vr_hud_display_weapon(current_player_index, get_player_desired_weapon(current_player_index));
 
 	/* Based on desired weapon, so we can get ammo updates as soon as we change */
 	if(desired_weapon != NONE)

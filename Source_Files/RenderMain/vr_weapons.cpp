@@ -3,6 +3,8 @@
 #include "items.h"
 #include "map.h"         // game_is_networked
 #include "interface.h"   // get_game_controller / _replay / _demo
+#include "computer_interface.h"   // player_in_terminal_mode
+#include "player.h"
 #include "vr_openxr.h"   // VR_Settings
 #include "FileHandler.h"
 #include "ReplacementSounds.h"   // ExternalSoundHeader: decode a sound file
@@ -89,8 +91,9 @@ static const vr_holster_anchor kDefaultHolsters[VR_HOLSTER_COUNT] = {
 	{ -0.268f, -0.525f,  0.112f, 0.16f, { -0.073f, -0.995f, -0.075f }, {  0.575f, -0.103f,  0.812f }, true },  // left_chest
 	{  0.20f, -0.22f, -0.18f, 0.18f },   // right_back   (reach up and over the shoulder)
 	{ -0.20f, -0.22f, -0.18f, 0.18f },   // left_back
-	{ -0.097f, -0.420f, 0.018f, 0.11f, { -0.055f, 0.021f, 0.998f }, {  0.058f, 0.998f, -0.018f }, true },  // primary_pouch
-	{  0.082f, -0.470f, 0.003f, 0.11f, {  0.382f, -0.019f, 0.924f }, { -0.099f, 0.993f,  0.061f }, true },  // secondary_pouch
+	// pouches 6 cm lower than set up (Daniel, 2026-10-10: they got in the way of drawing weapons)
+	{ -0.097f, -0.480f, 0.018f, 0.11f, { -0.055f, 0.021f, 0.998f }, {  0.058f, 0.998f, -0.018f }, true },  // primary_pouch
+	{  0.082f, -0.530f, 0.003f, 0.11f, {  0.382f, -0.019f, 0.924f }, { -0.099f, 0.993f,  0.061f }, true },  // secondary_pouch
 	{  0.114f, -0.606f,  0.051f, 0.20f, { -0.493f, -0.870f,  0.031f }, { -0.856f,  0.491f,  0.161f }, true },  // front_center (rifle)
 	{  0.00f, -0.30f, -0.20f, 0.20f },   // back_center
 };
@@ -673,6 +676,14 @@ extern "C" bool VR_PhysicalWeaponsActive(void)
 	return true;
 }
 
+extern "C" bool VR_WeaponSelectModeActive(void)
+{
+	// Not in a terminal: there A/X page forward, and holding one must not open the selection.
+	return VR_Settings()->weaponSelectMode && VR_PhysicalWeaponsActive() &&
+	       get_game_state() == _game_in_progress && local_player_index != NONE &&
+	       !player_in_terminal_mode(local_player_index);
+}
+
 static short s_holsterGrabPending = NONE;
 static int   s_heldWeaponHand     = -1;
 
@@ -758,6 +769,10 @@ void VR_ResetHandsState(void)
 	++s_handsResetSerial;
 }
 unsigned VR_GetHandsResetSerial(void) { return s_handsResetSerial; }
+
+static short s_weaponSelectChosen = NONE;
+void  VR_SetWeaponSelectChosen(short weapon_type) { s_weaponSelectChosen = weapon_type; }
+short VR_GetWeaponSelectChosen(void)              { return s_weaponSelectChosen; }
 
 const vr_attach_point* VR_GetForegripOrDefault(short weapon_type)
 {

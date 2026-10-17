@@ -185,6 +185,7 @@ static void keyboard_dialog(void *arg);
 //static void texture_options_dialog(void *arg);
 #if defined(__ANDROID__)
 static void vr_controls_dialog(void *arg);  // replaces the PC CONTROLS screen in VR
+static void vr_experimental_dialog(void *arg);  // VR only: features still being tried out
 static void vr_graphics_dialog(void *arg);  // replaces the PC GRAPHICS screen in VR (HUD + rendering only)
 static void vr_sound_dialog(void *arg);     // replaces the PC SOUND screen in VR (volumes; rest forced optimal)
 void vr_force_optimal_sound(void);          // pin Quest-optimal audio (stereo + 3D, no HRTF), called at load
@@ -256,6 +257,9 @@ void handle_preferences(void)
 	d.add(w_environment);
 	w_button *w_plugins = new w_button("PLUGINS", plugins_dialog, &d);
 	d.add(w_plugins);
+	// VR only, and temporary: a home for features still being tried out.
+	w_button *w_experimental = VR_IsActive() ? new w_button("EXPERIMENTAL", vr_experimental_dialog, &d) : nullptr;
+	if (w_experimental) d.add(w_experimental);
 
 	w_button *w_return = new w_button("RETURN", dialog_cancel, &d);
 	d.add(w_return);
@@ -269,6 +273,7 @@ void handle_preferences(void)
 	placer->add(w_controls);
 	placer->add(w_environment);
 	placer->add(w_plugins);
+	if (w_experimental) placer->add(w_experimental);
 	placer->add(new w_spacer, true);
 	placer->add(w_return);
 
@@ -1839,12 +1844,6 @@ static void vr_controls_dialog(void *arg)
 	table->dual_add(height_adjust_w->label("Height Adjust"), d);
 	table->dual_add(height_adjust_w, d);
 
-	// ONE switch for the whole experimental mode (docs/VR_PHYSICAL_WEAPONS.md). The attach-point
-	// gizmos are a code-only authoring aid (vr_settings_t::showAttachGizmos), not a preference.
-	w_toggle *phys_weapons_w = new w_toggle(vr->experimentalWeapons != 0);
-	table->dual_add(phys_weapons_w->label("VR Weapon Handling (experimental)"), d);
-	table->dual_add(phys_weapons_w, d);
-
 	table->add_row(new w_spacer(), true);
 	table->dual_add_row(new w_static_text("Button Mapping"), d);
 
@@ -1874,7 +1873,6 @@ static void vr_controls_dialog(void *arg)
 	clear_screen();
 
 	if (d.run() == 0) {	// Accepted (button selection index IS the VR_ACT_* value)
-		vr->experimentalWeapons = phys_weapons_w->get_selection() ? 1 : 0;
 		vr->dominantHand   = hand_w->get_selection();
 		vr->switchSticks   = switch_sticks_w->get_selection() ? 1 : 0;
 		vr->snapTurn       = turn_style_w->get_selection();
@@ -1887,6 +1885,53 @@ static void vr_controls_dialog(void *arg)
 		vr->heightAdjustM  = vr_height_adjust_values[height_adjust_w->get_selection()];
 		for (int i = 0; i < VR_BTN_COUNT; ++i)
 			vr->buttonAction[i] = btn_w[i]->get_selection();
+		write_preferences();
+	}
+}
+
+// EXPERIMENTAL (VR only, temporary): features still being tried out, off by default. Weapon handling is
+// the master switch (docs/VR_PHYSICAL_WEAPONS.md); weapon select works on top of it. The attach-point
+// gizmos are a code-only authoring aid (vr_settings_t::showAttachGizmos), not a preference.
+static void vr_experimental_dialog(void *arg)
+{
+	dialog *parent = (dialog *)arg;
+	(void)parent;
+	vr_settings_t *vr = VR_Settings();
+
+	dialog d;
+	vertical_placer *placer = new vertical_placer;
+	placer->dual_add(new w_title("EXPERIMENTAL"), d);
+	placer->add(new w_spacer(), true);
+
+	table_placer *table = new table_placer(2, get_theme_space(ITEM_WIDGET), true);
+	table->col_flags(0, placeable::kAlignRight);
+	table->col_flags(1, placeable::kAlignLeft);
+
+	w_toggle *phys_weapons_w = new w_toggle(vr->experimentalWeapons != 0);
+	table->dual_add(phys_weapons_w->label("VR Weapon Handling"), d);
+	table->dual_add(phys_weapons_w, d);
+
+	w_toggle *weapon_select_w = new w_toggle(vr->weaponSelectMode != 0);
+	table->dual_add(weapon_select_w->label("Weapon Select"), d);
+	table->dual_add(weapon_select_w, d);
+
+	placer->add(table, true);
+	placer->add(new w_spacer(), true);
+	placer->dual_add(new w_static_text("Weapon Select needs VR Weapon Handling. Hold X or A (whichever is"), d);
+	placer->dual_add(new w_static_text("not Use) and flick the turn stick up/down; grip a free hand to draw."), d);
+	placer->add(new w_spacer(), true);
+
+	horizontal_placer *button_placer = new horizontal_placer;
+	button_placer->dual_add(new w_button("ACCEPT", dialog_ok, &d), d);
+	button_placer->dual_add(new w_button("CANCEL", dialog_cancel, &d), d);
+	placer->add(button_placer, true);
+
+	d.set_widget_placer(placer);
+	clear_screen();
+
+	if (d.run() == 0) {
+		vr->experimentalWeapons = phys_weapons_w->get_selection() ? 1 : 0;
+		vr->weaponSelectMode    = weapon_select_w->get_selection() ? 1 : 0;
 		write_preferences();
 	}
 }
@@ -4883,6 +4928,7 @@ InfoTree vr_preferences_tree()
 	root.put_attr("show_fps", vr->showFPS);
 	root.put_attr("laser_sight", vr->showLaserSight);
 	root.put_attr("physical_weapons", vr->experimentalWeapons);
+	root.put_attr("weapon_select_mode", vr->weaponSelectMode);
 	// VR weapon handling: holster / pouch positions the player set up in-headset (on top of the defaults).
 	for (int slot = 0; slot < VR_HOLSTER_COUNT; ++slot)
 	{
@@ -6049,6 +6095,7 @@ void parse_vr_preferences(InfoTree root, std::string version)
 	root.read_attr("show_fps", vr->showFPS);
 	root.read_attr("laser_sight", vr->showLaserSight);
 	root.read_attr("physical_weapons", vr->experimentalWeapons);
+	root.read_attr("weapon_select_mode", vr->weaponSelectMode);
 	VR_ClearHolsterOverrides();
 	for (const InfoTree& h : root.children_named("holster_anchor"))
 	{

@@ -226,6 +226,8 @@ Jan 17, 2001 (Loren Petrich):
 extern WindowPtr screen_window;
 #endif
 
+#include "game_window.h"   // weapon select: mark the HUD weapon/ammo dirty
+#include "HUDRenderer.h"   // weapon select: weapon_interface_definitions (HUD weapon pictures)
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -1061,6 +1063,31 @@ static int vr_holster_slot_side(int slot)
 // taken. A weapon in a hand empties the slot on THAT hand's side first, so drawing your left pistol
 // empties your left hip and the right one stays put. Shared by the renderer and the grab test, so what
 // you can grab is exactly what you can see.
+// ---- VR weapon select mode (Experimental prefs) ---------------------------------------------------
+// Hold X or A and flick the turn stick to choose ONE weapon type; only its holsters show (both hips for a
+// pair of magnums). Releasing commits: anything else in the hands goes back to its holster and away. Then a
+// free hand's grip ANYWHERE pulls that weapon into it -- unless the hand is reaching for ammo, a loose
+// magazine, or the other hand's weapon (Daniel, 2026-10-10). The ordinary holsters are untouched when off.
+static short    s_wsSelected  = NONE;    // the chosen weapon type
+static short    s_wsCandidate = NONE;    // while the button is held: what releasing would choose
+static bool     s_wsWasHeld   = false;
+struct vr_ws_depart { short wt; uint64_t untilMs; };
+static vr_ws_depart s_wsDepart[2] = { { NONE, 0 }, { NONE, 0 } };   // put back by a commit: still shown
+                                                                     // for its swing home, then hidden
+
+// The weapon the holsters are restricted to right now (NONE = none of them).
+static short vr_ws_filter(void)
+{
+	return VR_WeaponSelectHeld() ? s_wsCandidate : s_wsSelected;
+}
+
+static bool vr_ws_departing(short wt)
+{
+	const uint64_t now = machine_tick_count();
+	for (const auto& d : s_wsDepart) if (d.wt == wt && now < d.untilMs) return true;
+	return false;
+}
+
 static void vr_visible_holsters(short out[VR_HOLSTER_COUNT])
 {
 	vr_hands_state hs;
@@ -1080,6 +1107,12 @@ static void vr_visible_holsters(short out[VR_HOLSTER_COUNT])
 	};
 	if (hs.primary != NONE) takeFromBody(hs.primary, hs.primaryCount, hs.primaryCount >= 2 ? -1 : hs.heldHand);
 	if (hs.offhand != NONE) takeFromBody(hs.offhand, 1, hs.heldHand >= 0 ? 1 - hs.heldHand : -1);
+
+	if (VR_WeaponSelectModeActive()) {
+		const short only = vr_ws_filter();
+		for (int slot = 0; slot < VR_HOLSTER_COUNT; ++slot)
+			if (out[slot] != NONE && out[slot] != only && !vr_ws_departing(out[slot])) out[slot] = NONE;
+	}
 }
 
 // ---- VR physical weapons: holster & pouch setup mode ---------------------------------------------
@@ -1282,11 +1315,167 @@ static bool vr_hand_is_free(int hand)
 }
 
 static void vr_check_hands_reset(void);
+static short s_vrGrabDefer[2] = { NONE, NONE };   // a grab to finish once the other hand's draw lands
+
+// Every weapon type carried, in weapon order (the fist excluded): what weapon select steps through.
+static void vr_ws_carried(std::vector<short>& out)
+{
+	out.clear();
+	for (int slot = 0; slot < VR_HOLSTER_COUNT; ++slot) {
+		if (VR_HolsterSlotIsPouch(slot)) continue;
+		const short wt = vr_holster_occupant(slot);
+		if (wt == NONE || wt == _weapon_fist) continue;
+		if (std::find(out.begin(), out.end(), wt) == out.end()) out.push_back(wt);
+	}
+	std::sort(out.begin(), out.end());
+}
+
+static bool vr_ws_has_hud_image(short wt);
+static void vr_ws_announce(short wt)
+{
+	if (vr_ws_has_hud_image(wt)) return;   // shown as the HUD's weapon picture (render_vr_weapon_select_image)
+	const short item = get_weapon_item_type(wt);
+	if (item == NONE) return;
+	char name[256];
+	get_item_name(name, item, false);
+	screen_printf("%s", name);
+}
+
+static void vr_ws_depart_add(short wt)
+{
+	vr_ws_depart& d = (s_wsDepart[0].wt == NONE || machine_tick_count() >= s_wsDepart[0].untilMs)
+	                  ? s_wsDepart[0] : s_wsDepart[1];
+	d.wt = wt;
+	d.untilMs = machine_tick_count() + (uint64_t)kWeaponSwingMs + 80;
+}
+
+static void vr_ws_publish(void)
+{
+	if (VR_GetWeaponSelectChosen() == s_wsSelected) return;
+	VR_SetWeaponSelectChosen(s_wsSelected);
+	mark_weapon_display_as_dirty();   // the classic HUD redraws on demand
+	mark_ammo_display_as_dirty();
+}
+
+static void vr_update_weapon_select_inner(void);
+// Once per frame: the selection (stepping while held, committing on release), shared with the HUD.
+static void vr_update_weapon_select(void)
+{
+	vr_update_weapon_select_inner();
+	vr_ws_publish();
+}
+
+static void vr_update_weapon_select_inner(void)
+{
+	if (!VR_WeaponSelectModeActive()) {
+		s_wsSelected = s_wsCandidate = NONE; s_wsWasHeld = false;
+		VR_TakeWeaponSelectStep(); VR_TakeWeaponSelectCommit();
+		return;
+	}
+	std::vector<short> carried;
+	vr_ws_carried(carried);
+	vr_hands_state hs;
+	vr_get_hands_state(hs);
+	auto carriedHas = [&](short wt) { return std::find(carried.begin(), carried.end(), wt) != carried.end(); };
+	if (s_wsSelected == NONE || !carriedHas(s_wsSelected))
+		s_wsSelected = (hs.primary != NONE && carriedHas(hs.primary)) ? hs.primary
+		             : (carried.empty() ? (short)NONE : carried.front());
+
+	const bool held = VR_WeaponSelectHeld();
+	// the hand on the turn stick (0 = left), for the clicks
+	const int turnHand = (VR_Settings()->dominantHand ? 0 : 1) ^ (VR_Settings()->switchSticks ? 1 : 0);
+	if (held && !s_wsWasHeld) {
+		s_wsCandidate = s_wsSelected;
+		if (s_wsCandidate != NONE) vr_ws_announce(s_wsCandidate);
+		VR_Vibrate(turnHand, 20, 0.4f);
+	}
+	s_wsWasHeld = held;
+	if (held) {
+		const int step = VR_TakeWeaponSelectStep();
+		if (step != 0 && !carried.empty()) {
+			int idx = (int)(std::find(carried.begin(), carried.end(), s_wsCandidate) - carried.begin());
+			if (idx >= (int)carried.size()) idx = 0;
+			const int n = (int)carried.size();
+			idx = ((idx + step) % n + n) % n;
+			s_wsCandidate = carried[idx];
+			vr_ws_announce(s_wsCandidate);
+			VR_Vibrate(turnHand, 15, 0.35f);
+		}
+		return;
+	}
+	VR_TakeWeaponSelectStep();
+	if (!VR_TakeWeaponSelectCommit()) return;
+	if (s_wsCandidate == NONE || !carriedHas(s_wsCandidate)) return;
+	s_wsSelected = s_wsCandidate;
+
+	// Whatever the hands hold that is not the new choice goes back on the body (and on, out of sight).
+	const bool keepOff = hs.offhand != NONE && hs.offhand == s_wsSelected;
+	const bool keepPri = hs.primary != NONE && hs.primary == s_wsSelected;
+	if (hs.offhand != NONE && !keepOff) {
+		vr_ws_depart_add(hs.offhand);
+		vr_clear_offhand_weapon(current_player_index);
+	}
+	if (hs.primary != NONE && !keepPri) {
+		vr_ws_depart_add(hs.primary);
+		if (keepOff && vr_promote_offhand_weapon(current_player_index)) {
+			VR_SetHeldWeaponHand(1 - hs.heldHand);
+		} else {
+			VR_SetHeldWeaponHand(-1);
+			VR_SetHolsterGrabRequest(_weapon_fist);
+		}
+	}
+}
+
+static short vr_pouch_ammo_type(int pouchSlot, int reachingHand);   // with the magazine code below
+
+// Weapon select: what a free hand's grip pulls in when it is not at any holster -- the chosen weapon from
+// the holster on that hand's side if there is one, else the other. NONE when the hand is reaching for
+// something else: a loose magazine, a pouch, or the other hand's weapon.
+static short vr_ws_forgiving_pick(const view_data* view, float W, int hand, float hx, float hy, float hz,
+                                  const short visible[VR_HOLSTER_COUNT], const vr_hands_state& hs)
+{
+	if (!VR_WeaponSelectModeActive() || VR_GetHandMagazine(hand) != NONE) return NONE;
+	if (hs.heldHand == hand || (hs.heldHand >= 0 && (hs.offhand != NONE || hs.primaryCount >= 2))) return NONE;
+	// near a loosened magazine
+	{
+		const float hp[3] = { hx, hy, hz };
+		if (vr_hand_near_loose_mag(W, hand, hp)) return NONE;
+	}
+	// reaching to the other hand's weapon (twice its two-handed grab radius)
+	if (hs.heldHand >= 0 && s_vrWeaponPose[hs.heldHand].valid) {
+		const vr_weapon_pose& wp = s_vrWeaponPose[hs.heldHand];
+		const vr_attach_point* fg = VR_GetForegripOrDefault(wp.weapon_type);
+		float target[3];
+		vr_weapon_local_to_world(wp, W, fg->x, fg->y, fg->z, target);
+		const float dx = hx-target[0], dy = hy-target[1], dz = hz-target[2];
+		const float r = 2.f * fg->radius * W;
+		if (dx*dx + dy*dy + dz*dz <= r*r) return NONE;
+	}
+	// in or near a pouch that is for the gun in the other hand (even if out of that ammo). With no gun
+	// held a pouch has no job and is not there at all (Daniel, 2026-10-16: empty-handed, a grip over the
+	// pouches did nothing -- a dead zone right by the holsters).
+	for (int slot = 0; slot < VR_HOLSTER_COUNT; ++slot) {
+		if (!VR_HolsterSlotIsPouch(slot) || vr_pouch_ammo_type(slot, hand) == NONE) continue;
+		vr_holster_anchor pa;
+		VR_GetHolsterAnchorForPlayer(slot, VR_EyeHeightM(), &pa);
+		float c[3]; vr_holster_world_pos(view, slot, c);
+		const float dx = hx-c[0], dy = hy-c[1], dz = hz-c[2];
+		const float r = pa.radius * 1.5f * W;
+		if (dx*dx + dy*dy + dz*dz <= r*r) return NONE;
+	}
+	int pick = -1;
+	for (int slot = 0; slot < VR_HOLSTER_COUNT; ++slot) {
+		if (visible[slot] == NONE || visible[slot] != s_wsSelected) continue;
+		if (pick < 0 || vr_holster_slot_side(slot) == hand) pick = slot;
+	}
+	return pick >= 0 ? visible[pick] : (short)NONE;
+}
 
 // Once per frame: grip near an occupied holster draws that weapon.
 static void vr_update_holster_grabs(const view_data* view)
 {
 	vr_check_hands_reset();
+	if (VR_PhysicalWeaponsActive()) vr_update_weapon_select();
 	if (!VR_PhysicalWeaponsActive()) {
 		s_holsterGripPrev[0] = s_holsterGripPrev[1] = false;
 		return;
@@ -1348,6 +1537,41 @@ static void vr_update_holster_grabs(const view_data* view)
 			}
 		}
 		VR_SetTwoHandedGrabInRange(inRange);
+	}
+
+	// A grab that had to wait: both grips closed together, and the other hand's draw was still on its way
+	// through the engine (current weapon still the fist), so there was nothing yet to pair with or sit beside.
+	// It completes as soon as that weapon is up -- while this grip is still closed (Daniel, 2026-10-10: both
+	// grips at once often drew only one magnum).
+	{
+		static short    s_deferGrab[2]    = { NONE, NONE };
+		static uint64_t s_deferUntilMs[2] = { 0, 0 };
+		const uint64_t now = machine_tick_count();
+		for (int hand = 0; hand < 2; ++hand) {
+			if (s_vrGrabDefer[hand] != NONE) {          // posted by the grab loop below (last frame)
+				s_deferGrab[hand] = s_vrGrabDefer[hand];
+				s_deferUntilMs[hand] = now + 600;
+				s_vrGrabDefer[hand] = NONE;
+			}
+			if (s_deferGrab[hand] == NONE) continue;
+			float g = 0.f;
+			VR_GetRawHandInput(hand, nullptr, nullptr, nullptr, &g, nullptr);
+			vr_hands_state hsd;
+			vr_get_hands_state(hsd);
+			if (g <= 0.5f || now > s_deferUntilMs[hand] || hsd.heldHand < 0 || hsd.heldHand == hand ||
+			    VR_GetHandMagazine(hand) != NONE) {
+				s_deferGrab[hand] = NONE;
+				continue;
+			}
+			if (hsd.primary == NONE) continue;          // still coming up
+			const short w = s_deferGrab[hand];
+			s_deferGrab[hand] = NONE;
+			if (hsd.offhand != NONE) continue;
+			const bool took = (w == hsd.primary && weapon_is_twofisted(w))
+			                ? vr_raise_second_weapon(current_player_index)
+			                : vr_set_offhand_weapon(current_player_index, w);
+			if (took) VR_Vibrate(hand, 40, 0.6f);
+		}
 	}
 
 	for (int hand = 0; hand < 2; ++hand) {
@@ -1416,7 +1640,21 @@ static void vr_update_holster_grabs(const view_data* view)
 			}
 		}
 
-		if (best != NONE) {
+		short pick = best;
+		if (pick == NONE) {
+			// Not on a weapon holster, and this hand is free: try the ammo pouches.
+			if (hs.heldHand != hand && hs.offhand == NONE && VR_GetHandMagazine(hand) == NONE &&
+			    vr_try_grab_magazine(view, hand, hx, hy, hz))
+				continue;
+			// Weapon select: nothing else wanted -- the chosen weapon flies into this hand from its holster.
+			pick = vr_ws_forgiving_pick(view, W, hand, hx, hy, hz, visible, hs);
+		}
+		if (pick != NONE) {
+			const short best = pick;
+			if (hs.heldHand >= 0 && hs.heldHand != hand && hs.primary == NONE) {
+				s_vrGrabDefer[hand] = best;   // the other hand's draw is still in flight: finish this one after it
+				continue;
+			}
 			if (hs.heldHand < 0) {
 				// Empty-handed: this becomes the primary weapon, in this hand.
 				VR_SetHolsterGrabRequest(best);
@@ -1431,9 +1669,6 @@ static void vr_update_holster_grabs(const view_data* view)
 				                : vr_set_offhand_weapon(current_player_index, best);
 				if (took) VR_Vibrate(hand, 40, 0.6f);
 			}
-		} else if (hs.heldHand != hand && hs.offhand == NONE && VR_GetHandMagazine(hand) == NONE) {
-			// Not on a weapon holster, and this hand is free: try the ammo pouches.
-			vr_try_grab_magazine(view, hand, hx, hy, hz);
 		}
 	}
 
@@ -1717,6 +1952,8 @@ static void render_vr_holstered_weapons(view_data* view)
 				const bool dragging = (slot == s_setupDragSlot[0] || slot == s_setupDragSlot[1]);
 				if (dragging) outline(1.f, 1.f, 1.f, 1.f, kOutlineWidthM * 1.5f);
 				else          outline(0.55f, 0.85f, 1.f, 0.9f, kOutlineWidthM);
+			} else if (VR_WeaponSelectModeActive() && VR_WeaponSelectHeld()) {
+				outline(0.75f, 0.95f, 1.f, 0.9f, kOutlineWidthM);          // weapon select: where the choice hangs
 			} else if (s_holsterNear[slot] > 0.5f) {
 				outline(0.6f, 0.8f, 1.f, 0.4f, kLookDownOutlineWidthM);    // looking down: faint and thin
 			}
@@ -2340,6 +2577,14 @@ static bool  s_slideAuto[2]     = { false, false }; // let go on the path: it ru
 static float s_slideMinT[2]     = { 1.f, 1.f };     // coming out: the furthest out it has been
 static bool  s_vrLooseNoDrop[4] = { false, false, false, false }; // per gun hand x well: went loose by a hand letting go mid-pull,
                                                     // so it is not dropped out of the seat again
+static bool  s_magGrabFromLoose[2] = { false, false };   // this slide began by grabbing a released magazine
+static bool  s_magGrabValid[2]     = { false, false };   // ...and where the hand took hold of it, in its frame
+static float s_magGrabP[2][3], s_magGrabR[2][3], s_magGrabU[2][3], s_magGrabF[2][3];
+static bool  s_pinOffValid[2] = { false, false };  // controller-to-held-magazine offset when the slide engaged
+static float s_pinOff0[2][3];
+static const float kPinBreakM = 0.12f;              // the controller may wander this far from that before the grip goes
+static bool vr_hand_pose_on_mag(float W, int hand, const float cp[3], const float cr[3], const float cu[3],
+                                const float cf[3], float p[3], float r[3], float u[3], float f[3]);
 static const float kAutoSeatSeconds = 0.10f;       // the whole travel, when it runs home
 static const float kSlideOutSeconds = 0.12f;       // the quickest a magazine can slide the whole path out
 
@@ -2420,6 +2665,10 @@ static void vr_hand_mag_pose(float W, int hand, const vr_mag_dims& md, const flo
 	vr_drum_local(kDrumFace, hand, drumF);
 	vr_drum_local(kDrumTop, hand, drumT);
 	for (int k = 0; k < 3; ++k) drumD[k] = -drumT[k];
+	// Mirroring the measured right-hand hold for the left hand (x negated on every axis) is a REFLECTION: the
+	// magazine came out inside-out (inverted normals) in the left hand. Turning its sideways axis back round
+	// makes it a proper rotation -- the same hold, as the magazine is symmetric across.
+	if (hand == 0) for (int k = 0; k < 3; ++k) drumR[k] = -drumR[k];
 	const float* idR = md.palmUp ? drumR : boxR;
 	const float* idD = md.palmUp ? drumD : boxD;
 	const float* idF = md.palmUp ? drumF : boxF;
@@ -2478,6 +2727,9 @@ static void vr_slide_engage(int hand, const vr_well& wl, const float pos[3], flo
 	const float rel[3] = { pos[0]-wl.entry[0], pos[1]-wl.entry[1], pos[2]-wl.entry[2] };
 	const float along  = rel[0]*wl.ins[0] + rel[1]*wl.ins[1] + rel[2]*wl.ins[2];
 	s_slideWell[hand]     = wl.which;
+	s_pinOffValid[hand]   = false;
+	s_magGrabFromLoose[hand] = removing;   // a released magazine taken hold of: the hand stays where it grabbed
+	s_magGrabValid[hand]  = false;
 	s_slideRemoving[hand] = removing;
 	s_slideAuto[hand]     = false;
 	s_slideT[hand]        = s_slideTMax[hand] = t;
@@ -2488,6 +2740,7 @@ static void vr_slide_engage(int hand, const vr_well& wl, const float pos[3], flo
 
 // How close a magazine's top has to come to a well's mouth to engage it (world units).
 static const float kEngageReachM = 0.04f;
+static const float kMouthSlackM  = 0.005f;   // how far short of a slide's mouth a magazine top still counts as there
 static float vr_engage_reach(const vr_well& wl, float W)
 {
 	return (wl.radius < kEngageReachM * W) ? wl.radius : kEngageReachM * W;
@@ -2523,7 +2776,18 @@ static bool vr_mag_touches_well(const vr_well& wl, float W, int hand, const floa
 	// magazine being snatched out of the hand from afar (2026-10-04). The ring still shows the radius as
 	// the "bring it here" guide; it turns green only on contact.
 	const float reach = vr_engage_reach(wl, W);
-	if (d2 > reach * reach) return false;
+	if (wl.travel > 1e-3f) {
+		// A well with a slide takes it only once its top has actually reached the mouth -- up to the reach off to
+		// the side, but no more than kMouthSlackM short of it along the line, and not from deep inside the gun --
+		// so nothing straightens it up while it is still on its way in (Daniel, 2026-10-15). It used to engage
+		// anywhere in a 4 cm sphere round the mouth, and snapped into line before getting there.
+		const float along = dx*wl.ins[0] + dy*wl.ins[1] + dz*wl.ins[2];
+		const float lat2  = d2 - along * along;
+		const float deep  = (wl.travel > reach) ? wl.travel : reach;
+		if (along < -kMouthSlackM * W || along > deep || lat2 > reach * reach) return false;
+	} else if (d2 > reach * reach) {
+		return false;
+	}
 	// Roughly the right way round (it snaps into line from there): at least 70 deg of give, and never more
 	// than 100 even on a well that takes "any angle" -- a magazine swung round from upside down also read
 	// as being grabbed away.
@@ -2804,6 +3068,40 @@ static void vr_update_magazine_seating(view_data* view)
 				}
 				continue;
 			}
+			// The hand model is held on the magazine; take the controller too far from where it was holding
+			// it and the grip is lost: coming out, the magazine stays hanging loose in the gun; going in, it
+			// goes back to the hand.
+			{
+				float hp[3], hr[3], hu[3], hf[3];
+				if (vr_hand_pose_on_mag(W, hand, pos, wr, wu, wf, hp, hr, hu, hf)) {
+					const float o[3] = { pos[0]-hp[0], pos[1]-hp[1], pos[2]-hp[2] };
+					if (!s_pinOffValid[hand]) {
+						for (int k = 0; k < 3; ++k) s_pinOff0[hand][k] = o[k];
+						s_pinOffValid[hand] = true;
+					}
+					float dx = o[0]-s_pinOff0[hand][0], dy = o[1]-s_pinOff0[hand][1], dz = o[2]-s_pinOff0[hand][2];
+					// Coming out, the magazine can only slide so fast: a hand running AHEAD of it along the pull is
+					// still pulling it, not letting go -- only drifting off the line counts.
+					if (s_slideRemoving[hand]) {
+						const float a = dx*wl.ins[0] + dy*wl.ins[1] + dz*wl.ins[2];
+						if (a < 0.f) { dx -= wl.ins[0]*a; dy -= wl.ins[1]*a; dz -= wl.ins[2]*a; }
+					}
+					const float brk = kPinBreakM * W;
+					if (dx*dx + dy*dy + dz*dz > brk * brk) {
+						if (s_slideRemoving[hand]) {
+							VR_SetMagState(wl.weapon, VR_MAG_LOOSE, wl.which, wl.copy);
+							VR_SetLooseMagRounds(wl.weapon, VR_GetHandMagazineRounds(hand), wl.which, wl.copy);
+							s_vrLooseNoDrop[wl.hand * 2 + wl.which] = true;
+							VR_SetHandMagazine(hand, NONE);
+						} else {
+							vr_begin_mag_handoff(W, hand, wl, pos, wr, wu, wf, mag);
+						}
+						s_slideWell[hand] = -1;
+						VR_Vibrate(hand, 25, 0.4f);
+						continue;
+					}
+				}
+			}
 			const float rel[3] = { pos[0]-wl.entry[0], pos[1]-wl.entry[1], pos[2]-wl.entry[2] };
 			const float along  = rel[0]*wl.ins[0] + rel[1]*wl.ins[1] + rel[2]*wl.ins[2];
 			float t = (along - s_slideAlong0[hand]) / wl.travel;
@@ -2830,13 +3128,22 @@ static void vr_update_magazine_seating(view_data* view)
 				if (t < slowest) t = slowest;
 				s_slideT[hand] = t < 0.f ? 0.f : t;
 				if (t <= 0.f) {
-					// Off the end of the path: from now on it stays exactly as this grip holds it.
-					{
+					// Off the end of the path. Taken out of the gun by a grab: it stays exactly as that hand
+					// holds it -- the hand model was on it, at the spot it grabbed -- and the two ease back to the
+					// controller together (Daniel, 2026-10-14: it was turning to the ordinary hold as it came
+					// out). Otherwise it swings into the ordinary hold from where the hand model is.
+					float hp[3], hr[3], hu[3], hf[3];
+					const bool pinned = vr_hand_pose_on_mag(W, hand, pos, wr, wu, wf, hp, hr, hu, hf);
+					if (pinned && s_magGrabFromLoose[hand]) {
 						float at[3];
 						vr_well_point(wl, 0.f, at);
-						vr_capture_hold(hand, W, pos, wr, wu, wf, at, wl.magRight, wl.ins, wl.magFwd);
+						vr_capture_hold(hand, W, hp, hr, hu, hf, at, wl.magRight, wl.ins, wl.magFwd);
+						s_handoffT[hand] = 1.f;
+					} else if (pinned) {
+						vr_begin_mag_handoff(W, hand, wl, hp, hr, hu, hf, mag);
+					} else {
+						vr_begin_mag_handoff(W, hand, wl, pos, wr, wu, wf, mag);
 					}
-					vr_begin_mag_handoff(W, hand, wl, pos, wr, wu, wf, mag);
 					VR_PlayMagSound(wl.weapon, wl.which, VR_MAG_SOUND_REMOVE);
 					s_slideWell[hand] = -1;
 					s_vrMagMustClear[hand] = true; s_clearInit[hand] = false;       // just left the entry: don't grab it straight back
@@ -3011,6 +3318,9 @@ static void vr_check_hands_reset(void)
 	}
 	s_fallingMags.clear();
 	s_pendingPickups.clear();
+	s_wsSelected = s_wsCandidate = NONE;
+	s_wsDepart[0].wt = s_wsDepart[1].wt = NONE;
+	VR_SetWeaponSelectChosen(NONE);
 }
 
 static void vr_update_spin_reload(void)
@@ -3504,6 +3814,273 @@ static bool vr_draw_mag_mesh(view_data* view, short weapon, int which, int gunHa
 	return true;
 }
 
+// ---- weapon select: the candidate's HUD picture ---------------------------------------------------------
+// While the select button is held, the weapon panel picture the HUD shows for it (both magnums when two are
+// carried) floats just above the DOMINANT hand, turned to face your eyes wherever the hand is, drawn the way
+// the HUD draws it (Daniel, 2026-10-10).
+static shape_descriptor vr_ws_hud_shape(short wt)
+{
+	if (wt < 0 || wt >= (short)MAXIMUM_WEAPON_INTERFACE_DEFINITIONS) return UNONE;
+	const weapon_interface_data& d = weapon_interface_definitions[wt];
+	if (d.multi_weapon && d.multiple_shape != UNONE) {
+		const short item = get_weapon_item_type(wt);
+		if (item != NONE && get_player_data(current_player_index)->items[item] >= 2) return d.multiple_shape;
+	}
+	return d.weapon_panel_shape;
+}
+
+static bool vr_ws_has_hud_image(short wt)
+{
+	const shape_descriptor sd = vr_ws_hud_shape(wt);
+	if (sd == UNONE) return false;
+	bitmap_definition* bmp = nullptr; void* shade = nullptr;
+	extended_get_shape_bitmap_and_shading_table(GET_DESCRIPTOR_COLLECTION(sd), GET_DESCRIPTOR_SHAPE(sd), &bmp, &shade,
+	                                            _shading_normal);
+	return bmp != nullptr;
+}
+
+static void render_vr_weapon_select_image(view_data* view)
+{
+	if (!VR_WeaponSelectModeActive() || !VR_WeaponSelectHeld() || s_wsCandidate == NONE) return;
+	const shape_descriptor sd = vr_ws_hud_shape(s_wsCandidate);
+	if (sd == UNONE) return;
+	bitmap_definition* bmp = nullptr; void* shade = nullptr;
+	extended_get_shape_bitmap_and_shading_table(GET_DESCRIPTOR_COLLECTION(sd), GET_DESCRIPTOR_SHAPE(sd), &bmp, &shade,
+	                                            _shading_normal);
+	if (!bmp || bmp->width <= 0 || bmp->height <= 0) return;
+
+	vr_body_frame bf;
+	vr_get_body_frame(view, bf);
+	const int domHand = VR_Settings()->dominantHand ? 0 : 1;   // 0 = left
+	float pos[3], wr[3], wu[3], wf[3];
+	if (!vr_hand_world_pose(bf, domHand, pos, wr, wu, wf)) return;
+	float bRight[3], bUp[3], bFwd[3];
+	vr_room_dir_to_world(bf, bf.right, bRight);
+	vr_room_dir_to_world(bf, bf.up, bUp);
+	vr_room_dir_to_world(bf, bf.fwd, bFwd);
+
+	// The HUD's own sizes: one scale for every picture, set so M2's rocket launcher is 18 cm across (Daniel,
+	// 2026-10-10) -- a small picture stays small rather than being stretched to the same width.
+	float mPerPx = 0.18f / 160.f;
+	{
+		const shape_descriptor ref = vr_ws_hud_shape(_weapon_missile_launcher);
+		bitmap_definition* rb = nullptr; void* rs = nullptr;
+		if (ref != UNONE)
+			extended_get_shape_bitmap_and_shading_table(GET_DESCRIPTOR_COLLECTION(ref), GET_DESCRIPTOR_SHAPE(ref),
+			                                            &rb, &rs, _shading_normal);
+		if (rb && rb->width > 8) mPerPx = 0.18f / float(rb->width);
+	}
+	const float W  = bf.W;
+	const float hw = 0.5f * float(bmp->width)  * mPerPx * W;
+	const float hh = 0.5f * float(bmp->height) * mPerPx * W;
+	float c[3];
+	for (int k = 0; k < 3; ++k) c[k] = pos[k] + bUp[k] * (0.08f * W + hh);   // sitting just above the hand
+
+	// Billboard: square on to the eyes. Right is across the line of sight and level; up completes it. The
+	// signs are fixed against the body frame (a picture in front of you, facing back at you, has the body's
+	// right and up) so it never mirrors whichever way the world axes are handed.
+	auto cross = [](const float a[3], const float b[3], float o[3]) {
+		o[0] = a[1]*b[2] - a[2]*b[1]; o[1] = a[2]*b[0] - a[0]*b[2]; o[2] = a[0]*b[1] - a[1]*b[0];
+	};
+	auto dot = [](const float a[3], const float b[3]) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; };
+	auto norm = [](float v[3]) {
+		const float n = sqrtf(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+		if (n < 1e-5f) return false;
+		for (int k = 0; k < 3; ++k) v[k] /= n;
+		return true;
+	};
+	float toEye[3] = { bf.origin[0]-c[0], bf.origin[1]-c[1], bf.origin[2]-c[2] };
+	if (!norm(toEye)) return;
+	const float back[3] = { -bFwd[0], -bFwd[1], -bFwd[2] };
+	float ref[3];
+	cross(bUp, back, ref);
+	const float rSign = dot(ref, bRight) < 0.f ? -1.f : 1.f;
+	float r[3], u[3];
+	cross(bUp, toEye, r);
+	if (!norm(r)) { for (int k = 0; k < 3; ++k) r[k] = bRight[k]; }   // looking straight down at it
+	for (int k = 0; k < 3; ++k) r[k] *= rSign;
+	cross(toEye, r, u);
+	norm(u);
+	if (dot(u, bUp) < 0.f) for (int k = 0; k < 3; ++k) u[k] = -u[k];
+
+	float verts[4][3];
+	for (int k = 0; k < 3; ++k) {
+		verts[0][k] = c[k] - hw*r[k] + hh*u[k];
+		verts[1][k] = c[k] + hw*r[k] + hh*u[k];
+		verts[2][k] = c[k] + hw*r[k] - hh*u[k];
+		verts[3][k] = c[k] - hw*r[k] - hh*u[k];
+	}
+	OGL_RenderVRHudShapeQuad(sd, verts);
+}
+
+// ---- the hand model stays on what it is holding ----------------------------------------------------
+// A hand holding a magazine on a well's path, or steadying the gun in the other hand, is DRAWN on that object
+// rather than at the controller, so the hand model never drifts off the thing it holds while the controller
+// wanders (Daniel, 2026-10-14). It eases on over kPinOnSeconds and, when let go of, back to the controller over
+// kPinOffSeconds, carried along with the controller as it does. Render only: what the hand does is still
+// driven by the real controller.
+static const float kPinOnSeconds  = 0.08f;
+static const float kPinOffSeconds = 0.15f;
+
+// Where the hand sits on a magazine that is on a well's path: wherever it held it when the slide began, kept
+// in the magazine's frame -- never snapped to a set spot (Daniel, 2026-10-14). cp/cr/cu/cf: the controller now.
+static bool vr_hand_pose_on_mag(float W, int hand, const float cp[3], const float cr[3], const float cu[3],
+                                const float cf[3], float p[3], float r[3], float u[3], float f[3])
+{
+	if (hand < 0 || hand > 1 || s_slideWell[hand] < 0 || VR_GetHandMagazine(hand) == NONE) return false;
+	vr_well wl;
+	if (!vr_get_well(W, hand, s_slideWell[hand], wl) || wl.travel <= 1e-3f) return false;
+	// The magazine on the path, as it is drawn there.
+	float top[3];
+	vr_well_point(wl, s_slideT[hand], top);
+	const float D[3] = { -wl.ins[0], -wl.ins[1], -wl.ins[2] };
+	const float* R = wl.magRight; const float* F = wl.magFwd;
+	auto fromMag = [&](const float l[3], const float a[3], const float b[3], const float c[3], float o[3]) {
+		for (int k = 0; k < 3; ++k) o[k] = l[0]*a[k] + l[1]*b[k] + l[2]*c[k];
+	};
+	if (!s_magGrabValid[hand]) {
+		// The moment the slide began: the hand's pose in the magazine's own frame. Grabbed out of a gun, the
+		// magazine is where the path has it; brought in from the hand, it is where the hand was holding it --
+		// so in either case the magazine never moves in the hand, the hand goes with it (Daniel, 2026-10-14).
+		float mt[3], mR[3], mD[3], mF[3];
+		if (s_magGrabFromLoose[hand]) {
+			for (int k = 0; k < 3; ++k) { mt[k] = top[k]; mR[k] = R[k]; mD[k] = D[k]; mF[k] = F[k]; }
+		} else {
+			vr_hand_mag_pose(W, hand, wl.mag, cp, cr, cu, cf, mt, mR, mD, mF);
+		}
+		auto toMag = [&](const float v[3], float o[3]) {
+			o[0] = v[0]*mR[0] + v[1]*mR[1] + v[2]*mR[2];
+			o[1] = v[0]*mD[0] + v[1]*mD[1] + v[2]*mD[2];
+			o[2] = v[0]*mF[0] + v[1]*mF[1] + v[2]*mF[2];
+		};
+		const float d[3] = { cp[0]-mt[0], cp[1]-mt[1], cp[2]-mt[2] };
+		toMag(d, s_magGrabP[hand]); toMag(cr, s_magGrabR[hand]); toMag(cu, s_magGrabU[hand]); toMag(cf, s_magGrabF[hand]);
+		s_magGrabValid[hand] = true;
+	}
+	float d[3];
+	fromMag(s_magGrabP[hand], R, D, F, d);
+	for (int k = 0; k < 3; ++k) p[k] = top[k] + d[k];
+	fromMag(s_magGrabR[hand], R, D, F, r); fromMag(s_magGrabU[hand], R, D, F, u); fromMag(s_magGrabF[hand], R, D, F, f);
+	return true;
+}
+
+// Steadying: where the support hand took hold of the gun, kept in the gun's own frame.
+static bool  s_steadyValid[2] = { false, false };
+static float s_steadyP[2][3], s_steadyR[2][3], s_steadyU[2][3], s_steadyF[2][3];   // in gun axes
+
+static bool vr_hand_pose_on_gun(int hand, const float cp[3], const float cr[3], const float cu[3], const float cf[3],
+                                float p[3], float r[3], float u[3], float f[3])
+{
+	const int gun = VR_GetHeldWeaponHand();
+	const bool on = gun >= 0 && gun == 1 - hand && VR_IsTwoHandedActive() && s_vrWeaponPose[gun].valid &&
+	                vr_get_offhand_weapon(current_player_index) == NONE && VR_GetHandMagazine(hand) == NONE;
+	if (!on) { s_steadyValid[hand] = false; return false; }
+	const vr_weapon_pose& g = s_vrWeaponPose[gun];
+	auto toGun = [&](const float v[3], float out[3]) {
+		out[0] = v[0]*g.right[0] + v[1]*g.right[1] + v[2]*g.right[2];
+		out[1] = v[0]*g.up[0]    + v[1]*g.up[1]    + v[2]*g.up[2];
+		out[2] = v[0]*g.fwd[0]   + v[1]*g.fwd[1]   + v[2]*g.fwd[2];
+	};
+	auto fromGun = [&](const float l[3], float out[3]) {
+		for (int k = 0; k < 3; ++k) out[k] = l[0]*g.right[k] + l[1]*g.up[k] + l[2]*g.fwd[k];
+	};
+	if (!s_steadyValid[hand]) {          // the moment it took hold: remember where, on the gun
+		const float d[3] = { cp[0]-g.anchor[0], cp[1]-g.anchor[1], cp[2]-g.anchor[2] };
+		toGun(d, s_steadyP[hand]); toGun(cr, s_steadyR[hand]); toGun(cu, s_steadyU[hand]); toGun(cf, s_steadyF[hand]);
+		s_steadyValid[hand] = true;
+	}
+	float d[3];
+	fromGun(s_steadyP[hand], d);
+	for (int k = 0; k < 3; ++k) p[k] = g.anchor[k] + d[k];
+	fromGun(s_steadyR[hand], r); fromGun(s_steadyU[hand], u); fromGun(s_steadyF[hand], f);
+	return true;
+}
+
+struct vr_hand_pin {
+	float    blend = 0.f;                    // 0 = at the controller, 1 = on the held object
+	float    relP[3] = { 0.f, 0.f, 0.f };    // the last drawn pose, in controller axes (for easing back)
+	float    relR[3] = { 1.f, 0.f, 0.f }, relU[3] = { 0.f, 1.f, 0.f }, relF[3] = { 0.f, 0.f, 1.f };
+	uint32_t frame = 0;
+	float    outP[3], outR[3], outU[3], outF[3];   // this frame's result (both eyes)
+};
+static vr_hand_pin s_handPin[2];
+static uint64_t    s_handPinMs = 0;
+static float       s_handPinDt = 0.f;
+static uint32_t    s_handPinDtFrame = 0;
+
+// The pose to DRAW a hand at: the controller pose in, the pinned / easing pose out.
+static void vr_hand_draw_pose(const vr_body_frame& bf, int hand, float pos[3], float wr[3], float wu[3], float wf[3])
+{
+	vr_hand_pin& pin = s_handPin[hand];
+	if (pin.frame == s_vrFrameNo && pin.frame != 0) {
+		for (int k = 0; k < 3; ++k) { pos[k] = pin.outP[k]; wr[k] = pin.outR[k]; wu[k] = pin.outU[k]; wf[k] = pin.outF[k]; }
+		return;
+	}
+	pin.frame = s_vrFrameNo;
+	// One frame step for both hands.
+	if (s_handPinDtFrame != s_vrFrameNo) {
+		const uint64_t now = machine_tick_count();
+		s_handPinDt = s_handPinMs ? float(now - s_handPinMs) / 1000.f : 0.f;
+		s_handPinMs = now;
+		s_handPinDtFrame = s_vrFrameNo;
+	}
+	float dt = s_handPinDt;
+	if (dt < 0.f || dt > 0.1f) dt = 0.1f;
+
+	float tp[3], tr[3], tu[3], tf[3];
+	bool pinned = vr_hand_pose_on_mag(bf.W, hand, pos, wr, wu, wf, tp, tr, tu, tf);
+	if (!pinned) pinned = vr_hand_pose_on_gun(hand, pos, wr, wu, wf, tp, tr, tu, tf);
+	else s_steadyValid[hand] = false;
+
+	auto toLocal = [&](const float v[3], float out[3]) {
+		out[0] = v[0]*wr[0] + v[1]*wr[1] + v[2]*wr[2];
+		out[1] = v[0]*wu[0] + v[1]*wu[1] + v[2]*wu[2];
+		out[2] = v[0]*wf[0] + v[1]*wf[1] + v[2]*wf[2];
+	};
+	if (pinned) {
+		pin.blend += dt / kPinOnSeconds;
+		if (pin.blend > 1.f) pin.blend = 1.f;
+		// In controller axes, the target is relP/relR..: ease from the controller (identity) toward it.
+		const float d[3] = { tp[0]-pos[0], tp[1]-pos[1], tp[2]-pos[2] };
+		toLocal(d, pin.relP); toLocal(tr, pin.relR); toLocal(tu, pin.relU); toLocal(tf, pin.relF);
+	} else {
+		pin.blend -= dt / kPinOffSeconds;
+		if (pin.blend < 0.f) pin.blend = 0.f;
+	}
+	if (pin.blend > 0.f) {
+		const float t = pin.blend * pin.blend * (3.f - 2.f * pin.blend);
+		const float idR[3] = { 1.f, 0.f, 0.f }, idF[3] = { 0.f, 0.f, 1.f };
+		float lp[3], lr[3], lf[3];
+		for (int k = 0; k < 3; ++k) {
+			lp[k] = pin.relP[k] * t;
+			lr[k] = idR[k] + (pin.relR[k] - idR[k]) * t;
+			lf[k] = idF[k] + (pin.relF[k] - idF[k]) * t;
+		}
+		// back to world, then square up: forward, right off it, up = forward x right (as vr_hand_world_pose)
+		float np[3], nr[3], nf[3], nu[3];
+		for (int k = 0; k < 3; ++k) {
+			np[k] = pos[k] + lp[0]*wr[k] + lp[1]*wu[k] + lp[2]*wf[k];
+			nr[k] = lr[0]*wr[k] + lr[1]*wu[k] + lr[2]*wf[k];
+			nf[k] = lf[0]*wr[k] + lf[1]*wu[k] + lf[2]*wf[k];
+		}
+		float n = sqrtf(nf[0]*nf[0] + nf[1]*nf[1] + nf[2]*nf[2]);
+		if (n > 1e-5f) {
+			for (int k = 0; k < 3; ++k) nf[k] /= n;
+			const float dd = nr[0]*nf[0] + nr[1]*nf[1] + nr[2]*nf[2];
+			for (int k = 0; k < 3; ++k) nr[k] -= nf[k] * dd;
+			n = sqrtf(nr[0]*nr[0] + nr[1]*nr[1] + nr[2]*nr[2]);
+			if (n > 1e-5f) {
+				for (int k = 0; k < 3; ++k) nr[k] /= n;
+				nu[0] = nf[1]*nr[2] - nf[2]*nr[1];
+				nu[1] = nf[2]*nr[0] - nf[0]*nr[2];
+				nu[2] = nf[0]*nr[1] - nf[1]*nr[0];
+				for (int k = 0; k < 3; ++k) { pos[k] = np[k]; wr[k] = nr[k]; wu[k] = nu[k]; wf[k] = nf[k]; }
+			}
+		}
+	}
+	for (int k = 0; k < 3; ++k) { pin.outP[k] = pos[k]; pin.outR[k] = wr[k]; pin.outU[k] = wu[k]; pin.outF[k] = wf[k]; }
+}
+
 static void render_vr_hand_visuals(view_data* view)
 {
 	if (!VR_PhysicalWeaponsActive() || !OGL_IsActive()) return;
@@ -3519,6 +4096,11 @@ static void render_vr_hand_visuals(view_data* view)
 	for (int hand = 0; hand < 2; ++hand) {
 		float pos[3], wr[3], wu[3], wf[3];
 		if (!vr_hand_world_pose(bf, hand, pos, wr, wu, wf)) continue;
+		// Where the hand MODEL is: on what it holds, or easing back from it (vr_hand_draw_pose). The magazine
+		// in the hand is drawn on it too, so the two never come apart.
+		float dp[3], dr[3], du[3], df[3];
+		for (int k = 0; k < 3; ++k) { dp[k] = pos[k]; dr[k] = wr[k]; du[k] = wu[k]; df[k] = wf[k]; }
+		vr_hand_draw_pose(bf, hand, dp, dr, du, df);
 
 		if (haveFist && !s_vrHandDrewFist[hand]) {
 			// The fist model is authored the opposite way round from the guns, so it mirrors on the RIGHT
@@ -3527,7 +4109,7 @@ static void render_vr_hand_visuals(view_data* view)
 			// 2D fist sprite and must NOT apply here (honouring it flipped M1's fists, 2026-09-28).
 			// Confirmed on device for M2 (right hand mirrored, 2026-09-27).
 			const bool flip = (hand == 1);
-			vr_draw_shape_at(view, fColl, fSeq, fLow, pos, wr, wu, wf, flip, true, 1.0f);
+			vr_draw_shape_at(view, fColl, fSeq, fLow, dp, dr, du, df, flip, true, 1.0f);
 		}
 
 		// Just seated this frame (first eye only -- the second eye's gun already has it in).
@@ -3580,7 +4162,7 @@ static void render_vr_hand_visuals(view_data* view)
 				// free in the hand: held by its base, sticking up out of the fist along the controller's up (cyan)
 				const vr_mag_dims md = vr_mag_dims_for_ammo(mag);
 				float top[3], mr[3], md3[3], mf[3];
-				vr_hand_mag_pose(bf.W, hand, md, pos, wr, wu, wf, top, mr, md3, mf);
+				vr_hand_mag_pose(bf.W, hand, md, dp, dr, du, df, top, mr, md3, mf);
 				vr_mag_assist(bf.W, hand, mag, top, mr, md3, mf);   // eases into line near the well
 				for (int k = 0; k < 3; ++k) {
 					s_magDrawn[hand][0][k] = top[k]; s_magDrawn[hand][1][k] = mr[k];
@@ -5575,9 +6157,27 @@ void render_view(
 						render_vr_attach_gizmos(view);   // physical-weapon attach-point debug overlay
 						render_vr_magwell_tuner(view);   // magwell tuning mode overlay
 
+						// Weapon select's picture goes over EVERYTHING, the HUD too, so it is drawn after the
+						// HUD composite -- with the world camera, which End() clears: keep it first.
+						GLfloat wsProj[16], wsView[16]; GLint wsViewport[4];
+						const bool wsDraw = VR_WeaponSelectModeActive() && VR_WeaponSelectHeld();
+						if (wsDraw) {
+							glGetFloatv(GL_PROJECTION_MATRIX, wsProj);
+							glGetFloatv(GL_MODELVIEW_MATRIX, wsView);
+							glGetIntegerv(GL_VIEWPORT, wsViewport);
+						}
+
 						RasPtr->End();
 						VR_PresentHudEye(eye);
 						VR_PresentMapEye(eye);
+						if (wsDraw) {
+							glViewport(wsViewport[0], wsViewport[1], wsViewport[2], wsViewport[3]);
+							glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadMatrixf(wsProj);
+							glMatrixMode(GL_MODELVIEW);  glPushMatrix(); glLoadMatrixf(wsView);
+							render_vr_weapon_select_image(view);   // weapon select: the candidate's HUD picture
+							glMatrixMode(GL_PROJECTION); glPopMatrix();
+							glMatrixMode(GL_MODELVIEW);  glPopMatrix();
+						}
 						VR_DrawInGameKeyboardEye(eye);   // console keyboard (world-locked), over everything
 						// VR screenshot promo feature DISABLED. Was: capture ONE eye's fully-composited
 						// framebuffer to a clean PNG when VR_TakeScreenshotIfRequested(). Uncomment (with

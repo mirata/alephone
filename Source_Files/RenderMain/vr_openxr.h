@@ -106,6 +106,9 @@ typedef struct {
 	                        //     netgames and film playback, where the per-hand weapon state has no
 	                        //     wire representation. Query VR_PhysicalWeaponsActive(), never this
 	                        //     field directly, so the SP gate is never accidentally bypassed.
+	int   weaponSelectMode; // 1 = WEAPON SELECT (Experimental prefs, needs experimentalWeapons): hold X or A (the
+	                        //     one not bound to Use) and flick the turn stick up/down to choose ONE weapon type;
+	                        //     only its holsters show, and a free hand's grip anywhere pulls it into that hand.
 	int   showAttachGizmos; // 1 = draw physical-weapon attach-point gizmos + enable the in-headset tuner
 	                        //     (docs/VR_PHYSICAL_WEAPONS.md). CODE-ONLY authoring aid: no preference,
 	                        //     not persisted, and only active while experimentalWeapons is on -- flip
@@ -324,6 +327,14 @@ bool VR_GetRawHandInput(int hand, float* stickX, float* stickY,
 // session is one it is allowed in (single-player, not a film). Every physical-weapons code path
 // gates on this rather than on the raw pref, so the single-player restriction holds in one place.
 bool VR_PhysicalWeaponsActive(void);
+
+// Weapon select mode (vr_settings_t::weaponSelectMode): the pref is on and physical weapons are in force.
+bool VR_WeaponSelectModeActive(void);
+// The input side of it (vr_openxr.cpp): the select button (X or A, whichever is not Use) held -> selecting;
+// the turn stick's up/down flicks while selecting (+1 up, -1 down, summed until taken); the release commits.
+bool VR_WeaponSelectHeld(void);
+int  VR_TakeWeaponSelectStep(void);
+bool VR_TakeWeaponSelectCommit(void);
 
 // Screenshot request (VR_ACT_SCREENSHOT). The input tick calls VR_RequestScreenshot() on the button
 // edge; the render eye-loop calls VR_TakeScreenshotIfRequested() once per frame and, if true, reads

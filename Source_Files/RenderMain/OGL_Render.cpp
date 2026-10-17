@@ -3845,6 +3845,54 @@ bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3], bool wo
 	return true;
 }
 
+bool OGL_RenderVRHudShapeQuad(shape_descriptor shape, float verts[4][3])
+{
+	if (!OGL_IsActive()) return false;
+
+	// Same texture setup as HUD_OGL_Class::DrawShapeAtXY.
+	TextureManager TMgr;
+	TMgr.ShapeDesc = shape;
+	get_shape_bitmap_and_shading_table(shape, &TMgr.Texture, &TMgr.ShadingTables, _shading_normal);
+	if (!TMgr.Texture) return false;
+	TMgr.IsShadeless = true;
+	TMgr.TransferMode = _shadeless_transfer;
+	TMgr.TextureType = OGL_Txtr_HUD;
+	if (!TMgr.Setup()) return false;
+
+	const GLfloat U0 = (GLfloat)TMgr.U_Offset, U1 = (GLfloat)(TMgr.U_Offset + TMgr.U_Scale);
+	const GLfloat V0 = (GLfloat)TMgr.V_Offset, V1 = (GLfloat)(TMgr.V_Offset + TMgr.V_Scale);
+	// As OGL_RenderTexturedRect: U runs left->right, V top->bottom.
+	GLfloat texc[4][2] = { {U0, V0}, {U1, V0}, {U1, V1}, {U0, V1} };
+
+	glUseProgram(0);
+	glEnable(GL_TEXTURE_2D);
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+	glDisableClientState(GL_COLOR_ARRAY);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_CULL_FACE);
+	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	glDisable(GL_ALPHA_TEST);
+
+	glVertexPointer(3, GL_FLOAT, sizeof(verts[0]), verts[0]);
+	glTexCoordPointer(2, GL_FLOAT, sizeof(texc[0]), texc[0]);
+	TMgr.SetupTextureMatrix();
+	TMgr.RenderNormal();
+	// Light only, never opaque (Daniel, 2026-10-10: "like photoshop's screen"): ADDITIVE, weighted by the
+	// texel's alpha so transparent pixels add nothing. True screen (src*(1-dst)) can't also honour the alpha
+	// with fixed blend factors; additive is its nearest. Set after RenderNormal so nothing overrides it.
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+	TMgr.RestoreTextureMatrix();
+
+	SetBlend(OGL_BlendType_Crossfade);
+	glEnable(GL_CULL_FACE);
+	glEnable(GL_DEPTH_TEST);
+	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	return true;
+}
+
 #else
 
 // No OpenGL present

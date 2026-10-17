@@ -282,6 +282,9 @@ void VR_ResetMagStates(void);
 // and in guns, queued reloads, part-used magazines. Bumps a serial the renderer watches to drop its own
 // per-hand memory (poses, slides, swings, magazines on the floor).
 void     VR_ResetHandsState(void);
+// Weapon select mode: the weapon type chosen (NONE = none) -- set by the renderer, read by the HUD.
+void     VR_SetWeaponSelectChosen(short weapon_type);
+short    VR_GetWeaponSelectChosen(void);
 unsigned VR_GetHandsResetSerial(void);
 
 // Rounds in the magazine a hand is holding: -1 = a fresh one from a pouch (full), otherwise the count

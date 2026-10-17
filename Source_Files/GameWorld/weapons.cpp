@@ -1143,6 +1143,18 @@ short get_player_weapon_ammo_count(
 // alone on purpose: the HUD's single-vs-dual ART is item-count driven, and a lone gun's readout is
 // unambiguous, so mirroring there added confusion (see the reverted weapon_drawn attempt 2026-08-10).
 // Everyone else (right-handers, non-VR) is unaffected.
+// VR weapon select: with nothing in the hands (the fist), the HUD shows the weapon you have chosen -- its
+// picture and its ammunition -- rather than the fist, so you can see what a grip will draw. Display only.
+short vr_hud_display_weapon(
+	short player_index,
+	short which_weapon)
+{
+	if (player_index != local_player_index || !VR_WeaponSelectModeActive()) return which_weapon;
+	if (which_weapon != NONE && which_weapon != _weapon_fist) return which_weapon;
+	const short chosen = VR_GetWeaponSelectChosen();
+	return chosen != NONE ? chosen : which_weapon;
+}
+
 short vr_hud_display_trigger(
 	short player_index,
 	short which_weapon,
@@ -1704,6 +1716,17 @@ static void vr_enforce_empty_wells(short player_index, short w)
 		const int well = twofisted ? 0 : (td->ammunition_type == ammo0 ? 0 : 1);
 		const int copy = twofisted ? t : 0;
 		if (VR_GetMagState(w, well, copy) != VR_MAG_IN && trigger->rounds_loaded > 0) trigger->rounds_loaded = 0;
+		// ...and a charge in progress goes with the rounds (the fusion pistol kept humming, then clicked).
+		if (trigger->rounds_loaded <= 0 && td->charging_ticks &&
+		    (trigger->state == _weapon_charging || trigger->state == _weapon_charged))
+		{
+			struct player_data *player = get_player_data(player_index);
+			trigger->state = _weapon_idle;
+			trigger->phase = IDLE_PHASE_COUNT;
+			trigger->sequence = 0;
+			SoundManager::instance()->StopSound(player_index == current_player_index ? NONE : player->object_index,
+			                                    td->charging_sound);
+		}
 	}
 }
 
@@ -3389,7 +3412,15 @@ static bool handle_trigger_down(
 			player_index, which_trigger);
 
 		/* If this weapon charges.. */
-		if(trigger_definition->charging_ticks)
+		// VR physical weapons: an empty gun (magazine loose or out) cannot charge -- the trigger just clicks
+		// (Daniel, 2026-10-16: the fusion pistol charged with no magazine in it). The stock game never gets
+		// here empty: it reloads by itself first.
+		if(trigger_definition->charging_ticks && VR_PhysicalWeaponsActive() &&
+		   weapon->triggers[which_trigger].rounds_loaded<=0 && VR_WeaponNeedsManualReload(weapon->weapon_type))
+		{
+			fire_weapon(player_index, which_trigger, FIXED_ONE, false);   // no rounds: one dry click per pull
+		}
+		else if(trigger_definition->charging_ticks)
 		{
 			struct weapon_definition *definition= get_weapon_definition(weapon->weapon_type);
 

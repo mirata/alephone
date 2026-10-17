@@ -96,6 +96,10 @@ bool OGL_RenderSprite(rectangle_definition& RenderRectangle);
 // than an in-hand weapon, so it must be loaded as an inhabitant texture like any other world sprite.
 // The in-hand texture path does not colour world collections -- they come out solid white.
 bool OGL_RenderVRWeaponQuad(rectangle_definition& RR, float verts[4][3], bool worldSprite = false);
+// VR: a HUD/interface shape (e.g. a weapon panel picture) on a world-space quad, set up exactly the way the
+// HUD draws it (OGL_Txtr_HUD, shadeless, U across) so it keeps the HUD's orientation and proportions.
+// verts: TL, TR, BR, BL in world units. Always drawn on top.
+bool OGL_RenderVRHudShapeQuad(shape_descriptor shape, float verts[4][3]);
 
 // VR: render a 3D model attached to the controller in world space.
 // wrx/wup/wfwd are the controller's right/up/forward unit vectors in Marathon world space.

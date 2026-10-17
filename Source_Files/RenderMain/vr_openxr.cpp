@@ -818,6 +818,7 @@ namespace {
 		/* showLaserSight   */ 0,
 		/* showAimGizmos    */ 0,     // controller aim diagnostic gizmos (OFF; debug-only, flip to 1 to show)
 		/* experimentalWeapons */ 0,  // physical weapons: opt-in, off by default
+		/* weaponSelectMode */ 0,     // weapon select (Experimental prefs): opt-in
 		/* showAttachGizmos */ 0,     // attach-point gizmos + tuner: CODE-ONLY, flip to 1 to author
 		/* buttonAction     */ {      // default button map (matches the old hardcoded stopgap)
 			VR_ACT_ACTION_USE,       //   A          -> Action / Use
@@ -1053,6 +1054,12 @@ namespace {
 	bool        s_offHandHasWeapon = true;
 	bool        s_gripAltFireEnabled = true;
 	bool        s_bBtn = false, s_xBtn = false, s_yBtn = false;
+	// Weapon select mode: X and A as the BINDINGS see them. Whichever of the two is NOT bound to Action/Use
+	// becomes the select button (X when neither is): held = selecting, from the moment it goes down, and it
+	// never reaches its own binding. Equal to the raw buttons whenever the mode is off.
+	bool        s_effX = false, s_effA = false;
+	bool        s_wsSelecting = false, s_wsCommit = false;
+	int         s_wsStep = 0, s_wsStickDir = 0;
 	bool        s_advancePrev = false;   // edge latch for cutscene-skip key injection
 	bool        s_menuBtn = false, s_menuPrev = false;   // menu button + edge latch
 	bool        s_menuLatch = false;     // set on menu-button press, consumed by VR_TakeMenuButton
@@ -1155,6 +1162,31 @@ namespace {
 		}
 	}
 
+	// Weapon select mode: holding the select button (X or A, whichever is not Use -- Daniel, 2026-10-10)
+	// opens the selection at once; while it is held the turn stick's up/down flicks step through the weapons
+	// (and the stick does not turn you), and letting go commits.
+	void updateWeaponSelectInput() {
+		s_effX = s_xBtn; s_effA = s_action;
+		if (!VR_WeaponSelectModeActive()) {
+			s_wsSelecting = false; s_wsStep = 0; s_wsStickDir = 0;
+			return;
+		}
+		const bool selectIsA = s_settings.buttonAction[VR_BTN_X] == VR_ACT_ACTION_USE &&
+		                       s_settings.buttonAction[VR_BTN_A] != VR_ACT_ACTION_USE;
+		const bool held = selectIsA ? s_action : s_xBtn;
+		if (selectIsA) s_effA = false; else s_effX = false;   // it is the select button now, nothing else
+		if (held && !s_wsSelecting) { s_wsSelecting = true; s_wsStep = 0; s_wsStickDir = 0; }
+		if (s_wsSelecting) {
+			const float y = s_turnY;
+			int dir = s_wsStickDir;
+			if (y > 0.6f) dir = 1; else if (y < -0.6f) dir = -1; else if (y > -0.3f && y < 0.3f) dir = 0;
+			if (dir != 0 && dir != s_wsStickDir) s_wsStep += dir;
+			s_wsStickDir = dir;
+			s_turnX = s_turnY = 0.f;                 // the stick is choosing, not turning
+			if (!held) { s_wsSelecting = false; s_wsCommit = true; }
+		}
+	}
+
 	void syncInput() {
 		if (!s_actionsReady || !s_sessionRunning) return;
 		XrActiveActionSet aas = { s_actionSet, XR_NULL_PATH };
@@ -1201,6 +1233,7 @@ namespace {
 		gi.action = s_xAction;       xrGetActionStateBoolean(s_session, &gi, &b); s_xBtn   = b.currentState;
 		gi.action = s_yAction;       xrGetActionStateBoolean(s_session, &gi, &b); s_yBtn   = b.currentState;
 		gi.action = s_menuAction;    xrGetActionStateBoolean(s_session, &gi, &b); s_menuBtn = b.currentState;
+		updateWeaponSelectInput();
 
 		// Menu (hamburger) button edge -> request the in-game quit-with-confirmation (consumed in the
 		// main loop, which is where the modal confirmation dialog can run).
@@ -1988,6 +2021,9 @@ extern "C" bool VR_SecondaryPunchRecent(void)
 	const int offIdx = s_settings.dominantHand ? 1 : 0;
 	return s_punchRecent[offIdx] > 0;
 }
+extern "C" bool VR_WeaponSelectHeld(void)      { return s_wsSelecting; }
+extern "C" int  VR_TakeWeaponSelectStep(void)  { const int n = s_wsStep; s_wsStep = 0; return n; }
+extern "C" bool VR_TakeWeaponSelectCommit(void){ const bool c = s_wsCommit; s_wsCommit = false; return c; }
 extern "C" bool VR_GetAction(void)             { return s_action; }
 extern "C" bool VR_GetAdvance(void)            { return s_action || s_xBtn; }   // A or X
 extern "C" bool VR_GetBack(void)               { return s_yBtn || s_bBtn; }     // Y or B
@@ -2017,9 +2053,9 @@ extern "C" bool VR_ActionHeld(int action)
 {
 	if (action <= VR_ACT_NONE || action >= VR_ACT_COUNT) return false;
 	const bool btn[VR_BTN_COUNT] = {
-		s_action,                 // VR_BTN_A
+		s_effA,                   // VR_BTN_A
 		s_bBtn,                   // VR_BTN_B
-		s_xBtn,                   // VR_BTN_X
+		s_effX,                   // VR_BTN_X
 		s_yBtn,                   // VR_BTN_Y
 		VR_GetMoveStickClick(),   // VR_BTN_MOVE_CLICK
 		VR_GetTurnStickClick(),   // VR_BTN_TURN_CLICK
@@ -2044,7 +2080,7 @@ extern "C" bool VR_ActionHeldOnHand(int action, int hand)
 	const int  buttons[2][2] = { { VR_BTN_X, VR_BTN_Y }, { VR_BTN_A, VR_BTN_B } };
 	for (int j = 0; j < 2; ++j) {
 		const int i = buttons[hand][j];
-		const bool down = (i == VR_BTN_A) ? s_action : (i == VR_BTN_B) ? s_bBtn : (i == VR_BTN_X) ? s_xBtn : s_yBtn;
+		const bool down = (i == VR_BTN_A) ? s_effA : (i == VR_BTN_B) ? s_bBtn : (i == VR_BTN_X) ? s_effX : s_yBtn;
 		int mapped = s_settings.buttonAction[i];
 		if (weaponMode && (i == VR_BTN_Y || i == VR_BTN_B)) mapped = VR_ACT_EJECT_MAG;
 		if (mapped == action && down) return true;
@@ -3668,6 +3704,9 @@ extern "C" bool VR_GetPrimaryPunch(void)       { return false; }
 extern "C" bool VR_GetSecondaryPunch(void)     { return false; }
 extern "C" bool VR_PrimaryPunchRecent(void)    { return false; }
 extern "C" bool VR_SecondaryPunchRecent(void)  { return false; }
+extern "C" bool VR_WeaponSelectHeld(void)      { return false; }
+extern "C" int  VR_TakeWeaponSelectStep(void)  { return 0; }
+extern "C" bool VR_TakeWeaponSelectCommit(void){ return false; }
 extern "C" bool VR_GetAction(void)             { return false; }
 extern "C" bool VR_GetAdvance(void)            { return false; }
 extern "C" bool VR_GetBack(void)               { return false; }

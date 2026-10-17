@@ -252,6 +252,8 @@ short get_player_weapon_ammo_count(short player_index, short which_weapon, short
    readout's trigger to the one held in the matching hand (swaps primary<->secondary). Identity for
    everyone else. Never use for gameplay/firing -- display counts only. */
 short vr_hud_display_trigger(short player_index, short which_weapon, short which_trigger);
+// VR weapon select (display only): the weapon the HUD should show -- the chosen one while the hands are empty.
+short vr_hud_display_weapon(short player_index, short which_weapon);
 
 short get_player_weapon_ammo_maximum(short player_index, short which_weapon, short which_trigger);
 int16 get_player_weapon_ammo_type(short player_index, short which_weapon, short which_trigger);

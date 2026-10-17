@@ -1686,7 +1686,7 @@ static int Lua_HUDPlayer_Weapons_Get(lua_State *L)
 	    if (player_has_valid_weapon(current_player_index))
 	    {
 	        player_weapon_data *weapon_data = get_player_weapon_data(current_player_index);
-	        Lua_HUDPlayer_Weapon::Push(L, weapon_data->current_weapon);
+	        Lua_HUDPlayer_Weapon::Push(L, vr_hud_display_weapon(current_player_index, weapon_data->current_weapon));
 	    }
 	    else
 	    {
@@ -1696,9 +1696,10 @@ static int Lua_HUDPlayer_Weapons_Get(lua_State *L)
 	else if (string_arg && (strcmp(lua_tostring(L, 2), "desired") == 0))
 	{
 	    player_weapon_data *weapon_data = get_player_weapon_data(current_player_index);
-	    if (weapon_data->desired_weapon != NONE)
+	    const short desired = vr_hud_display_weapon(current_player_index, weapon_data->desired_weapon);
+	    if (desired != NONE)
 	    {
-	        Lua_HUDPlayer_Weapon::Push(L, weapon_data->desired_weapon);
+	        Lua_HUDPlayer_Weapon::Push(L, desired);
 	    }
 	    else
 	    {
